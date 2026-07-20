@@ -2,13 +2,13 @@
 
 **Date:** 2026-07-20
 
-**Status:** Approved through incremental design review
+**Status:** Approved
 
 **Scope:** Read-only customer-service recommendation MVP with high-risk human handoff
 
 ## 1. Objective
 
-Build a Python service that accepts multi-turn customer messages, determines the customer's business intent and emotional context, retrieves verified evidence through RAG or read-only tool APIs, chooses a versioned response strategy, generates a response with private remote models, validates the response, and returns either a safe answer or a human-handoff notification.
+Build a local multi-model customer-service Agent Harness that accepts multi-turn customer messages, determines the customer's business intent and emotional context, retrieves verified evidence through RAG or read-only tool APIs, chooses a versioned response strategy, generates a response with private remote models, validates the response, and returns either a safe answer or a human-handoff notification.
 
 The service must be diagnosable at node level. Every request must expose a trace that identifies the failed stage, failure reason, precise failure point, retry behavior, and fallback outcome. The system must never store or expose a model's hidden chain-of-thought. It stores structured decision summaries, evidence, reason codes, and model/tool metadata instead.
 
@@ -19,7 +19,8 @@ The service must be diagnosable at node level. Every request must expose a trace
 - Model service: private remote OpenAI/Ollama-compatible endpoint configured only through `.env`.
 - Initial tested model profiles, used as replaceable configuration rather than code-level requirements:
   - `qwen3.6:35b-a3b`: complex strategy and customer-facing generation, with thinking disabled.
-  - `qwen3.5:9b`: intent classification, emotion analysis, structured extraction, and response judging.
+  - `qwen3.5:9b`: intent classification, emotion analysis, structured extraction, and independent secondary promotion judging.
+  - `gemma-4-E4B-it`: primary semantic response and promotion judge; `gemma-4-12B-it` is the configured quality fallback if calibration is insufficient.
   - `qwen3:embedding:0.6b`: embeddings.
 - Multiple model calls are allowed; larger models than the listed 35B-A3B are not required.
 - Business data is not copied into local customer, product, order, or CRM master tables.
@@ -28,14 +29,22 @@ The service must be diagnosable at node level. Every request must expose a trace
 - High-risk situations are handed to a person through a signed generic Webhook.
 - Entry points: REST API and a lightweight browser Test Console.
 - Performance is measured as a baseline. The initial release has no hard latency gate.
+- Local/demo deployment uses Docker Compose with PostgreSQL/pgvector, migration, application, worker, and demo frontend services. Remote model servers remain external and replaceable.
 - Conversation text is retained for 30 days without masking. Structured trace/audit records are retained for 180 days.
 - Passwords, API keys, Authorization headers, Cookies, and database connection strings are never logged.
 
 ## 3. Architecture Decision
 
-Use a **Deterministic Turn Orchestrator + Typed Nodes + Model Advisors** with explicit state transitions. Do not use a free-running tool-calling agent or LangGraph for the MVP.
+Use a **Local Multi-Model Agent Harness** implemented as a **Fixed Turn Pipeline + Typed Nodes + Model Advisors**. The MVP does not implement a reusable orchestrator, workflow DSL, dynamic graph, plugin system, or LangGraph runtime.
 
-Each node has one responsibility, consumes and produces Pydantic models, and records its own span. The orchestrator controls retries, skips, fallbacks, and handoff. Models can classify or generate only inside their assigned node; they cannot choose arbitrary actions or write business data.
+The Harness has two isolated execution surfaces:
+
+- **Runtime Harness:** serves customer turns, executes retrieval/tools, validates responses, records traces, and creates handoff events.
+- **Evaluation Harness:** replays versioned datasets and failure clusters, evaluates candidates, runs deterministic gates and independent model judges, and records promotion evidence. It cannot activate a candidate directly.
+
+Both surfaces reuse typed node contracts, model adapters, and trace schemas, but use separate concurrency budgets and entry points so offline evaluation cannot starve interactive traffic. "Harness" describes the product boundary; it is not a generic agent framework in the MVP.
+
+Each node has one responsibility, consumes and produces Pydantic models, and records its own span. `TurnPipeline` controls retries, skips, fallbacks, and handoff through explicit Python control flow. Models can classify or generate only inside their assigned node; they cannot choose arbitrary actions or write business data.
 
 ### 3.1 Request State Flow
 
@@ -48,20 +57,20 @@ Each node has one responsibility, consumes and produces Pydantic models, and rec
 7. `evidence_validator`: verify source, freshness, required fields, conflicts, and sufficiency. The system does not guess when evidence is insufficient.
 8. `strategy_selector`: combine policy, intent, conversation mode, emotion, risk, and evidence into a versioned `StrategyDecision` with reason codes.
 9. `response_generator`: use the 35B-A3B model with thinking disabled to generate a response from verified evidence and the selected strategy.
-10. `response_validator`: run deterministic format/policy checks and a 9B semantic judge for grounding, citations, tone, route, and risk.
+10. `response_validator`: run deterministic format/policy checks and the configured Gemma primary semantic judge for grounding, citations, tone, route, and risk. Every `zh-TW` response also requires an independent Qwen Chinese-verifier verdict.
 11. `response_repair`: if the draft is repairable, request one constrained rewrite that addresses only listed failures, then validate once more.
 12. `finalizer`: return a validated response, a conservative factual fallback, or a safe handoff message.
 13. `handoff_notifier`: create an outbox event and deliver a signed Webhook without blocking the safe customer response.
 
 Every transition records `started`, `completed`, `failed`, or `skipped`. Repair is limited to one attempt to prevent loops.
 
-### 3.2 Orchestrator Responsibilities
+### 3.2 TurnPipeline Responsibilities
 
-The Orchestrator owns control flow. It enforces node order, branching, request deadlines, call budgets, cancellation, retry limits, idempotency, fallback, and handoff. It preserves request-scoped state and short-lived strategy state such as “do not probe this direction for the next two turns.” It writes a span for every node and queue wait.
+`TurnPipeline` is an application service with explicit Python calls and branches. It enforces node order, request deadlines, call budgets, cancellation, retry limits, idempotency, fallback, and handoff. It preserves request-scoped state and short-lived strategy state such as “do not probe this direction for the next two turns.” It writes a span for every node and concurrency wait.
 
-Models are advisors. They return typed classifications, strategy proposals, drafts, or verdicts. They cannot add nodes, reorder the graph, call undeclared tools, execute business actions, override hard risk policies, or retry themselves indefinitely.
+Models are advisors. They return typed classifications, strategy proposals, drafts, or verdicts. They cannot add nodes, reorder the fixed pipeline, call undeclared tools, execute business actions, override hard risk policies, or retry themselves indefinitely.
 
-Independent RAG and tool calls run concurrently inside `evidence_collector`. Required-source failure cancels unnecessary remaining work. The Orchestrator passes the combined evidence to the next node only after validation.
+Independent RAG and tool calls run concurrently inside `evidence_collector`. Required-source failure cancels unnecessary remaining work. `TurnPipeline` passes the combined evidence to the next node only after validation.
 
 ## 4. Conversation Mode, Emotion, and Strategy
 
@@ -110,9 +119,12 @@ Application code addresses model roles, never vendor or model names. The stable 
 - `strategy_advisor`;
 - `response_generator`;
 - `response_judge`;
+- `response_judge_zh_verifier`;
+- `promotion_judge_primary`;
+- `promotion_judge_secondary`;
 - `embedding`.
 
-Each role resolves to a named profile in `config/models.yaml`. The versioned YAML contains no secrets. It defines adapter type, model identifier, capabilities, generation parameters, timeout, concurrency, queue capacity, optional fallback profiles, and model-specific request options. `.env` provides endpoint URLs, credentials, configuration path, and optional per-role overrides.
+Each role resolves to a named profile in `config/models.yaml`. The versioned YAML contains no secrets. It defines adapter type, model identifier, capabilities, generation parameters, timeout, concurrency/admission limits, optional fallback profiles, and model-specific request options. `.env` provides endpoint URLs, credentials, configuration path, and optional per-role overrides.
 
 Configuration precedence is:
 
@@ -149,6 +161,27 @@ profiles:
     temperature: 0.2
     max_concurrency: 2
 
+  gemma_judge:
+    endpoint: private_chat
+    model: gemma-4-E4B-it
+    capabilities: [chat, structured_json, reasoning_toggle]
+    fallback_profiles: [gemma_judge_12b]
+    request_options:
+      enable_thinking: false
+    temperature: 0
+    max_tokens: 512
+    max_concurrency: 2
+
+  gemma_judge_12b:
+    endpoint: private_chat
+    model: gemma-4-12B-it
+    capabilities: [chat, structured_json, reasoning_toggle]
+    request_options:
+      enable_thinking: false
+    temperature: 0
+    max_tokens: 512
+    max_concurrency: 1
+
   semantic_embedding:
     endpoint: private_chat
     model: qwen3:embedding:0.6b
@@ -161,31 +194,38 @@ roles:
   emotion_classifier: fast_structured
   strategy_advisor: quality_generator
   response_generator: quality_generator
-  response_judge: fast_structured
+  response_judge: gemma_judge
+  response_judge_zh_verifier: fast_structured
+  promotion_judge_primary: gemma_judge
+  promotion_judge_secondary: fast_structured
   embedding: semantic_embedding
 ```
 
 Users may replace every example model with another small/private model by changing configuration. A replacement is accepted only when its declared capabilities satisfy the role. Fallback chains are explicit; a missing role never silently inherits another profile.
 
-The adapter interface supports OpenAI-compatible chat/embedding endpoints first. Provider-specific details such as Ollama-style thinking controls or extra request bodies live in the adapter/profile, not in the Orchestrator. Logs record the resolved role, profile, model, adapter, and configuration checksum but never credentials.
+The adapter interface supports OpenAI-compatible chat/embedding endpoints first. Provider-specific details such as Ollama-style thinking controls or extra request bodies live in the adapter/profile, not in `TurnPipeline`. Logs record the resolved role, profile, model, adapter, and configuration checksum but never credentials.
 
 Startup capability probes verify configured model availability, structured JSON behavior where required, reasoning/thinking disable behavior where declared, and embedding dimension. A capability failure either activates an explicitly configured compatible fallback or makes readiness fail. The service embeds a sentinel string and validates its vector dimension against the migration setting before allowing vector writes.
 
-The initially tested routing uses a smaller structured model for classification/judging, a larger but bounded model for complex strategy/generation, and a dedicated embedding model. Model size is not embedded in routing logic. Deterministic rules remain authoritative for high-risk and executable-action boundaries.
+The initially tested routing uses Qwen for classification, Gemma as the primary semantic judge, Qwen as the independent Traditional Chinese verifier and secondary promotion judge, a larger but bounded Qwen model for complex strategy/generation, and a dedicated embedding model. Model size and vendor names are not embedded in routing logic. Deterministic rules remain authoritative for high-risk and executable-action boundaries.
 
-### 5.1 Concurrency, Admission, and Queues
+For runtime validation, non-`zh-TW` responses require deterministic gates plus the Gemma verdict. Every `zh-TW` response requires deterministic gates, an independent Gemma verdict, and an independent Qwen verdict over the same frozen draft and evidence. Neither judge sees the other's output. Both model verdicts must pass before publication. A disagreement on a repairable tone, completeness, or language issue enters the single allowed repair cycle; a disagreement involving risk, unsupported facts, unsupported commitments, citation validity, or tool/evidence grounding causes human handoff. A second disagreement after repair also causes handoff.
 
-Use three separate concurrency mechanisms:
+Each verdict records language, judge role, resolved model profile and checksum, criteria results, confidence, evidence references, bounded decision summary, parsing/repair events, and latency. It does not store hidden chain-of-thought. The Console identifies the exact judge and failed criterion rather than reporting a generic validation failure.
+
+### 5.1 Concurrency, Admission, and Background Jobs
+
+Use three small, concrete concurrency mechanisms:
 
 1. **In-request async fan-out:** `asyncio.TaskGroup` runs independent RAG and read-only tool calls concurrently. Each child has its own timeout, retry policy, cancellation state, and span.
-2. **Interactive bounded queues:** the API uses an admission queue plus endpoint/profile concurrency limiters. Generator, classifier, judge, and embedding work do not share a single FIFO queue. Queue saturation returns HTTP 429 with `Retry-After`; it never grows without bound.
+2. **Interactive admission and semaphores:** one application in-flight limit and an `asyncio.Semaphore` per model profile bound concurrent calls. Semaphore acquisition has a timeout and exposes a waiting-count metric. Saturation returns HTTP 429 with `Retry-After`; the MVP does not implement a standalone interactive queue service or scheduling framework.
 3. **PostgreSQL durable jobs:** notification delivery, RAG ingestion/re-embedding, retention, and baseline evaluation run in background workers using `FOR UPDATE SKIP LOCKED`.
 
 Initial safe values are configuration defaults, not performance promises:
 
 ```env
 APP_MAX_IN_FLIGHT_TURNS=16
-APP_TURN_QUEUE_SIZE=32
+MODEL_ACQUIRE_TIMEOUT_MS=5000
 MODEL_ENDPOINT_MAX_CONCURRENCY=6
 GENERATOR_MAX_CONCURRENCY=2
 CLASSIFIER_MAX_CONCURRENCY=4
@@ -194,9 +234,9 @@ EMBEDDING_MAX_CONCURRENCY=8
 EMBEDDING_BATCH_SIZE=32
 ```
 
-Profile/YAML values can replace these role defaults. Endpoint-wide limits still apply when several profiles share one remote server. Trace data includes `queued_at`, `queue_wait_ms`, `started_at`, execution latency, deadline, and cancellation reason. Disconnects and expired deadlines remove work that has not started.
+Profile/YAML values can replace these role defaults. Endpoint-wide limits still apply when several profiles share one remote server. Trace data includes `wait_started_at`, `wait_ms`, `started_at`, execution latency, deadline, and cancellation reason. Disconnects and expired deadlines cancel work that has not acquired capacity.
 
-Do not add Redis, RabbitMQ, Kafka, or Celery for the MVP. Define a `JobQueue` interface so PostgreSQL can be replaced later without changing Orchestrator nodes.
+Do not add Redis, RabbitMQ, Kafka, Celery, a generic queue abstraction, or a replaceable scheduling framework for the MVP. Background workers call a small PostgreSQL job repository directly. Introduce a queue abstraction only if a second backend is actually required.
 
 ## 6. High-Risk Handoff
 
@@ -220,38 +260,87 @@ The Webhook uses an HMAC signature, bounded timeout, idempotency key, and outbox
 
 - `POST /api/v1/turns`: accepts `session_id`, `customer_id`, optional `case_id`, and `message`; returns `reply`, `trace_id`, citations, conversation mode, and handoff status.
 - `GET /api/v1/traces/{trace_id}`: returns the ordered node waterfall with reasons, precise failure points, retries, and fallback results.
+- `GET /api/v1/traces/{trace_id}/events?after_sequence={n}`: returns ordered events after a sequence number so the Console can incrementally poll an active trace without WebSocket/SSE infrastructure.
+- `POST /api/v1/traces/{trace_id}/retry`: admin-only manual retry for a terminal trace. It requires a reason, creates a new full-turn execution linked to the original trace, and returns the new `trace_id`; it never mutates or resumes the original trace.
 - `GET /api/v1/health`: returns liveness/readiness for PostgreSQL, pgvector, model roles, RAG, tools, and notification delivery.
 - `GET /console`: serves the lightweight internal Test Console.
 
 The chat API uses a configured bearer token outside development. Trace endpoints require an internal/admin token. The Console reads tokens from server-side configuration and never embeds model or database credentials in client JavaScript.
 
-### 7.2 Console Features
+### 7.2 Incident-First Demo Console
 
-- multi-turn chat and preset customer-service cases;
-- response citations and handoff state;
-- node waterfall with duration and status;
-- expandable model, tool, decision, validation, and notification events;
-- error reason and exact error point;
-- model configuration and dependency health without secrets;
-- emotion-baseline labeling mode.
+Use the approved **Incident-first** layout. The default view answers three questions before showing raw logs: what failed, why it failed, and what the system did next.
 
-Use server-rendered static HTML/CSS/JavaScript for the MVP; do not add a frontend framework.
+The screen contains:
+
+1. **Trace header:** trace/session ID, overall status, language, start time, total duration, active configuration checksum, final reply/handoff state, and copy-trace-link action.
+2. **Issue summary card:** deterministic `IssueSummary` with severity, failed node, component/operation, error code, plain-language explanation, precise failure point, customer impact, retry/repair outcome, and final fallback/handoff action. It links to the primary failure event.
+3. **Horizontal pipeline:** ordered typed nodes run left to right with connectors and horizontal overflow on narrow screens. Each node shows icon/text status, short name, duration, and attempt count. The selected node has a high-contrast outline; failed nodes remain visibly marked even when not selected.
+4. **Details below the flow:** clicking a pipeline node selects it and opens one full-width detail panel directly below the horizontal flow. The panel uses predictable sections: purpose/status/timing, typed input summary, typed output summary, structured decision and reason codes, evidence/tool/model dependencies, attempts and retries, errors/fallbacks, and child events. Empty sections are omitted. The failed field or operation is highlighted and linked to the exact event. If the trace has errors, the primary causal failure node is selected and its detail panel is open by default. If there is no error, no detail panel is initially open. Clicking the selected node again collapses the panel; pinning opens comparison cards inside the same lower panel rather than expanding the horizontal row vertically.
+5. **Event explorer:** chronological event list on the left and selected-event details on the right. Decision, model, tool, validation, retry, repair, and notification events use distinct typed renderers instead of displaying undifferentiated JSON.
+6. **Payload disclosure:** concise human-readable fields appear first; request/response summaries, evidence references, model/profile/checksum, tool parameters/results, and versioned JSON payloads are expandable. Hidden chain-of-thought and secrets never appear.
+7. **Conversation and evidence context:** the relevant customer turn, generated draft, final response, cited evidence, tool result, and judge verdicts can be compared without leaving the trace.
+8. **Filters:** trace/session ID, status, node, component, event type, error code, judge role, model profile, and time range. A `Failures only` toggle is available by default.
+
+Node expansion uses a shared shell with type-specific content:
+
+- classification nodes show labels, confidence, evidence spans, overrides, and reason codes;
+- evidence nodes show planned sources, parallel child calls, freshness, conflicts, sufficiency, and citation mappings;
+- strategy nodes show the selected strategy/version, applicable policy rules, rejected alternatives by reason code, and response constraints;
+- generation nodes show model/profile, prompt/template version, bounded parameters, token/latency data, evidence IDs supplied, and generated draft;
+- validation nodes show deterministic checks and separate Gemma/Qwen criterion matrices, disagreements, failed fields, and repair instructions;
+- handoff nodes show trigger reasons, outbox state, attempts, idempotency key, signature metadata without secrets, and downstream response.
+
+Input/output summaries come from explicit per-node presenter functions over typed contracts; the frontend does not infer meaning from arbitrary JSON. Large text and arrays are collapsed with item counts, searchable, and available in a final raw-data disclosure. A node deep link includes `trace_id`, `span_id`, and optional `event_sequence`, so a copied link opens the same expanded context.
+
+The hierarchy is progressive:
+
+- Level 1: issue, impact, and outcome;
+- Level 2: pipeline and chronological events;
+- Level 3: exact typed fields and expandable JSON.
+
+The active trace polls the incremental event endpoint using the latest sequence number and exponential idle backoff. Polling stops when the trace reaches a terminal state or the page is hidden. Each update preserves the selected event and scroll position. The MVP does not use WebSocket or SSE.
+
+Selected-node/detail-panel state is client-side UI state and is preserved across incremental polling. Automatic error focus runs only on initial trace load, when changing trace, or when the currently viewed running trace first enters a failed terminal state; it never repeatedly steals focus after the user manually selects another node. Nodes support mouse, touch, `Enter`, and `Space`, expose `aria-selected`/`aria-expanded`/`aria-controls`, and keep the error state visible while the detail panel is closed.
+
+### 7.3 Automatic and Manual Retry
+
+Automatic retry is allowed only for explicitly classified transient failures: dependency timeout, connection reset, HTTP 408/429, selected 5xx responses, PostgreSQL serialization/deadlock errors, and one malformed structured-model response repair. Validation, safety, insufficient-evidence, unsupported-claim, authentication/authorization, contract 4xx, and deterministic policy failures are not retried automatically.
+
+Each component declares `max_attempts`, per-attempt timeout, total retry budget, retryable error codes, and capped exponential backoff with jitter. The default is one attempt; remote model/tool calls may use at most three total attempts when their profile enables retry. The total turn deadline always wins. Every attempt records `attempt_id`, start/end time, wait/backoff, error code, dependency request ID when available, and outcome under the same span. Exhaustion records `retry_exhausted` and the next fallback/handoff action.
+
+Manual retry uses full-turn replay only. The Console shows `Retry entire turn` for authenticated admins when the trace is terminal. A confirmation dialog requires a human reason and explains that the retry:
+
+- creates a new trace with `retry_of_trace_id`, initiator, reason, and retry sequence;
+- reuses the original customer message, captured conversation-context snapshot, and prompt/policy/model/RAG artifact versions;
+- performs fresh read-only tool calls so transient or time-varying business data can recover;
+- does not automatically send a second customer reply; the replay result is marked `review_required` in the Demo Console;
+- does not create a duplicate handoff notification when the original idempotency key already has a queued or delivered outbox record.
+
+Manual retry is rejected for running traces, missing/expired input snapshots, unauthorized users, exceeded per-trace retry limit, or artifact versions that can no longer be resolved. The default manual limit is three retries per root trace and is configurable. A retry chain is displayed as `root → retry 1 → retry 2`; each trace remains immutable and independently diagnosable. Notification delivery has its own outbox retry controls and is not implemented by replaying the customer turn.
+
+Status never relies on color alone: every state has text and an icon. Failed nodes use high-contrast borders and labels; selected nodes remain readable in dark and light browser themes. Timestamps display local time with the original ISO value available on hover. Durations use consistent milliseconds/seconds formatting.
+
+`IssueSummary` is computed from typed failures and terminal outcomes, not generated by an LLM. If several failures occur, the Console identifies the primary causal failure and separately lists downstream/cancellation events. The user can copy a redacted-by-secret-policy trace JSON bundle for debugging; ordinary customer data remains unmasked by the confirmed retention policy.
+
+Other Console capabilities remain multi-turn chat, preset cases, citations, dependency/model health, emotion-baseline labeling, and read-only improvement history. Candidate approval, activation, and rollback use authenticated CLI commands in the MVP.
+
+Use server-rendered static HTML/CSS/JavaScript for the MVP; do not add a frontend framework or charting dependency.
 
 ## 8. PostgreSQL and pgvector
 
 Use one PostgreSQL service with separate schemas:
 
 - `rag.documents`: document identity, source, version, checksum, valid dates, access metadata, and ingestion state.
-- `rag.chunks`: document reference, ordinal, content, metadata, embedding, and created timestamp. Use cosine distance and an HNSW index.
+- `rag.chunks`: document reference, ordinal, content, metadata, embedding, and created timestamp. Use exact cosine search in the MVP; add HNSW only after measured corpus size or latency requires it.
 - `runtime.conversations`: session identity and expiry.
 - `runtime.turns`: user/assistant text, citations, trace reference, and expiry. Raw conversation retention is 30 days.
-- `observability.traces`: request-level status and timestamps.
+- `observability.traces`: request-level status, timestamps, terminal outcome, optional primary failure event reference used to build the deterministic `IssueSummary`, and immutable retry lineage (`root_trace_id`, `retry_of_trace_id`, `retry_sequence`, initiator, reason, delivery disposition).
 - `observability.spans`: node-level parent/child relationships, status, duration, attempts, and failure location.
-- `observability.events`: structured node input/output summaries and decision events.
-- `observability.model_calls`: role, model, prompt/template version, parameters, token counts, server latency, finish reason, and safe error details.
-- `observability.tool_calls`: tool, parameter/result summary, source freshness, HTTP status, retries, and safe error details.
+- `observability.events`: monotonically sequenced typed decision, model-call, tool-call, validation, retry/repair, and notification events. Common indexed columns hold sequence, event type, component, status, error code, and timestamps; versioned JSONB payloads hold type-specific fields. This avoids separate model/tool tables until query volume proves they are needed.
 - `notification.outbox`: signed handoff payload, idempotency key, attempts, next-attempt time, and delivery state.
 - `runtime.jobs`: durable background work with type, priority, payload, status, available time, attempts, lock owner/time, idempotency key, and last precise error location.
+- `improvement.iteration_events`: append-only lifecycle records for improvement candidates, tests, human approval, activation, rejection, and rollback.
 
 Embeddings are stored only in pgvector columns. Trace and outbox data use ordinary PostgreSQL columns and JSONB where schema evolution is necessary. Database changes are explicit Alembic migrations; the runtime never silently creates or alters production tables.
 
@@ -286,7 +375,7 @@ Errors use a typed `AgentError` containing:
 - exception type, source file, and source line in development/internal traces only;
 - full stack trace in server logs only, never in the customer response.
 
-Structured logs are emitted as JSON to stdout and rotating files. PostgreSQL is the queryable trace store. An OTLP exporter is optional through environment configuration.
+Structured logs are emitted as JSON to stdout. PostgreSQL is the queryable trace store. Rotating application log files, an OTLP exporter, and an OpenTelemetry collector are deferred until an operational need and destination exist.
 
 The system never stores raw chain-of-thought. “Thinking log” means structured decision summary, selected/rejected reason codes, evidence references, and validation outcomes.
 
@@ -306,7 +395,7 @@ Adapt:
 - `RoleConfig` into Pydantic Settings;
 - `OpenAICompatibleClient` into an async pooled HTTP client with tracing;
 - `TurnJudgment`, `ToolResult`, `ReplyAudit`, and `AgentTurnResult` into expanded Pydantic contracts;
-- pgvector cosine/HNSW concepts into migrated `rag` schema;
+- pgvector cosine-search concepts into the migrated `rag` schema; defer HNSW until measurement requires it;
 - the handoff adapter into the signed Webhook/outbox implementation.
 
 Do not copy directly:
@@ -335,7 +424,7 @@ Adapt or reject:
 - do not use keyword-only denial detection;
 - replace PowerShell execution and `REASON:/REPLY:` parsing with Python and Pydantic JSON;
 - do not store native thinking output;
-- guard against observed 35B long-form essay failures using schema/output limits, deterministic checks, a 9B judge, one repair, and fallback.
+- guard against observed 35B long-form essay failures using schema/output limits, deterministic checks, the configured Gemma semantic judge, one repair, and fallback.
 
 ## 12. Emotion Baseline Labeling
 
@@ -354,20 +443,173 @@ After submission, show model labels and differences. Prioritize low-confidence s
 
 After all labels are complete, create a stratified 42-item development set and an 18-item locked test set. Prompt and policy iteration use only the development set. The initial target is macro-F1 at least 0.80 on non-ambiguous locked items, with 100% recall for safety overrides in the locked set. Because 60 samples are small, report per-class counts and confidence intervals alongside the score and expand the set over time.
 
-## 13. Testing and Acceptance
+## 13. Offline Improvement and Promotion
 
-### 13.1 Test Layers
+Improvement is offline and requires human approval. Models may propose prompt, policy, threshold, RAG, or model-profile candidates; they cannot edit application code, apply database migrations, activate a version, or modify production behavior directly.
+
+### 13.1 Candidate Sources
+
+- low-confidence classifications and model disagreements;
+- deterministic or semantic validator failures;
+- constrained repairs and conservative fallbacks;
+- RAG no-answer, stale-source, or conflict outcomes;
+- model, tool, database, admission/concurrency, background-job, and Webhook failures;
+- human handoffs and explicit negative feedback;
+- errors in the labeled emotion baseline or golden regression sets.
+
+Candidate records may store embeddings in pgvector so a reviewer can run similarity searches. Automatic clustering, automatic proposal generation, and cluster-management UI are deferred. Proposals reference trace IDs and reviewed summaries rather than copying unreviewed production conversations into system prompts.
+
+### 13.2 Versioned Artifacts
+
+Every candidate records immutable references and checksums for:
+
+- prompt templates;
+- strategy policies;
+- risk rules and thresholds;
+- RAG document versions;
+- Model Registry configuration;
+- development, locked-test, and golden-safety datasets;
+- evaluation code and metric schema.
+
+The candidate also records its parent version, rationale, source traces/clusters, proposer, before/after metrics, approver, activation time, and rollback target.
+
+### 13.3 Append-Only Improvement Ledger
+
+Use one append-only table:
+
+```sql
+CREATE SCHEMA IF NOT EXISTS improvement;
+
+CREATE TABLE improvement.iteration_events (
+  id BIGSERIAL PRIMARY KEY,
+  iteration_id UUID NOT NULL,
+  sequence INTEGER NOT NULL,
+  event_type TEXT NOT NULL CHECK (event_type IN (
+    'candidate_created', 'candidate_updated', 'evaluation_started',
+    'evaluation_completed', 'adjudicated', 'rejected', 'approved', 'activated',
+    'rollback_requested', 'rolled_back'
+  )),
+  status TEXT NOT NULL CHECK (status IN (
+    'pending', 'running', 'passed', 'failed', 'needs_adjudication', 'rejected',
+    'approved', 'active', 'rolled_back'
+  )),
+  parent_iteration_id UUID,
+  rollback_target_id UUID,
+  title TEXT,
+  reason TEXT,
+  change_types TEXT[] NOT NULL DEFAULT '{}',
+  source_trace_ids UUID[] NOT NULL DEFAULT '{}',
+  failure_clusters JSONB NOT NULL DEFAULT '[]',
+  proposed_changes JSONB NOT NULL DEFAULT '{}',
+  artifact_refs JSONB NOT NULL DEFAULT '{}',
+  model_config_checksum TEXT,
+  dataset_versions JSONB NOT NULL DEFAULT '{}',
+  metrics_before JSONB NOT NULL DEFAULT '{}',
+  metrics_after JSONB NOT NULL DEFAULT '{}',
+  gate_results JSONB NOT NULL DEFAULT '{}',
+  actor_type TEXT NOT NULL CHECK (actor_type IN ('system', 'model', 'human', 'worker')),
+  actor_id TEXT NOT NULL,
+  audit_trace_id UUID,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (iteration_id, sequence)
+);
+```
+
+Allowed `event_type` values are `candidate_created`, `candidate_updated`, `evaluation_started`, `evaluation_completed`, `adjudicated`, `rejected`, `approved`, `activated`, `rollback_requested`, and `rolled_back`. An `adjudicated` event must have a human actor, the disputed criterion verdicts, and the same candidate/artifact checksums as the evaluation it resolves. Allowed actor types are `system`, `model`, `human`, and `worker`.
+
+Application roles may insert events but cannot update or delete existing rows. Improvement records are retained indefinitely. They reference production traces rather than duplicating full conversations. A SQL view selects the latest event per iteration for Console display and activation checks.
+
+Indexes cover `(iteration_id, sequence)`, `(status, created_at DESC)`, GIN `source_trace_ids`, and GIN `change_types`.
+
+### 13.4 Mandatory Promotion Gate
+
+Before activation, a candidate runs a versioned promotion suite against the exact artifact and configuration checksums that would be activated:
+
+1. configuration/schema validation and startup capability probes;
+2. affected unit and contract tests;
+3. PostgreSQL migration compatibility and pgvector dimension checks;
+4. full pipeline E2E tests with mock RAG/tools/models/Webhook;
+5. golden safety set with 100% high-risk handoff recall and zero unsupported commitments/actions;
+6. intent and tool-route accuracy of at least 95%;
+7. RAG citation precision of at least 95%;
+8. the locked 18-item emotion test set with macro-F1 at least 0.80 and 100% safety-override recall;
+9. replay of source failure clusters plus the general regression set;
+10. admission, concurrency, background-job, retry, idempotency, fallback, exact-error-location, and rollback tests;
+11. opt-in live model smoke/evaluation when the candidate changes a model profile, prompt, or provider adapter.
+
+Promotion semantic evaluation uses two independently configured model families:
+
+1. Gemma is the **primary judge** and produces the canonical structured verdict, failed criteria, evidence references, confidence, and bounded decision summary.
+2. Qwen is the **secondary judge** and independently evaluates the same frozen candidate output without seeing the Gemma verdict.
+3. A deterministic hard-gate failure always fails the candidate, regardless of either model verdict.
+4. If both judges pass, the candidate becomes eligible for human approval; model agreement never activates it automatically.
+5. If the judges disagree, the evaluation status is `needs_adjudication` and a human must resolve the disputed criteria in an append-only `adjudicated` event. The system must not average scores into an automatic pass.
+6. The exact judge profile, model identifier, prompt/schema version, configuration checksum, raw structured verdict, and parser/repair events are stored with the evaluation record.
+
+Gemma judge adoption requires calibration against Traditional Chinese, safety, grounding, citation, and unsupported-commitment examples labeled by a human. False-pass rate is the primary selection metric. Start with the configured E4B instruct profile; switch the profile to the 12B instruct fallback only if it fails the calibration threshold. These identifiers are deployment aliases and remain replaceable through the Model Registry.
+
+An `evaluation_completed` event contains suite version, source commit, dataset checksums, artifact checksums, per-gate results, metrics, failures, duration, and worker identity. Any failed hard gate makes the evaluation fail. Performance remains report-only until capacity baselines establish explicit limits, but catastrophic output, timeout, admission, semaphore, or background-job regressions are shown to the reviewer.
+
+An `approved` event requires `actor_type = 'human'`. An `activated` event is accepted only when:
+
+- the latest evaluation for the same iteration passed every hard gate, with any judge disagreement resolved by a later checksum-matched human `adjudicated` event;
+- the evaluated artifact/configuration/dataset checksums still match the candidate;
+- a later human approval exists for those same checksums;
+- no later rejection or candidate modification invalidated the result.
+
+Authenticated `uv run` CLI commands call one promotion service for approval, activation, and rollback. The service validates the append-only ledger and checksums, then activates in one transaction with an advisory lock. New turns resolve the new active version after commit; in-flight turns retain their captured version. Rollback inserts new `rollback_requested` and `rolled_back` events and atomically restores the recorded target version. A duplicate PostgreSQL trigger/function enforcement layer is deferred until deployment risk justifies it.
+
+## 14. Docker Compose and README
+
+### 14.1 Compose Services
+
+- `postgres`: PostgreSQL with pgvector, persistent volume, readiness check, and no automatic public exposure outside development.
+- `migrate`: one-shot Alembic upgrade; application services start only after it succeeds.
+- `app`: FastAPI API, fixed `TurnPipeline`, health endpoints, and internal Trace API.
+- `worker`: the same Python image with a different command; claims notification, RAG ingestion, retention, evaluation, and improvement jobs through PostgreSQL `SKIP LOCKED`.
+- `frontend`: separate lightweight demo frontend container that proxies same-origin API/Console requests.
+- `demo-seed`: optional Compose profile that loads mock tool fixtures, example RAG documents, and the 60 labeling candidates.
+
+Remote model services are external to Compose. Containers receive endpoint/config paths through `.env` and `config/models.yaml`. Compose includes explicit networks, named volumes, health checks, restart policy, read-only mounts where possible, and a non-root application user. Images are pinned to versions/digests during implementation rather than using floating `latest` tags.
+
+Add `Dockerfile`, `compose.yaml`, `.dockerignore`, `.env.example`, `config/models.example.yaml`, and documented development/production override files. Secrets are never baked into images or committed.
+
+### 14.2 README Contents
+
+The root `README.md` must document:
+
+1. purpose, read-only limitations, architecture, fixed `TurnPipeline`, and trust boundaries;
+2. Docker/Compose prerequisites and optional local `uv` development prerequisites;
+3. quick start, configuration copy steps, migration, demo seed, and shutdown;
+4. every `.env.example` system, admission/concurrency, database, Webhook, authentication, retention, and observability setting;
+5. Model Registry roles, profiles, capabilities, fallback chains, adapter options, and environment override precedence;
+6. replacing classifier, judge, generator, strategy, and embedding models without code changes;
+7. Compose services, profiles, ports, networks, volumes, health checks, and external model connectivity;
+8. pgvector schema, migrations, embedding-dimension probe, ingestion, re-embedding, and backup/restore;
+9. mock data and demo frontend workflows;
+10. REST contracts, authentication, citations, trace lookup, and signed Webhook validation;
+11. async fan-out, admission/semaphore limits, HTTP 429, PostgreSQL jobs, and worker recovery;
+12. structured thinking/decision summaries, model/tool logs, precise failure locations, retention, and stdout log collection;
+13. the 60-item human-labeling workflow, dataset split, metrics, and locked-test rule;
+14. improvement candidates, append-only ledger, promotion tests, human approval, activation, and rollback;
+15. unit, integration, E2E, failure-injection, promotion, and opt-in live-model commands;
+16. troubleshooting for model connectivity, structured JSON, vector dimension, migrations, admission saturation, stuck PostgreSQL jobs, RAG freshness, tool timeout, and Webhook failure;
+17. a production-readiness checklist.
+
+## 15. Testing and Acceptance
+
+### 15.1 Test Layers
 
 - Unit tests for every node, Pydantic contract, strategy rule, risk rule, and error mapping.
 - Contract tests shared by mock and remote RAG/tool/model/Webhook adapters.
-- PostgreSQL integration tests for migrations, vector dimension, cosine search, HNSW, retention, and outbox delivery.
-- Pipeline E2E tests for success, low confidence, no RAG answer, tool timeout, malformed model JSON, generation failure, one repair, fallback, and handoff.
-- Concurrency tests for admission saturation, HTTP 429/`Retry-After`, endpoint/profile limits, queue cancellation, embedding batching, `SKIP LOCKED` worker claims, and idempotent job recovery.
+- PostgreSQL integration tests for migrations, vector dimension, exact cosine search, retention, and outbox delivery.
+- Pipeline E2E tests for success, low confidence, no RAG answer, tool timeout, malformed model JSON, generation failure, automatic retry exhaustion, one repair, fallback, handoff, and full-turn manual retry lineage.
+- Concurrency tests for admission saturation, HTTP 429/`Retry-After`, endpoint/profile semaphore limits, waiting-request cancellation, embedding batching, `SKIP LOCKED` worker claims, and idempotent job recovery.
 - Failure injection at every node to verify the trace identifies the correct `failure_stage`, component, operation, and field/endpoint.
 - Opt-in live-model evaluation isolated from the ordinary suite.
 - Conversation-quality evaluation using adapted RULER scenarios plus grounding, citation, route, and handoff measures.
 
-### 13.2 MVP Gates
+### 15.2 MVP Gates
 
 - High-risk handoff recall is 100% on the curated safety set.
 - No golden-set response contains an unsupported price, delivery, contract, refund, action, or handoff claim.
@@ -375,12 +617,14 @@ After all labels are complete, create a stratified 42-item development set and a
 - RAG citation precision is at least 95%.
 - Every injected failure is visible at the correct trace node and precise error point.
 - Webhook signature, idempotency, retry, and outbox recovery tests pass.
+- Manual retry creates an immutable linked trace, enforces authorization/limits, refreshes only live read-only tools, never delivers a second customer reply automatically, and never duplicates a queued/delivered handoff.
 - Ordinary tests make no production model, RAG, tool, or Webhook calls.
 - Emotion macro-F1 target is at least 0.80 and locked safety-override recall is 100%.
-- Latency, queue time, token counts, and throughput are recorded as a baseline; a later capacity review sets P95 release limits.
-- Replacing every example Qwen profile with contract-test fakes requires no application-code change, proving routing is role/capability based.
+- Latency, capacity-wait time, token counts, and throughput are recorded as a baseline; a later capacity review sets P95 release limits.
+- Replacing every example model profile with contract-test fakes requires no application-code change, proving routing is role/capability based.
+- No improvement version can activate without checksum-matched passing promotion results and a later human approval event.
 
-## 14. Out of Scope
+## 16. Out of Scope
 
 - Creating or modifying orders, appointments, refunds, accounts, or CRM records.
 - Autonomous browser or desktop actions.
@@ -389,11 +633,17 @@ After all labels are complete, create a stratified 42-item development set and a
 - A production customer-facing frontend, SSO, or full contact-center dashboard.
 - Automatic long-term customer-profile memory.
 - Raw hidden model reasoning capture.
+- Autonomous production prompt/policy activation, autonomous application-code changes, or autonomous model-weight training.
+- A reusable orchestrator, workflow DSL, dynamic graph editor, plugin runtime, or general-purpose agent SDK.
 
-## 15. Delivery Sequence
+An orchestrator may be reconsidered after the fixed pipeline is operational only if there are at least two materially different workflows, runtime-configurable graph requirements, or durable pause/resume workflows that cannot be expressed clearly with the existing service and PostgreSQL jobs. It must replace demonstrated duplication or operational pain rather than being introduced for hypothetical flexibility.
 
-1. Foundation: `uv` project, settings, contracts, flexible Model Registry, PostgreSQL/pgvector migrations, trace/error model, queues, and health checks.
-2. Vertical pipeline: deterministic Turn Orchestrator, typed nodes, mock RAG/tools, capability-based model router, strategy, validation, fallback, and handoff outbox.
-3. Console and diagnosis: chat UI, trace waterfall, exact error point, health display, and failure injection.
-4. Quality: reused scenarios, 60-item labeling workflow, locked baseline evaluation, and live-model opt-in suite.
-5. Remote integration: populate `.env`, validate model capabilities/dimensions, replace mocks one adapter at a time, and record performance baseline.
+## 17. Delivery Sequence
+
+1. Foundation: `uv` project, settings, contracts, flexible Model Registry, PostgreSQL/pgvector migrations, trace/error model, admission/semaphore limits, background jobs, and health checks.
+2. Vertical pipeline: fixed `TurnPipeline`, typed nodes, mock RAG/tools, capability-based model router, strategy, validation, fallback, and handoff outbox.
+3. Container delivery: production-shaped Dockerfile, Compose services, migrations, worker, frontend, demo seed, health checks, and root README.
+4. Console and diagnosis: chat UI, horizontal trace flow, expandable node details, automatic/manual retry visibility, exact error point, health display, and failure injection.
+5. Quality: reused scenarios, 60-item labeling workflow, locked baseline evaluation, and live-model opt-in suite.
+6. Improvement lifecycle: append-only ledger, manual similarity search, evaluation jobs, mandatory promotion gate, human approval, CLI-based atomic activation, and rollback. Automatic clustering remains deferred.
+7. Remote integration: populate `.env`, validate model capabilities/dimensions, replace mocks one adapter at a time, and record performance baseline.
