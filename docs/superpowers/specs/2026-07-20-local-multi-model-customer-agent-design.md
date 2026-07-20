@@ -17,20 +17,21 @@ The service must be diagnosable at node level. Every request must expose a trace
 - Backend: Python 3.12, FastAPI, Pydantic v2.
 - Package and virtual-environment management: `uv` with a committed `uv.lock`.
 - Model service: private remote OpenAI/Ollama-compatible endpoint configured only through `.env`.
-- Initial tested model profiles, used as replaceable configuration rather than code-level requirements:
-  - `qwen3.6:35b-a3b`: complex strategy and customer-facing generation, with thinking disabled.
-  - `qwen3.5:9b`: intent classification, emotion analysis, structured extraction, and independent secondary promotion judging.
-  - `gemma-4-E4B-it`: primary semantic response and promotion judge; `gemma-4-12B-it` is the configured quality fallback if calibration is insufficient.
-  - `qwen3:embedding:0.6b`: embeddings.
+- Planned private-endpoint aliases, used as replaceable configuration rather than code-level requirements and not considered verified until the Model Inventory Gate succeeds:
+  - `qwen3.6:35b-a3b` (expected upstream `Qwen/Qwen3.6-35B-A3B`): complex strategy and customer-facing generation, with thinking disabled.
+  - `qwen3.5:9b` (expected upstream `Qwen/Qwen3.5-9B`): intent/emotion classification, structured extraction, Traditional Chinese verification, and independent secondary promotion judging.
+  - `gemma-4-E4B-it` (expected upstream `google/gemma-4-E4B-it`): primary semantic response and promotion judge; `gemma-4-12B-it` (expected upstream `google/gemma-4-12B-it`) is the configured quality fallback if calibration is insufficient.
+  - `qwen3:embedding:0.6b` (expected upstream `Qwen/Qwen3-Embedding-0.6B`): embeddings.
 - Multiple model calls are allowed; larger models than the listed 35B-A3B are not required.
 - Business data is not copied into local customer, product, order, or CRM master tables.
 - Business facts come only from RAG or read-only tool APIs. MVP integrations use typed mock adapters.
 - MVP returns advice only. It cannot create orders, appointments, refunds, or CRM updates.
 - High-risk situations are handed to a person through a signed generic Webhook.
 - Entry points: REST API and a lightweight browser Test Console.
+- Every customer/session-scoped request is authorized against an authenticated principal and tenant. A request body identifier is never accepted as authority to access another customer's context or tools.
 - Performance is measured as a baseline. The initial release has no hard latency gate.
 - Local/demo deployment uses Docker Compose with PostgreSQL/pgvector, migration, application, worker, and demo frontend services. Remote model servers remain external and replaceable.
-- Conversation text is retained for 30 days without masking. Structured trace/audit records are retained for 180 days.
+- Conversation text, including high-risk turns, is retained for 30 days without masking by explicit product risk acceptance. Structured trace/audit records are retained for 180 days. Access controls and data-location rules below still apply.
 - Passwords, API keys, Authorization headers, Cookies, and database connection strings are never logged.
 
 ## 3. Architecture Decision
@@ -48,9 +49,9 @@ Each node has one responsibility, consumes and produces Pydantic models, and rec
 
 ### 3.1 Request State Flow
 
-1. `input_gate`: validate input size, identifiers, authentication, and prompt-injection indicators; create `trace_id` and request context.
+1. `input_gate`: validate input size, prompt-injection indicators, and an `AuthenticatedPrincipal`; bind tenant, customer, session, and case identifiers before any context/RAG/tool access; create `trace_id` and request context.
 2. `context_loader`: load the retained conversation window and applicable policy versions.
-3. `dialogue_classifier`: use the 9B model to produce business intent, conversation mode, urgency, language, and emotion assessment.
+3. `dialogue_classifier`: make one 9B structured-model call that produces business intent, conversation mode, urgency, language, and the `EmotionAssessment` defined below.
 4. `risk_precheck`: apply deterministic high-risk rules before retrieval or generation.
 5. `evidence_planner`: determine required RAG collections and read-only tools with typed parameters and freshness requirements.
 6. `evidence_collector`: call independent RAG/tool sources concurrently with bounded timeouts and retries.
@@ -75,6 +76,8 @@ Independent RAG and tool calls run concurrently inside `evidence_collector`. Req
 ## 4. Conversation Mode, Emotion, and Strategy
 
 Emotion analysis is an MVP feature but cannot override the customer's actual business request.
+
+The MVP does not have a separate emotion-classifier node or model role. `dialogue_classifier` returns intent and emotion in one typed response to avoid duplicate inference and inconsistent labels. A separate role is added only if later evaluation demonstrates that a dedicated model materially improves the baseline enough to justify another call.
 
 ### 4.1 Conversation Mode
 
@@ -115,7 +118,6 @@ Low confidence, conflicting signals, or absent evidence produce `unknown`; the s
 Application code addresses model roles, never vendor or model names. The stable roles are:
 
 - `dialogue_classifier`;
-- `emotion_classifier`;
 - `strategy_advisor`;
 - `response_generator`;
 - `response_judge`;
@@ -150,7 +152,7 @@ profiles:
     request_options:
       enable_thinking: false
     temperature: 0
-    max_concurrency: 4
+    max_concurrency: 3
 
   quality_generator:
     endpoint: private_chat
@@ -186,12 +188,11 @@ profiles:
     endpoint: private_chat
     model: qwen3:embedding:0.6b
     capabilities: [embedding]
-    max_concurrency: 8
+    max_concurrency: 4
     batch_size: 32
 
 roles:
   dialogue_classifier: fast_structured
-  emotion_classifier: fast_structured
   strategy_advisor: quality_generator
   response_generator: quality_generator
   response_judge: gemma_judge
@@ -205,7 +206,9 @@ Users may replace every example model with another small/private model by changi
 
 The adapter interface supports OpenAI-compatible chat/embedding endpoints first. Provider-specific details such as Ollama-style thinking controls or extra request bodies live in the adapter/profile, not in `TurnPipeline`. Logs record the resolved role, profile, model, adapter, and configuration checksum but never credentials.
 
-Startup capability probes verify configured model availability, structured JSON behavior where required, reasoning/thinking disable behavior where declared, and embedding dimension. A capability failure either activates an explicitly configured compatible fallback or makes readiness fail. The service embeds a sentinel string and validates its vector dimension against the migration setting before allowing vector writes.
+Before any live-model integration is accepted, a **Model Inventory Gate** queries the configured endpoint's model-list API (`/v1/models`, Ollama-compatible tags, or an adapter-specific equivalent), requires an exact configured alias match, and records the server-reported identifier/digest when available. It then runs bounded sample calls for chat, structured JSON, thinking disable behavior, and embeddings. There is no fuzzy alias matching or silent substitution. Until the private `.env` is supplied and this gate passes, these names remain planned aliases and development uses contract-test fakes/mocks.
+
+The same capability probes run at startup to verify configured model availability, structured JSON behavior where required, reasoning/thinking disable behavior where declared, and embedding dimension. A capability failure either activates an explicitly configured compatible fallback or makes readiness fail. The service embeds a sentinel string and validates its vector dimension against the migration setting before allowing vector writes. The resolved alias, reported upstream identifier/digest, capability result, and configuration checksum are visible in readiness and the Demo Console without credentials.
 
 The initially tested routing uses Qwen for classification, Gemma as the primary semantic judge, Qwen as the independent Traditional Chinese verifier and secondary promotion judge, a larger but bounded Qwen model for complex strategy/generation, and a dedicated embedding model. Model size and vendor names are not embedded in routing logic. Deterministic rules remain authoritative for high-risk and executable-action boundaries.
 
@@ -227,14 +230,15 @@ Initial safe values are configuration defaults, not performance promises:
 APP_MAX_IN_FLIGHT_TURNS=16
 MODEL_ACQUIRE_TIMEOUT_MS=5000
 MODEL_ENDPOINT_MAX_CONCURRENCY=6
-GENERATOR_MAX_CONCURRENCY=2
-CLASSIFIER_MAX_CONCURRENCY=4
-JUDGE_MAX_CONCURRENCY=4
-EMBEDDING_MAX_CONCURRENCY=8
+FAST_STRUCTURED_PROFILE_MAX_CONCURRENCY=3
+GENERATOR_PROFILE_MAX_CONCURRENCY=2
+GEMMA_JUDGE_PROFILE_MAX_CONCURRENCY=2
+GEMMA_JUDGE_12B_PROFILE_MAX_CONCURRENCY=1
+EMBEDDING_PROFILE_MAX_CONCURRENCY=4
 EMBEDDING_BATCH_SIZE=32
 ```
 
-Profile/YAML values can replace these role defaults. Endpoint-wide limits still apply when several profiles share one remote server. Trace data includes `wait_started_at`, `wait_ms`, `started_at`, execution latency, deadline, and cancellation reason. Disconnects and expired deadlines cancel work that has not acquired capacity.
+Profile/YAML values can replace these profile defaults. Profile limits are independent ceilings, not reserved capacity, so their sum is not expected to equal the endpoint limit. Every request must acquire both its profile semaphore and the shared endpoint semaphore; effective concurrency is bounded by the smaller available capacity, and the endpoint-wide limit always wins when profiles share a server. No profile example may exceed its endpoint cap. The Console and README display both limits and identify which semaphore caused a wait. Trace data includes `wait_started_at`, `wait_ms`, `wait_limit_kind`, `started_at`, execution latency, deadline, and cancellation reason. Disconnects and expired deadlines cancel work that has not acquired capacity.
 
 Do not add Redis, RabbitMQ, Kafka, Celery, a generic queue abstraction, or a replaceable scheduling framework for the MVP. Background workers call a small PostgreSQL job repository directly. Introduce a queue abstraction only if a second backend is actually required.
 
@@ -254,18 +258,22 @@ A handoff is triggered by any of:
 
 The Webhook uses an HMAC signature, bounded timeout, idempotency key, and outbox retries. Status is `queued`, `delivering`, `delivered`, or `failed`. The customer is not told that a person has accepted the case unless the downstream system explicitly confirms it.
 
+High-risk classification and retention are separate decisions: self-harm, account-security, or unexpectedly sensitive personal-data content triggers safer handling but does not silently bypass the confirmed 30-day raw-text retention rule. Raw conversation text is confined to tenant-scoped `runtime.turns`; structured stdout logs and observability events reference the turn and store bounded summaries rather than duplicating full conversation text. Database connections require TLS where supported, storage uses platform volume/disk encryption, customer-text access requires least privilege and tenant authorization, and every Console/API access to raw turns is audit logged. Raw turns are excluded from improvement prompts and datasets unless a human explicitly reviews and selects them. Secrets and authentication material remain prohibited regardless of the no-masking decision.
+
 ## 7. API and Test Console
 
 ### 7.1 REST API
 
-- `POST /api/v1/turns`: accepts `session_id`, `customer_id`, optional `case_id`, and `message`; returns `reply`, `trace_id`, citations, conversation mode, and handoff status.
+- `POST /api/v1/turns`: accepts `message`, optional/new `session_id`, optional `case_id`, and `customer_id` only for a principal with `customer:act_as`; self-service customer identity is derived from authentication. It returns `reply`, `trace_id`, citations, conversation mode, and handoff status.
 - `GET /api/v1/traces/{trace_id}`: returns the ordered node waterfall with reasons, precise failure points, retries, and fallback results.
 - `GET /api/v1/traces/{trace_id}/events?after_sequence={n}`: returns ordered events after a sequence number so the Console can incrementally poll an active trace without WebSocket/SSE infrastructure.
 - `POST /api/v1/traces/{trace_id}/retry`: admin-only manual retry for a terminal trace. It requires a reason, creates a new full-turn execution linked to the original trace, and returns the new `trace_id`; it never mutates or resumes the original trace.
 - `GET /api/v1/health`: returns liveness/readiness for PostgreSQL, pgvector, model roles, RAG, tools, and notification delivery.
 - `GET /console`: serves the lightweight internal Test Console.
 
-The chat API uses a configured bearer token outside development. Trace endpoints require an internal/admin token. The Console reads tokens from server-side configuration and never embeds model or database credentials in client JavaScript.
+The chat API uses a configured bearer token outside development. Authentication produces an `AuthenticatedPrincipal` with `subject_id`, `tenant_id`, roles/scopes, and permitted customer identity. For a self-service principal, the server derives `customer_id` from the principal and rejects any conflicting request value. A service-agent principal may supply `customer_id` only with `customer:act_as` scope and only for a customer in the same authorized tenant. `session_id` and `case_id` must belong to the bound tenant/customer or be created under that binding; callers cannot attach an existing identifier from another customer. The resulting immutable `AuthorizedCustomerContext` is passed to context loading, RAG filters, every tool call, trace lookup, and manual retry. Adapters must not accept an unbound raw `customer_id`.
+
+Authorization failures occur before model, RAG, or tool calls and return the configured non-enumerating 404/403 policy. Mock adapters and demo authentication enforce the same ownership checks. Trace endpoints and manual retry require internal/admin scope plus tenant access; an admin token is not implicitly cross-tenant. The Console reads tokens from server-side configuration and never embeds model or database credentials in client JavaScript.
 
 ### 7.2 Incident-First Demo Console
 
@@ -441,7 +449,9 @@ For each item, show the customer message and only necessary preceding turns. Hid
 
 After submission, show model labels and differences. Prioritize low-confidence samples and disagreements for review. Save results to `datasets/emotion-baseline-v1.jsonl` with a manifest containing taxonomy version, creation date, label counts, and checksum.
 
-After all labels are complete, create a stratified 42-item development set and an 18-item locked test set. Prompt and policy iteration use only the development set. The initial target is macro-F1 at least 0.80 on non-ambiguous locked items, with 100% recall for safety overrides in the locked set. Because 60 samples are small, report per-class counts and confidence intervals alongside the score and expand the set over time.
+After all labels are complete, create a stratified 42-item development set and an 18-item locked test set. Prompt and policy iteration use only the development set. The initial target is macro-F1 at least 0.80 on non-ambiguous locked items, with no missed safety override represented in the locked set.
+
+This 18-item result is explicitly a **provisional regression tripwire**, not evidence of generalization or production-quality emotion accuracy. Reports always show item count, per-class support, confusion matrix, raw misses, and bootstrap confidence intervals; they do not present the threshold as a statistically strong claim. One safety miss fails the known-case gate, while zero misses means only that the small locked set passed. Before emotion quality can be described as production validated, expand the adjudicated evaluation corpus to at least 200 items with at least 20 non-ambiguous examples for every reported class, then re-establish thresholds from the larger set.
 
 ## 13. Offline Improvement and Promotion
 
@@ -529,10 +539,10 @@ Before activation, a candidate runs a versioned promotion suite against the exac
 2. affected unit and contract tests;
 3. PostgreSQL migration compatibility and pgvector dimension checks;
 4. full pipeline E2E tests with mock RAG/tools/models/Webhook;
-5. golden safety set with 100% high-risk handoff recall and zero unsupported commitments/actions;
+5. a separate human-reviewed golden safety set with at least 30 high-risk examples spanning the configured trigger categories, requiring 100% high-risk handoff recall and zero unsupported commitments/actions;
 6. intent and tool-route accuracy of at least 95%;
 7. RAG citation precision of at least 95%;
-8. the locked 18-item emotion test set with macro-F1 at least 0.80 and 100% safety-override recall;
+8. the locked 18-item emotion test set with macro-F1 at least 0.80 and no missed represented safety override, treated only as a provisional known-case regression gate;
 9. replay of source failure clusters plus the general regression set;
 10. admission, concurrency, background-job, retry, idempotency, fallback, exact-error-location, and rollback tests;
 11. opt-in live model smoke/evaluation when the candidate changes a model profile, prompt, or provider adapter.
@@ -602,7 +612,10 @@ The root `README.md` must document:
 
 - Unit tests for every node, Pydantic contract, strategy rule, risk rule, and error mapping.
 - Contract tests shared by mock and remote RAG/tool/model/Webhook adapters.
+- Model Inventory Gate tests for exact alias resolution, missing/duplicate alias, reported model digest, structured JSON, thinking disable behavior, and embedding dimension; live execution is opt-in until private `.env` exists.
+- Authorization tests for self-service identity derivation, `customer:act_as`, tenant/customer/session/case ownership, trace access, manual retry, and IDOR attempts that assert no downstream model/RAG/tool call occurs.
 - PostgreSQL integration tests for migrations, vector dimension, exact cosine search, retention, and outbox delivery.
+- Retention/security tests verify 30-day raw-turn deletion, 180-day structured-trace retention, tenant-scoped raw-text access/audit, and absence of full conversation text or secrets from stdout/events.
 - Pipeline E2E tests for success, low confidence, no RAG answer, tool timeout, malformed model JSON, generation failure, automatic retry exhaustion, one repair, fallback, handoff, and full-turn manual retry lineage.
 - Concurrency tests for admission saturation, HTTP 429/`Retry-After`, endpoint/profile semaphore limits, waiting-request cancellation, embedding batching, `SKIP LOCKED` worker claims, and idempotent job recovery.
 - Failure injection at every node to verify the trace identifies the correct `failure_stage`, component, operation, and field/endpoint.
@@ -619,7 +632,9 @@ The root `README.md` must document:
 - Webhook signature, idempotency, retry, and outbox recovery tests pass.
 - Manual retry creates an immutable linked trace, enforces authorization/limits, refreshes only live read-only tools, never delivers a second customer reply automatically, and never duplicates a queued/delivered handoff.
 - Ordinary tests make no production model, RAG, tool, or Webhook calls.
-- Emotion macro-F1 target is at least 0.80 and locked safety-override recall is 100%.
+- No private model profile is marked verified or readiness-healthy until its inventory and capability probes pass against the configured endpoint.
+- Cross-customer and cross-tenant identifiers are rejected before downstream access in both real and mock adapter paths.
+- The 18-item emotion lock set meets macro-F1 0.80 and has no represented safety-override miss as a provisional regression tripwire; reports include sample support, raw misses, confusion matrix, and confidence intervals and make no generalization claim.
 - Latency, capacity-wait time, token counts, and throughput are recorded as a baseline; a later capacity review sets P95 release limits.
 - Replacing every example model profile with contract-test fakes requires no application-code change, proving routing is role/capability based.
 - No improvement version can activate without checksum-matched passing promotion results and a later human approval event.
@@ -640,10 +655,10 @@ An orchestrator may be reconsidered after the fixed pipeline is operational only
 
 ## 17. Delivery Sequence
 
-1. Foundation: `uv` project, settings, contracts, flexible Model Registry, PostgreSQL/pgvector migrations, trace/error model, admission/semaphore limits, background jobs, and health checks.
+1. Foundation: `uv` project, settings, contracts, flexible Model Registry, mock Model Inventory Gate, PostgreSQL/pgvector migrations, trace/error model, admission/semaphore limits, background jobs, and health checks.
 2. Vertical pipeline: fixed `TurnPipeline`, typed nodes, mock RAG/tools, capability-based model router, strategy, validation, fallback, and handoff outbox.
 3. Container delivery: production-shaped Dockerfile, Compose services, migrations, worker, frontend, demo seed, health checks, and root README.
 4. Console and diagnosis: chat UI, horizontal trace flow, expandable node details, automatic/manual retry visibility, exact error point, health display, and failure injection.
 5. Quality: reused scenarios, 60-item labeling workflow, locked baseline evaluation, and live-model opt-in suite.
 6. Improvement lifecycle: append-only ledger, manual similarity search, evaluation jobs, mandatory promotion gate, human approval, CLI-based atomic activation, and rollback. Automatic clustering remains deferred.
-7. Remote integration: populate `.env`, validate model capabilities/dimensions, replace mocks one adapter at a time, and record performance baseline.
+7. Remote integration: populate `.env`, run the exact-alias Model Inventory Gate before accepting live-model work, validate capabilities/dimensions, replace mocks one adapter at a time, and record performance baseline.
