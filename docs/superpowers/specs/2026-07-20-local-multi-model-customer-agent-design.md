@@ -71,6 +71,8 @@ Every transition records `started`, `completed`, `failed`, or `skipped`. Repair 
 
 `TurnPipeline` is an application service with explicit Python calls and branches. It enforces node order, request deadlines, call budgets, cancellation, retry limits, idempotency, fallback, and handoff. It preserves request-scoped state and short-lived strategy state such as “do not probe this direction for the next two turns.” It writes a span for every node and concurrency wait.
 
+`run_node` is an observability wrapper, not a hidden dispatcher. The pipeline passes it a zero-argument closure that explicitly captures the exact dependencies and state fields required by that node. The wrapper invokes the closure, awaits the result when necessary, and owns span/event/error bookkeeping around the call. It never infers arguments from a node name or from mutable global state. This keeps heterogeneous node signatures visible in `TurnPipeline.run` while centralizing tracing.
+
 Models are advisors. They return typed classifications, strategy proposals, drafts, or verdicts. They cannot add nodes, reorder the fixed pipeline, call undeclared tools, execute business actions, override hard risk policies, or retry themselves indefinitely.
 
 Independent RAG and tool calls run concurrently inside `evidence_collector`. Required-source failure cancels unnecessary remaining work. `TurnPipeline` passes the combined evidence to the next node only after validation.
@@ -130,6 +132,8 @@ Application code addresses model roles, never vendor or model names. The stable 
 
 `dialogue_classifier`, `strategy_advisor`, `response_generator`, `response_judge`, and `embedding` are required runtime roles. `response_judge_zh_verifier` and `promotion_judge_secondary` are assurance roles that may be explicitly disabled only in `bootstrap` mode. A disabled assurance role is visible in readiness/Console and lowers assurance; it is never silently mapped to the same profile as another judge.
 
+Classifier, strategy, generator, repair, and judge outputs are finite Pydantic contracts. Therefore the profiles assigned to `dialogue_classifier`, `strategy_advisor`, `response_generator`, and judge roles must declare and pass `structured_json`; configuration validation rejects an incompatible role/profile mapping before startup. Repair reuses `response_generator` and its `ResponseDraft` schema rather than introducing another model role.
+
 Each role resolves to a named profile in `config/models.yaml`. The versioned YAML contains no secrets. It defines adapter type, opaque runtime model identifier, declared model family, capabilities, generation parameters, timeout, concurrency/admission limits, optional fallback profiles, and model-specific request options. `.env` provides endpoint URLs, credentials, configuration path, and optional per-role overrides.
 
 Configuration precedence is:
@@ -159,7 +163,7 @@ profiles:
     endpoint: local_vllm
     model: Qwen/Qwen3-8B
     family: qwen
-    capabilities: [chat, reasoning_toggle]
+    capabilities: [chat, structured_json, reasoning_toggle]
     request_options:
       enable_thinking: false
     temperature: 0.2
@@ -173,7 +177,7 @@ profiles:
     request_options:
       enable_thinking: false
     temperature: 0
-    max_concurrency: 3
+    max_concurrency: 2
 
   remote_embedding:
     endpoint: remote_models
@@ -197,6 +201,8 @@ assurance:
   promotion_semantic_mode: human_only
 ```
 
+Concurrency is declared per endpoint and shared profile, not per role alias. In the bootstrap example, remote profile limits sum to the endpoint limit (`2 + 4 = 6`), and every role mapped to `remote_structured` shares its capacity of 2. The endpoint semaphore remains the effective upper bound if an operator configures larger profile totals.
+
 Bootstrap mode is for pipeline, integration, logging, RAG/tool, retry, and baseline evaluation. Runtime validation uses deterministic gates plus the single remote Qwen judge and labels the result `reduced_assurance`. It does not call the same Qwen profile twice under two judge names. Promotion candidates may run deterministic and Qwen evaluations, but model verdicts cannot make a candidate eligible for activation; a human must review every semantic criterion.
 
 The target assurance configuration later adds a different-family Gemma primary `response_judge`/`promotion_judge_primary`, keeps remote Qwen as `response_judge_zh_verifier`/`promotion_judge_secondary`, changes `assurance.mode` to `dual_judge`, and changes `promotion_semantic_mode` to `dual_judge_required`. This is a configuration change subject to the Model Inventory Gate and promotion suite, not an application-code change.
@@ -207,11 +213,11 @@ Users may replace every example model with another small/private model by changi
 
 The adapter interface supports OpenAI-compatible chat/embedding endpoints first. Provider-specific details such as Ollama-style thinking controls or extra request bodies live in the adapter/profile, not in `TurnPipeline`. Logs record the resolved role, profile, model, adapter, and configuration checksum but never credentials.
 
-Before any live-model integration is accepted, a **Model Inventory Gate** queries the configured endpoint's inventory API (`/api/tags` plus `/api/show` for Ollama-style servers, `/v1/models` for OpenAI-compatible servers, or an adapter-specific equivalent), requires an exact configured runtime-name match, and records the server-reported name/digest when available. It then runs bounded sample calls for chat, structured JSON, thinking disable behavior, and embeddings. There is no fuzzy name matching or silent substitution. Until the private `.env` is supplied and this gate passes, these names remain operator-provided but endpoint-unverified and development uses contract-test fakes/mocks.
+Before any live-model integration is accepted, a **Model Inventory Gate** queries the configured endpoint's inventory API (`/api/tags` plus `/api/show` for Ollama-style servers, `/v1/models` for OpenAI-compatible servers, or an adapter-specific equivalent), requires an exact configured runtime-name match, and records the server-reported name/digest when available. It then runs bounded sample calls for every capability required by each resolved profile. In particular, the local `response_generator` must successfully return the finite `ResponseDraft` JSON schema with thinking disabled for both initial generation and constrained repair; merely returning chat text is not sufficient. The remote structured profile must pass its own schema probe, and the embedding profile must pass its dimension probe. A declared but unverified required capability makes readiness fail. There is no fuzzy name matching or silent substitution. Until the private `.env` is supplied and this gate passes, these names remain operator-provided but endpoint-unverified and development uses contract-test fakes/mocks.
 
 An optional `source_model`/license metadata field may document the upstream checkpoint, but it is informational and never used for routing or availability decisions. Different servers may legitimately expose custom, quantized, or locally renamed builds under their runtime model names.
 
-The OpenAI-compatible adapter normalizes a single `/v1` suffix and rejects ambiguous double-suffixed URLs. The local vLLM inventory probe calls `GET /v1/models` and requires the exact returned ID `Qwen/Qwen3-8B` before its profile becomes ready.
+The OpenAI-compatible adapter normalizes a single `/v1` suffix and rejects ambiguous double-suffixed URLs. For `structured_json`, it sends an OpenAI-compatible `response_format` with a strict JSON schema and validates the returned object again with Pydantic. The local vLLM inventory probe calls `GET /v1/models`, requires the exact returned ID `Qwen/Qwen3-8B`, and completes the `ResponseDraft` schema probe before its profile becomes ready.
 
 The same capability probes run at startup to verify configured model availability, structured JSON behavior where required, reasoning/thinking disable behavior where declared, and embedding dimension. A capability failure either activates an explicitly configured compatible fallback or makes readiness fail. The service embeds a sentinel string and validates its vector dimension against the migration setting before allowing vector writes. The resolved alias, reported upstream identifier/digest, capability result, and configuration checksum are visible in readiness and the Demo Console without credentials.
 
@@ -617,7 +623,7 @@ The root `README.md` must document:
 
 - Unit tests for every node, Pydantic contract, strategy rule, risk rule, and error mapping.
 - Contract tests shared by mock and remote RAG/tool/model/Webhook adapters.
-- Model Inventory Gate tests for exact alias resolution, missing/duplicate alias, reported model digest, structured JSON, thinking disable behavior, and embedding dimension; live execution is opt-in until private `.env` exists.
+- Model Inventory Gate tests for exact alias resolution, missing/duplicate alias, reported model digest, per-profile required capabilities, local `ResponseDraft` structured JSON for generation/repair, thinking-disable behavior, and embedding dimension; live execution is opt-in until private `.env` exists.
 - Assurance-mode tests verify bootstrap exposes `reduced_assurance`, never invokes one profile twice as two judges, requires criterion-level human semantic approval for promotion, and rejects dual-judge profiles that share a family or resolved digest.
 - Authorization tests for self-service identity derivation, `customer:act_as`, tenant/customer/session/case ownership, trace access, manual retry, and IDOR attempts that assert no downstream model/RAG/tool call occurs.
 - PostgreSQL integration tests for migrations, vector dimension, exact cosine search, retention, and outbox delivery.

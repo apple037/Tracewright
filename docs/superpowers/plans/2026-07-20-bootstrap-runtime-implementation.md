@@ -93,8 +93,8 @@ The later Console plan owns `frontend/` and typed visual presenters. The later I
 
 - `tests/integration/conftest.py` owns `postgres_pool: PostgresPool`, `trace_repository: PostgresTraceRepository`, `conversation_repository: ConversationRepository`, `rag_repository: RagRepository`, and `outbox: OutboxRepository`, all using `TEST_DATABASE_URL` and clearing only test-schema rows before/after a test.
 - `tests/conftest.py` owns cross-suite fixtures `fake_models: FakeModelGateway`, `verified_draft: ResponseDraft`, and the opt-in `live_inventory_probe`. The fake response queues are deterministic and reset for every test.
-- `tests/unit/pipeline/conftest.py` owns typed node inputs: `classification`, `order_plan`, `utc_now`, `fresh_collected_evidence`, `expired_collected_evidence`, `repair_models`, and `repairable_validation`.
-- `tests/e2e/conftest.py` owns `context: AuthorizedCustomerContext`, `mock_rag: MockRagClient`, `mock_tool: MockToolClient`, `memory_handoffs: MemoryHandoffSink`, `pipeline: TurnPipeline`, named failure-injection pipeline variants, `client: TestClient`, and token fixtures. It reuses root fixtures and uses tenant `t1`, customer `c1`, and deterministic committed evidence.
+- `tests/unit/pipeline/conftest.py` owns typed node inputs: `classification`, `order_plan`, `utc_now`, `fresh_collected_evidence`, `expired_collected_evidence`, `validated_evidence`, `repair_models`, and `repairable_validation`. Task 8 extends it with `trace_spy`, `trace_state`, and `pipeline_for_run_node`.
+- `tests/e2e/conftest.py` owns `context: AuthorizedCustomerContext`, `clock: FrozenClock`, `mock_rag: MockRagClient`, `mock_tool: MockToolClient`, `memory_handoffs: MemoryHandoffSink`, `pipeline: TurnPipeline`, named failure-injection pipeline variants, `client: TestClient`, and token fixtures. It reuses root fixtures and uses tenant `t1`, customer `c1`, and deterministic committed evidence.
 - A task that first introduces a fixture also creates or extends the owning `conftest.py` in the same commit. Test modules must not depend on an undeclared global fixture.
 
 ---
@@ -154,7 +154,9 @@ from pathlib import Path
 import subprocess
 import sys
 
-from agent_flow.config import Settings, load_model_config, model_config_checksum
+import pytest
+
+from agent_flow.config import ModelConfig, Settings, load_model_config, model_config_checksum
 
 
 def test_settings_default_to_bootstrap(monkeypatch):
@@ -167,6 +169,7 @@ def test_settings_default_to_bootstrap(monkeypatch):
 def test_bootstrap_model_roles_are_exact():
     config = load_model_config(Path("config/models.bootstrap.example.yaml"))
     assert config.profiles[config.roles["response_generator"]].model == "Qwen/Qwen3-8B"
+    assert "structured_json" in config.profiles[config.roles["response_generator"]].capabilities
     assert config.profiles[config.roles["dialogue_classifier"]].model == "qwen3.5:9b"
     assert config.profiles[config.roles["embedding"]].model == "qwen3:embedding:0.6b"
     assert set(config.disabled_roles) == {"response_judge_zh_verifier", "promotion_judge_secondary"}
@@ -200,6 +203,14 @@ def test_model_config_checksum_changes_with_model_name():
     )
     second = first.model_copy(update={"profiles": changed_profiles})
     assert model_config_checksum(first) != model_config_checksum(second)
+
+
+def test_response_generator_profile_requires_structured_json():
+    config = load_model_config(Path("config/models.bootstrap.example.yaml"))
+    data = config.model_dump(mode="python")
+    data["profiles"]["local_generator"]["capabilities"].remove("structured_json")
+    with pytest.raises(ValueError, match="response_generator.*structured_json"):
+        ModelConfig.model_validate(data)
 ```
 
 - [ ] **Step 3: Run the tests to verify they fail**
@@ -266,6 +277,16 @@ class ModelConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_references(self):
+        required_role_capabilities = {
+            "dialogue_classifier": {"chat", "structured_json"},
+            "strategy_advisor": {"chat", "structured_json"},
+            "response_generator": {"chat", "structured_json"},
+            "response_judge": {"chat", "structured_json"},
+            "response_judge_zh_verifier": {"chat", "structured_json"},
+            "promotion_judge_primary": {"chat", "structured_json"},
+            "promotion_judge_secondary": {"chat", "structured_json"},
+            "embedding": {"embedding"},
+        }
         for profile_name, profile in self.profiles.items():
             if profile.endpoint not in self.endpoints:
                 raise ValueError(f"profile {profile_name} references unknown endpoint")
@@ -274,6 +295,9 @@ class ModelConfig(BaseModel):
         for role, profile_name in self.roles.items():
             if profile_name not in self.profiles:
                 raise ValueError(f"role {role} references unknown profile")
+            missing = required_role_capabilities.get(role, set()) - self.profiles[profile_name].capabilities
+            if missing:
+                raise ValueError(f"role {role} missing capabilities: {sorted(missing)}")
         return self
 
 
@@ -344,7 +368,7 @@ profiles:
     endpoint: local_vllm
     model: Qwen/Qwen3-8B
     family: qwen
-    capabilities: [chat, reasoning_toggle]
+    capabilities: [chat, structured_json, reasoning_toggle]
     request_options: {enable_thinking: false}
     temperature: 0.2
     max_tokens: 1024
@@ -379,7 +403,7 @@ Concurrency is configured per endpoint and per shared profile, not per role alia
 
 Run: `uv lock && uv run pytest tests/unit/test_config.py -v`
 
-Expected: all four configuration tests pass, including identical checksums across hash seeds.
+Expected: all five configuration tests pass, including identical checksums across hash seeds and rejection of a generator without structured JSON.
 
 - [ ] **Step 6: Commit**
 
@@ -479,26 +503,29 @@ def bind_customer_context(
     )
 ```
 
-Implement `AgentError` as a dataclass/exception with `error_code`, `category`, `retryable`, `failure_stage`, `component`, `operation`, `field_path`, and safe public message. Implement Pydantic contracts for trace IDs, emotion assessment, strategy decision, evidence, model verdict, handoff, turn request/result, and assurance metadata using finite enums from the design spec.
+Implement `AgentError` as a dataclass/exception with `error_code`, `category`, `retryable`, `failure_stage`, `component`, `operation`, `field_path`, and safe public message. Implement Pydantic contracts for trace IDs, emotion assessment, strategy decision, evidence, model verdict, handoff, turn request/result, and assurance metadata using finite enums from the design spec. The bootstrap `StrategyDecision` contract contains `strategy_version`, `response_mode`, ordered `answer_order`, and bounded `reason_codes`; `ResponseDraft` contains `text`, `citations`, and `evidence_ids`.
 
 Create the shared model fake with an explicit role-call ledger:
 
 ```python
 # tests/fakes.py
-from collections import defaultdict, deque
+from collections import deque
 
 
 class FakeModelGateway:
     def __init__(self, responses: dict[str, list[object]]):
         self.responses = {role: deque(values) for role, values in responses.items()}
         self.calls: list[str] = []
+        self.requests: list[object] = []
 
     async def structured(self, role: str, request: object, response_type: type):
         self.calls.append(role)
+        self.requests.append(request)
         return response_type.model_validate(self.responses[role].popleft())
 
     async def complete(self, role: str, request: object) -> str:
         self.calls.append(role)
+        self.requests.append(request)
         return str(self.responses[role].popleft())
 ```
 
@@ -529,6 +556,17 @@ def fake_models():
                 "evidence_spans": ["很累"],
                 "reason_codes": ["EXPLICIT_EXHAUSTION"],
             },
+        }],
+        "strategy_advisor": [{
+            "strategy_version": "bootstrap-v1",
+            "response_mode": "business_first",
+            "answer_order": ["verified_fact", "brief_acknowledgment"],
+            "reason_codes": ["TRANSACTIONAL_READ", "VERIFIED_EVIDENCE_AVAILABLE"],
+        }],
+        "response_generator": [{
+            "text": "訂單目前運送中，尚無確認送達日期。",
+            "citations": ["tool:order.lookup:o1"],
+            "evidence_ids": ["tool-result-1"],
         }],
         "response_judge": [{
             "passed": True,
@@ -563,7 +601,7 @@ git commit -m "feat: add typed turn and authorization contracts"
 
 ---
 
-### Task 3: Model Registry and Inventory Gate
+### Task 3: Model Registry, Inventory, and Capability Gate
 
 **Files:**
 - Create: `src/agent_flow/model_registry.py`
@@ -572,7 +610,8 @@ git commit -m "feat: add typed turn and authorization contracts"
 
 **Interfaces:**
 - Consumes: `Settings`, `ModelConfig`, HTTPX client.
-- Produces: `ResolvedModel`, `ModelRegistry.resolve(role: str) -> ResolvedModel`, `ModelInventoryProbe.probe_all() -> dict[str, InventoryResult]`, `ChatModel.complete(role: str, messages: list[ChatMessage]) -> ModelResponse`, and `EmbeddingModel.embed(role: str, texts: list[str]) -> list[list[float]]`.
+- Produces: `ResolvedModel`, `ModelRegistry.resolve(role: str) -> ResolvedModel`, `ModelInventoryProbe.probe_all() -> dict[str, InventoryResult]`, `ModelGateway.complete(role: str, request: object) -> str`, `ModelGateway.structured(role: str, request: object, response_type: type[T]) -> T`, and `EmbeddingModel.embed(role: str, texts: list[str]) -> list[list[float]]`.
+- `ModelGateway.structured` requires the resolved profile to declare `structured_json`, sends a strict schema through the adapter, and rejects the call before I/O when the capability is absent.
 
 - [ ] **Step 1: Write failing exact-inventory tests**
 
@@ -604,9 +643,17 @@ async def test_vllm_inventory_requires_exact_model_id(bootstrap_registry):
     respx.get("http://localhost:8000/v1/models").mock(
         return_value=httpx.Response(200, json={"data": [{"id": "Qwen/Qwen3-8B"}]})
     )
+    respx.post("http://localhost:8000/v1/chat/completions").mock(
+        return_value=httpx.Response(200, json={
+            "choices": [{"message": {"content": (
+                '{"text":"ok","citations":[],"evidence_ids":[]}'
+            )}}]
+        })
+    )
     result = await ModelInventoryProbe(bootstrap_registry).probe_role("response_generator")
     assert result.model == "Qwen/Qwen3-8B"
     assert result.available is True
+    assert "structured_json" in result.verified_capabilities
 
 
 @pytest.mark.asyncio
@@ -655,6 +702,8 @@ class InventoryResult:
     available: bool
     digest: str | None
     capabilities: frozenset[str]
+    verified_capabilities: frozenset[str]
+    capability_failures: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -693,7 +742,7 @@ class ModelRegistry:
         )
 ```
 
-Implement `/v1/models` parsing for `openai_compatible` and `/api/tags` plus `/api/show` parsing for `ollama_compatible`. Normalize exactly one `/v1` suffix for OpenAI endpoints. Probe structured JSON and embeddings through bounded sample requests; expose probe results without keys.
+Implement `/v1/models` parsing for `openai_compatible` and `/api/tags` plus `/api/show` parsing for `ollama_compatible`. Normalize exactly one `/v1` suffix for OpenAI endpoints. For every declared required capability, run a bounded adapter-specific sample and record it in `verified_capabilities`; declared capabilities are not treated as verified merely because inventory resolved. The local generator probe sends the finite `ResponseDraft` schema using OpenAI-compatible `response_format={"type":"json_schema", ...}`, parses the returned content with Pydantic, and fails readiness if `structured_json` or `reasoning_toggle` is not verified. Probe remote structured JSON and embeddings separately; expose results without keys.
 
 - [ ] **Step 4: Run contract tests, then the read-only local inventory command**
 
@@ -1038,7 +1087,10 @@ git commit -m "feat: add authorized RAG and tool evidence adapters"
 - Produces: `classify_dialogue`, `risk_precheck`, `plan_evidence`, `collect_evidence`, `validate_evidence`, `select_strategy`, `generate_response`, `repair_response`, and `validate_response`.
 - `risk_precheck(classification: DialogueClassification, message: str) -> RiskDecision` is deterministic and returns bounded handoff reason codes.
 - `plan_evidence(classification: DialogueClassification) -> EvidencePlan`, `collect_evidence(context: AuthorizedCustomerContext, plan: EvidencePlan, rag: RagClient, tools: ToolClient) -> CollectedEvidence`, and `validate_evidence(plan: EvidencePlan, evidence: CollectedEvidence, now: datetime) -> ValidatedEvidence` are distinct traceable nodes.
-- `repair_response(models: ModelGateway, draft: ResponseDraft, validation: ValidationResult) -> ResponseDraft` uses the response-generator role with only the failed criteria and grounded evidence, never the judge role.
+- `select_strategy(models: ModelGateway, classification: DialogueClassification, risk: RiskDecision, evidence: ValidatedEvidence) -> StrategyDecision` calls `strategy_advisor` once.
+- `generate_response(models: ModelGateway, snapshot: ConversationSnapshot, strategy: StrategyDecision, evidence: ValidatedEvidence) -> ResponseDraft` calls `ModelGateway.structured("response_generator", ..., ResponseDraft)` once.
+- `repair_response(models: ModelGateway, draft: ResponseDraft, validation: ValidationResult, evidence: ValidatedEvidence) -> ResponseDraft` uses the same structured response-generator role with only the failed criteria and grounded evidence, never the judge role.
+- `validate_response(models: ModelGateway, draft: ResponseDraft, evidence: ValidatedEvidence, assurance_mode: str) -> ValidationResult` gives the judge the frozen draft and verified evidence.
 
 - [ ] **Step 1: Write failing node tests using fakes**
 
@@ -1052,8 +1104,13 @@ async def test_classifier_returns_intent_and_emotion_in_one_call(fake_models):
 
 
 @pytest.mark.asyncio
-async def test_bootstrap_validator_calls_one_judge(fake_models, verified_draft):
-    verdict = await validate_response(fake_models, verified_draft, assurance_mode="bootstrap")
+async def test_bootstrap_validator_calls_one_judge(fake_models, verified_draft, validated_evidence):
+    verdict = await validate_response(
+        fake_models,
+        verified_draft,
+        validated_evidence,
+        assurance_mode="bootstrap",
+    )
     assert verdict.assurance == "reduced_assurance"
     assert fake_models.calls == ["response_judge"]
 
@@ -1098,8 +1155,14 @@ async def test_repair_uses_generator_with_failed_criteria(
     repair_models,
     verified_draft,
     repairable_validation,
+    validated_evidence,
 ):
-    repaired = await repair_response(repair_models, verified_draft, repairable_validation)
+    repaired = await repair_response(
+        repair_models,
+        verified_draft,
+        repairable_validation,
+        validated_evidence,
+    )
     assert repaired.text != verified_draft.text
     assert repair_models.calls == ["response_generator"]
     assert repair_models.requests[0].failed_criteria == ["UNSUPPORTED_DELIVERY_PROMISE"]
@@ -1135,23 +1198,29 @@ async def repair_response(
     models: ModelGateway,
     draft: ResponseDraft,
     validation: ValidationResult,
+    evidence: ValidatedEvidence,
 ) -> ResponseDraft:
     request = build_repair_request(
         draft=draft,
         failed_criteria=validation.failed_criteria,
-        evidence_ids=draft.evidence_ids,
+        evidence=evidence,
     )
     return await models.structured("response_generator", request, ResponseDraft)
 
 
-async def validate_response(models: ModelGateway, draft: ResponseDraft, assurance_mode: str) -> ValidationResult:
+async def validate_response(
+    models: ModelGateway,
+    draft: ResponseDraft,
+    evidence: ValidatedEvidence,
+    assurance_mode: str,
+) -> ValidationResult:
     deterministic = run_deterministic_checks(draft)
     if deterministic.has_hard_failure:
         return ValidationResult.from_deterministic(deterministic)
-    primary = await models.structured("response_judge", build_judge_request(draft), JudgeVerdict)
+    primary = await models.structured("response_judge", build_judge_request(draft, evidence), JudgeVerdict)
     if assurance_mode == "bootstrap":
         return ValidationResult.from_single_judge(primary, assurance="reduced_assurance")
-    secondary = await models.structured("response_judge_zh_verifier", build_judge_request(draft), JudgeVerdict)
+    secondary = await models.structured("response_judge_zh_verifier", build_judge_request(draft, evidence), JudgeVerdict)
     return ValidationResult.from_independent_judges(primary, secondary)
 ```
 
@@ -1175,25 +1244,50 @@ git commit -m "feat: add typed customer turn nodes"
 **Files:**
 - Create: `src/agent_flow/pipeline/turn.py`
 - Modify: `src/agent_flow/repositories/traces.py`
+- Modify: `tests/unit/pipeline/conftest.py`
+- Test: `tests/unit/pipeline/test_turn.py`
 - Create: `tests/e2e/conftest.py`
 - Test: `tests/e2e/test_turn_pipeline.py`
 - Test: `tests/e2e/test_failure_locations.py`
 
 **Interfaces:**
 - Consumes: node functions, repositories, authorized context, `TurnRequest`.
-- Produces: `TurnPipeline(traces, conversations, handoffs, models, rag, tools, assurance_mode)` and `TurnPipeline.run(context, request, retry_of=None) -> TurnResult`.
+- Produces: `TurnPipeline(traces, conversations, handoffs, models, rag, tools, clock, assurance_mode)` and `TurnPipeline.run(context, request, retry_of=None) -> TurnResult`.
+- Produces: `run_node(state: TurnState, name: str, operation: Callable[[], T | Awaitable[T]], attempt: int = 1) -> T`. The operation is a zero-argument closure with all node-specific arguments bound explicitly at the call site; `run_node` never dispatches or resolves arguments by node-name strings.
 - The API performs `input_gate` before calling this service. The pipeline records `context_loader` as its first runtime node and binds the immutable conversation/artifact snapshot to the trace before any model, RAG, or tool call.
 
 - [ ] **Step 1: Write a failing happy-path and failure-location test**
 
 ```python
+@pytest.mark.asyncio
+async def test_run_node_wraps_explicit_sync_and_async_closures(
+    pipeline_for_run_node,
+    trace_state,
+    trace_spy,
+):
+    seen = []
+
+    def sync_operation():
+        seen.append("sync")
+        return "risk-result"
+
+    async def async_operation():
+        seen.append("async")
+        return "model-result"
+
+    assert await pipeline_for_run_node.run_node(trace_state, "risk_precheck", sync_operation) == "risk-result"
+    assert await pipeline_for_run_node.run_node(trace_state, "dialogue_classifier", async_operation) == "model-result"
+    assert seen == ["sync", "async"]
+    assert trace_spy.completed_nodes == ["risk_precheck", "dialogue_classifier"]
+
+
 @pytest.fixture
 def context():
     return AuthorizedCustomerContext(subject_id="u1", tenant_id="t1", customer_id="c1")
 
 
 @pytest_asyncio.fixture
-async def pipeline(trace_repository, conversation_repository, fake_models, mock_rag, mock_tool, memory_handoffs):
+async def pipeline(trace_repository, conversation_repository, fake_models, mock_rag, mock_tool, memory_handoffs, clock):
     return TurnPipeline(
         traces=trace_repository,
         conversations=conversation_repository,
@@ -1201,16 +1295,23 @@ async def pipeline(trace_repository, conversation_repository, fake_models, mock_
         models=fake_models,
         rag=mock_rag,
         tools=mock_tool,
+        clock=clock,
         assurance_mode="bootstrap",
     )
 
 
 @pytest.mark.asyncio
-async def test_pipeline_returns_reduced_assurance_reply(pipeline, context):
+async def test_pipeline_returns_reduced_assurance_reply(pipeline, context, fake_models):
     result = await pipeline.run(context, TurnRequest(session_id="s1", message="查詢訂單 o1"))
     assert result.reply
     assert result.assurance == "reduced_assurance"
     assert result.handoff_status is None
+    assert fake_models.calls == [
+        "dialogue_classifier",
+        "strategy_advisor",
+        "response_generator",
+        "response_judge",
+    ]
 
 
 @pytest.mark.asyncio
@@ -1252,33 +1353,121 @@ async def test_second_validation_failure_handoffs(pipeline_with_double_validatio
 
 - [ ] **Step 2: Verify failure**
 
-Run: `uv run pytest tests/e2e/test_turn_pipeline.py tests/e2e/test_failure_locations.py -v`
+Run: `uv run pytest tests/unit/pipeline/test_turn.py tests/e2e/test_turn_pipeline.py tests/e2e/test_failure_locations.py -v`
 
 Expected: FAIL because `TurnPipeline` does not exist.
 
 - [ ] **Step 3: Implement explicit pipeline control flow**
 
 ```python
+import asyncio
+from collections.abc import Awaitable, Callable
+from inspect import isawaitable
+from typing import TypeVar
+
+
+T = TypeVar("T")
+NodeOperation = Callable[[], T | Awaitable[T]]
+
+
 class TurnPipeline:
+    async def run_node(
+        self,
+        state: TurnState,
+        name: str,
+        operation: NodeOperation[T],
+        attempt: int = 1,
+    ) -> T:
+        span_id = await self.traces.start_span(state.trace_id, node=name, attempt=attempt)
+        await self.traces.append_node_started(state.trace_id, span_id, node=name, attempt=attempt)
+        try:
+            pending_or_value = operation()
+            value = await pending_or_value if isawaitable(pending_or_value) else pending_or_value
+        except asyncio.CancelledError as error:
+            await self.traces.finish_node_cancelled(state.trace_id, span_id, error)
+            raise
+        except Exception as error:
+            await self.traces.finish_node_failed(state.trace_id, span_id, error)
+            raise
+        await self.traces.finish_node_completed(state.trace_id, span_id)
+        return value
+
     async def run(self, context: AuthorizedCustomerContext, request: TurnRequest, retry_of: UUID | None = None) -> TurnResult:
         trace_id = await self.traces.start_trace_from_request(context, request, retry_of=retry_of)
         state = TurnState(trace_id=trace_id, context=context, request=request)
         try:
-            state.snapshot = await self.run_node(state, "context_loader", self.conversations.get_snapshot)
-            state.classification = await self.run_node(state, "dialogue_classifier", classify_dialogue)
-            state.risk = await self.run_node(state, "risk_precheck", risk_precheck)
+            state.snapshot = await self.run_node(
+                state,
+                "context_loader",
+                lambda: (
+                    self.conversations.get_retry_snapshot(
+                        retry_of,
+                        tenant_id=context.tenant_id,
+                        customer_id=context.customer_id,
+                    )
+                    if retry_of is not None
+                    else self.conversations.get_snapshot(
+                        tenant_id=context.tenant_id,
+                        customer_id=context.customer_id,
+                        session_id=request.session_id,
+                    )
+                ),
+            )
+            state.classification = await self.run_node(
+                state,
+                "dialogue_classifier",
+                lambda: classify_dialogue(self.models, state.snapshot.messages),
+            )
+            state.risk = await self.run_node(
+                state,
+                "risk_precheck",
+                lambda: risk_precheck(state.classification, state.request.message),
+            )
             if state.risk.requires_handoff:
                 return await self.finish_handoff(state, reason_code=state.risk.reason_code)
-            state.evidence_plan = await self.run_node(state, "evidence_planner", plan_evidence)
-            state.collected_evidence = await self.run_node(state, "evidence_collector", collect_evidence)
-            state.evidence = await self.run_node(state, "evidence_validator", validate_evidence)
-            state.strategy = await self.run_node(state, "strategy_selector", select_strategy)
-            state.draft = await self.run_node(state, "response_generator", generate_response)
-            state.validation = await self.run_node(state, "response_validator", validate_response)
+            state.evidence_plan = await self.run_node(
+                state,
+                "evidence_planner",
+                lambda: plan_evidence(state.classification),
+            )
+            state.collected_evidence = await self.run_node(
+                state,
+                "evidence_collector",
+                lambda: collect_evidence(state.context, state.evidence_plan, self.rag, self.tools),
+            )
+            state.evidence = await self.run_node(
+                state,
+                "evidence_validator",
+                lambda: validate_evidence(state.evidence_plan, state.collected_evidence, self.clock.now()),
+            )
+            state.strategy = await self.run_node(
+                state,
+                "strategy_selector",
+                lambda: select_strategy(self.models, state.classification, state.risk, state.evidence),
+            )
+            state.draft = await self.run_node(
+                state,
+                "response_generator",
+                lambda: generate_response(self.models, state.snapshot, state.strategy, state.evidence),
+            )
+            state.validation = await self.run_node(
+                state,
+                "response_validator",
+                lambda: validate_response(self.models, state.draft, state.evidence, self.assurance_mode),
+            )
             if not state.validation.passed:
                 if state.validation.repairable:
-                    state.draft = await self.run_node(state, "response_repair", repair_response)
-                    state.validation = await self.run_node(state, "response_validator", validate_response, attempt=2)
+                    state.draft = await self.run_node(
+                        state,
+                        "response_repair",
+                        lambda: repair_response(self.models, state.draft, state.validation, state.evidence),
+                    )
+                    state.validation = await self.run_node(
+                        state,
+                        "response_validator",
+                        lambda: validate_response(self.models, state.draft, state.evidence, self.assurance_mode),
+                        attempt=2,
+                    )
                 if not state.validation.passed:
                     return await self.finish_handoff(
                         state,
@@ -1294,14 +1483,14 @@ class TurnPipeline:
 
 - [ ] **Step 4: Run E2E and failure-injection tests**
 
-Run: `uv run pytest tests/e2e/test_turn_pipeline.py tests/e2e/test_failure_locations.py -v`
+Run: `uv run pytest tests/unit/pipeline/test_turn.py tests/e2e/test_turn_pipeline.py tests/e2e/test_failure_locations.py -v`
 
 Expected: all tests pass.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/agent_flow/pipeline/turn.py src/agent_flow/repositories/traces.py tests/e2e
+git add src/agent_flow/pipeline/turn.py src/agent_flow/repositories/traces.py tests/unit/pipeline tests/e2e
 git commit -m "feat: add fixed traced turn pipeline"
 ```
 
@@ -1495,7 +1684,7 @@ Run: `uv run pytest -v`
 
 Expected: all tests pass; ordinary suite makes no live model/RAG/tool/Webhook calls.
 
-- [ ] **Step 5: Run opt-in local inventory smoke**
+- [ ] **Step 5: Run opt-in local inventory and capability smoke**
 
 ```python
 # append to tests/conftest.py
@@ -1532,15 +1721,16 @@ def live_inventory_probe():
 # tests/live/test_local_inventory.py
 @pytest.mark.live_local_model
 @pytest.mark.asyncio
-async def test_live_local_inventory_resolves_exact_id(live_inventory_probe):
+async def test_live_local_generator_inventory_and_schema(live_inventory_probe):
     result = await live_inventory_probe.probe_role("response_generator")
     assert result.available is True
     assert result.model == "Qwen/Qwen3-8B"
+    assert {"chat", "structured_json", "reasoning_toggle"} <= result.verified_capabilities
 ```
 
 Run: `uv run pytest tests/live/test_local_inventory.py -v --run-live-local-model`
 
-Expected: exact model inventory passes for `Qwen/Qwen3-8B`; no generation is required by this inventory-only smoke.
+Expected: exact model inventory passes for `Qwen/Qwen3-8B`, and one bounded `ResponseDraft` schema generation with thinking disabled verifies the live capabilities required by generation and repair.
 
 - [ ] **Step 6: Commit**
 
@@ -1709,7 +1899,7 @@ Use these README headings and runnable command blocks:
 ## Deferred: Incident-first Console, Dual Judge, Improvement Lifecycle
 ```
 
-Under the API heading include executable PowerShell `Invoke-RestMethod` examples for a successful turn, trace retrieval, incremental events, and admin manual retry. Under troubleshooting include exact checks for vLLM `/v1/models`, Compose host routing, remote Ollama tags/show, pgvector extension, migration state, semaphore saturation, and failed outbox rows.
+Under the Model Registry heading document that `response_generator` requires `chat`, `structured_json`, and `reasoning_toggle`; show the opt-in live probe command and explain that a model name match without a passing `ResponseDraft` schema probe is not ready. Under the API heading include executable PowerShell `Invoke-RestMethod` examples for a successful turn, trace retrieval, incremental events, and admin manual retry. Under troubleshooting include exact checks for vLLM `/v1/models`, structured-output `response_format` rejection or invalid JSON, Compose host routing, remote Ollama tags/show, pgvector extension, migration state, semaphore saturation, and failed outbox rows.
 
 - [ ] **Step 5: Validate tests and Compose rendering**
 
