@@ -1,0 +1,48 @@
+mode: bootstrap
+promotion_semantic_mode: human_only
+disabled_roles:
+  - response_judge_zh_verifier
+  - promotion_judge_secondary
+endpoints:
+  local_vllm:
+    adapter: openai_compatible
+    base_url_env: LOCAL_VLLM_BASE_URL
+    api_key_env: LOCAL_VLLM_API_KEY
+    max_concurrency: 1
+  remote_models:
+    adapter: ollama_compatible
+    base_url_env: REMOTE_MODEL_BASE_URL
+    api_key_env: REMOTE_MODEL_API_KEY
+    max_concurrency: 6
+profiles:
+  local_generator:
+    endpoint: local_vllm
+    model: Qwen/Qwen3-8B
+    family: qwen
+    capabilities: [chat, structured_json, reasoning_toggle]
+    request_options: {enable_thinking: false}
+    temperature: 0.2
+    max_tokens: 1024
+    max_concurrency: 1
+  remote_structured:
+    endpoint: remote_models
+    model: qwen3.5:9b
+    family: qwen
+    capabilities: [chat, structured_json, reasoning_toggle]
+    request_options: {enable_thinking: false}
+    temperature: 0
+    max_tokens: 512
+    max_concurrency: 2
+  remote_embedding:
+    endpoint: remote_models
+    model: qwen3:embedding:0.6b
+    family: qwen
+    capabilities: [embedding]
+    max_concurrency: 4
+roles:
+  dialogue_classifier: remote_structured
+  strategy_advisor: local_generator
+  response_generator: local_generator
+  response_judge: remote_structured
+  promotion_judge_primary: remote_structured
+  embedding: remote_embedding
