@@ -16,13 +16,15 @@ The service must be diagnosable at node level. Every request must expose a trace
 
 - Backend: Python 3.12, FastAPI, Pydantic v2.
 - Package and virtual-environment management: `uv` with a committed `uv.lock`.
-- Model service: private remote OpenAI/Ollama-compatible endpoint configured only through `.env`.
-- Operator-provided Ollama-style runtime model names, used as opaque replaceable endpoint identifiers rather than public repository IDs or code-level requirements. They are authoritative only for the configured private server and are not considered verified until the Model Inventory Gate succeeds:
-  - `qwen3.6:35b-a3b`: complex strategy and customer-facing generation, with thinking disabled.
-  - `qwen3.5:9b`: intent/emotion classification, structured extraction, Traditional Chinese verification, and independent secondary promotion judging.
-  - `gemma-4-E4B-it`: primary semantic response and promotion judge; `gemma-4-12B-it` is the configured quality fallback if calibration is insufficient.
-  - `qwen3:embedding:0.6b`: embeddings.
-- Multiple model calls are allowed; larger models than the listed 35B-A3B are not required.
+- Model services: one local vLLM OpenAI-compatible endpoint plus one private remote Ollama-like/OpenAI-compatible endpoint, both configured only through `.env`.
+  - host/`uv` development default: `LOCAL_VLLM_BASE_URL=http://localhost:8000/v1`;
+  - Docker Compose default for host-run vLLM: `LOCAL_VLLM_BASE_URL=http://host.docker.internal:8000/v1`, with Linux `host-gateway` mapping documented; a container must not use its own `localhost` to reach the host service.
+- Operator-provided runtime model names—vLLM/OpenAI-compatible model IDs or Ollama-style tags—used as opaque replaceable endpoint identifiers rather than code-level requirements. They are authoritative only for their configured server and are not considered verified until the Model Inventory Gate succeeds:
+  - local vLLM `Qwen/Qwen3-8B`: bootstrap strategy and customer-facing generation.
+  - remote `qwen3.5:9b`: bootstrap intent/emotion classification, structured extraction, and semantic response judging.
+  - remote `qwen3:embedding:0.6b`: embeddings.
+- Design-time inventory check on 2026-07-20: `GET http://localhost:8000/v1/models` returned the exact local ID `Qwen/Qwen3-8B`. Chat/thinking/structured-output capability probes remain implementation gates; remote names remain unverified until remote `.env` is supplied.
+- Multiple model calls are allowed. Gemma and larger Qwen profiles are deferred target profiles, not bootstrap requirements.
 - Business data is not copied into local customer, product, order, or CRM master tables.
 - Business facts come only from RAG or read-only tool APIs. MVP integrations use typed mock adapters.
 - MVP returns advice only. It cannot create orders, appointments, refunds, or CRM updates.
@@ -57,8 +59,8 @@ Each node has one responsibility, consumes and produces Pydantic models, and rec
 6. `evidence_collector`: call independent RAG/tool sources concurrently with bounded timeouts and retries.
 7. `evidence_validator`: verify source, freshness, required fields, conflicts, and sufficiency. The system does not guess when evidence is insufficient.
 8. `strategy_selector`: combine policy, intent, conversation mode, emotion, risk, and evidence into a versioned `StrategyDecision` with reason codes.
-9. `response_generator`: use the 35B-A3B model with thinking disabled to generate a response from verified evidence and the selected strategy.
-10. `response_validator`: run deterministic format/policy checks and the configured Gemma primary semantic judge for grounding, citations, tone, route, and risk. Every `zh-TW` response also requires an independent Qwen Chinese-verifier verdict.
+9. `response_generator`: use the configured `response_generator` role (local vLLM `Qwen/Qwen3-8B` in bootstrap) with thinking disabled to generate a response from verified evidence and the selected strategy.
+10. `response_validator`: run deterministic format/policy checks and the configured `response_judge` for grounding, citations, tone, route, and risk. Bootstrap uses one remote Qwen judge with `reduced_assurance`; target `dual_judge` mode additionally requires the independent Traditional Chinese verifier.
 11. `response_repair`: if the draft is repairable, request one constrained rewrite that addresses only listed failures, then validate once more.
 12. `finalizer`: return a validated response, a conservative factual fallback, or a safe handoff message.
 13. `handoff_notifier`: create an outbox event and deliver a signed Webhook without blocking the safe customer response.
@@ -126,7 +128,9 @@ Application code addresses model roles, never vendor or model names. The stable 
 - `promotion_judge_secondary`;
 - `embedding`.
 
-Each role resolves to a named profile in `config/models.yaml`. The versioned YAML contains no secrets. It defines adapter type, model identifier, capabilities, generation parameters, timeout, concurrency/admission limits, optional fallback profiles, and model-specific request options. `.env` provides endpoint URLs, credentials, configuration path, and optional per-role overrides.
+`dialogue_classifier`, `strategy_advisor`, `response_generator`, `response_judge`, and `embedding` are required runtime roles. `response_judge_zh_verifier` and `promotion_judge_secondary` are assurance roles that may be explicitly disabled only in `bootstrap` mode. A disabled assurance role is visible in readiness/Console and lowers assurance; it is never silently mapped to the same profile as another judge.
+
+Each role resolves to a named profile in `config/models.yaml`. The versioned YAML contains no secrets. It defines adapter type, opaque runtime model identifier, declared model family, capabilities, generation parameters, timeout, concurrency/admission limits, optional fallback profiles, and model-specific request options. `.env` provides endpoint URLs, credentials, configuration path, and optional per-role overrides.
 
 Configuration precedence is:
 
@@ -134,73 +138,70 @@ Configuration precedence is:
 2. `config/models.yaml`;
 3. safe application defaults that contain no endpoint or credential.
 
-An example configuration is:
+The initial bootstrap configuration is:
 
 ```yaml
 endpoints:
-  private_chat:
+  local_vllm:
     adapter: openai_compatible
-    base_url_env: PRIVATE_CHAT_BASE_URL
-    api_key_env: PRIVATE_CHAT_API_KEY
+    base_url_env: LOCAL_VLLM_BASE_URL
+    api_key_env: LOCAL_VLLM_API_KEY
+    max_concurrency: 1
+
+  remote_models:
+    adapter: ollama_compatible
+    base_url_env: REMOTE_MODEL_BASE_URL
+    api_key_env: REMOTE_MODEL_API_KEY
     max_concurrency: 6
 
 profiles:
-  fast_structured:
-    endpoint: private_chat
+  local_generator:
+    endpoint: local_vllm
+    model: Qwen/Qwen3-8B
+    family: qwen
+    capabilities: [chat, reasoning_toggle]
+    request_options:
+      enable_thinking: false
+    temperature: 0.2
+    max_concurrency: 1
+
+  remote_structured:
+    endpoint: remote_models
     model: qwen3.5:9b
+    family: qwen
     capabilities: [chat, structured_json, reasoning_toggle]
     request_options:
       enable_thinking: false
     temperature: 0
     max_concurrency: 3
 
-  quality_generator:
-    endpoint: private_chat
-    model: qwen3.6:35b-a3b
-    capabilities: [chat, reasoning_toggle]
-    request_options:
-      enable_thinking: false
-    temperature: 0.2
-    max_concurrency: 2
-
-  gemma_judge:
-    endpoint: private_chat
-    model: gemma-4-E4B-it
-    capabilities: [chat, structured_json, reasoning_toggle]
-    fallback_profiles: [gemma_judge_12b]
-    request_options:
-      enable_thinking: false
-    temperature: 0
-    max_tokens: 512
-    max_concurrency: 2
-
-  gemma_judge_12b:
-    endpoint: private_chat
-    model: gemma-4-12B-it
-    capabilities: [chat, structured_json, reasoning_toggle]
-    request_options:
-      enable_thinking: false
-    temperature: 0
-    max_tokens: 512
-    max_concurrency: 1
-
-  semantic_embedding:
-    endpoint: private_chat
+  remote_embedding:
+    endpoint: remote_models
     model: qwen3:embedding:0.6b
+    family: qwen
     capabilities: [embedding]
     max_concurrency: 4
     batch_size: 32
 
 roles:
-  dialogue_classifier: fast_structured
-  strategy_advisor: quality_generator
-  response_generator: quality_generator
-  response_judge: gemma_judge
-  response_judge_zh_verifier: fast_structured
-  promotion_judge_primary: gemma_judge
-  promotion_judge_secondary: fast_structured
-  embedding: semantic_embedding
+  dialogue_classifier: remote_structured
+  strategy_advisor: local_generator
+  response_generator: local_generator
+  response_judge: remote_structured
+  promotion_judge_primary: remote_structured
+  embedding: remote_embedding
+
+assurance:
+  mode: bootstrap
+  disabled_roles: [response_judge_zh_verifier, promotion_judge_secondary]
+  promotion_semantic_mode: human_only
 ```
+
+Bootstrap mode is for pipeline, integration, logging, RAG/tool, retry, and baseline evaluation. Runtime validation uses deterministic gates plus the single remote Qwen judge and labels the result `reduced_assurance`. It does not call the same Qwen profile twice under two judge names. Promotion candidates may run deterministic and Qwen evaluations, but model verdicts cannot make a candidate eligible for activation; a human must review every semantic criterion.
+
+The target assurance configuration later adds a different-family Gemma primary `response_judge`/`promotion_judge_primary`, keeps remote Qwen as `response_judge_zh_verifier`/`promotion_judge_secondary`, changes `assurance.mode` to `dual_judge`, and changes `promotion_semantic_mode` to `dual_judge_required`. This is a configuration change subject to the Model Inventory Gate and promotion suite, not an application-code change.
+
+In `dual_judge` mode, startup rejects judge profiles with the same declared `family` or the same resolved server digest. In `bootstrap` mode, the Qwen-only limitation is explicit and cannot be represented as independent judges.
 
 Users may replace every example model with another small/private model by changing configuration. A replacement is accepted only when its declared capabilities satisfy the role. Fallback chains are explicit; a missing role never silently inherits another profile.
 
@@ -208,13 +209,15 @@ The adapter interface supports OpenAI-compatible chat/embedding endpoints first.
 
 Before any live-model integration is accepted, a **Model Inventory Gate** queries the configured endpoint's inventory API (`/api/tags` plus `/api/show` for Ollama-style servers, `/v1/models` for OpenAI-compatible servers, or an adapter-specific equivalent), requires an exact configured runtime-name match, and records the server-reported name/digest when available. It then runs bounded sample calls for chat, structured JSON, thinking disable behavior, and embeddings. There is no fuzzy name matching or silent substitution. Until the private `.env` is supplied and this gate passes, these names remain operator-provided but endpoint-unverified and development uses contract-test fakes/mocks.
 
-An optional `source_model`/license metadata field may document the upstream checkpoint, but it is informational and never used for routing or availability decisions. Different servers may legitimately expose custom, quantized, or locally renamed builds under these Ollama model names.
+An optional `source_model`/license metadata field may document the upstream checkpoint, but it is informational and never used for routing or availability decisions. Different servers may legitimately expose custom, quantized, or locally renamed builds under their runtime model names.
+
+The OpenAI-compatible adapter normalizes a single `/v1` suffix and rejects ambiguous double-suffixed URLs. The local vLLM inventory probe calls `GET /v1/models` and requires the exact returned ID `Qwen/Qwen3-8B` before its profile becomes ready.
 
 The same capability probes run at startup to verify configured model availability, structured JSON behavior where required, reasoning/thinking disable behavior where declared, and embedding dimension. A capability failure either activates an explicitly configured compatible fallback or makes readiness fail. The service embeds a sentinel string and validates its vector dimension against the migration setting before allowing vector writes. The resolved alias, reported upstream identifier/digest, capability result, and configuration checksum are visible in readiness and the Demo Console without credentials.
 
-The initially tested routing uses Qwen for classification, Gemma as the primary semantic judge, Qwen as the independent Traditional Chinese verifier and secondary promotion judge, a larger but bounded Qwen model for complex strategy/generation, and a dedicated embedding model. Model size and vendor names are not embedded in routing logic. Deterministic rules remain authoritative for high-risk and executable-action boundaries.
+The initial test routing uses local vLLM `Qwen/Qwen3-8B` for strategy/generation, remote `qwen3.5:9b` for classification and single semantic judging, and remote `qwen3:embedding:0.6b` for embeddings. Model size, endpoint, and vendor names are not embedded in application logic. Deterministic rules remain authoritative for high-risk and executable-action boundaries.
 
-For runtime validation, non-`zh-TW` responses require deterministic gates plus the Gemma verdict. Every `zh-TW` response requires deterministic gates, an independent Gemma verdict, and an independent Qwen verdict over the same frozen draft and evidence. Neither judge sees the other's output. Both model verdicts must pass before publication. A disagreement on a repairable tone, completeness, or language issue enters the single allowed repair cycle; a disagreement involving risk, unsupported facts, unsupported commitments, citation validity, or tool/evidence grounding causes human handoff. A second disagreement after repair also causes handoff.
+In `bootstrap` mode, runtime validation requires deterministic gates plus the remote Qwen verdict and exposes `reduced_assurance` in the response metadata and Console. This mode is for development/testing and is not eligible for unattended production promotion. In target `dual_judge` mode, non-`zh-TW` responses require deterministic gates plus the Gemma verdict, while every `zh-TW` response requires deterministic gates, an independent Gemma verdict, and an independent Qwen verdict over the same frozen draft and evidence. Neither judge sees the other's output. Both model verdicts must pass before publication. A disagreement on a repairable tone, completeness, or language issue enters the single allowed repair cycle; a disagreement involving risk, unsupported facts, unsupported commitments, citation validity, or tool/evidence grounding causes human handoff. A second disagreement after repair also causes handoff.
 
 Each verdict records language, judge role, resolved model profile and checksum, criteria results, confidence, evidence references, bounded decision summary, parsing/repair events, and latency. It does not store hidden chain-of-thought. The Console identifies the exact judge and failed criterion rather than reporting a generic validation failure.
 
@@ -231,12 +234,11 @@ Initial safe values are configuration defaults, not performance promises:
 ```env
 APP_MAX_IN_FLIGHT_TURNS=16
 MODEL_ACQUIRE_TIMEOUT_MS=5000
-MODEL_ENDPOINT_MAX_CONCURRENCY=6
-FAST_STRUCTURED_PROFILE_MAX_CONCURRENCY=3
-GENERATOR_PROFILE_MAX_CONCURRENCY=2
-GEMMA_JUDGE_PROFILE_MAX_CONCURRENCY=2
-GEMMA_JUDGE_12B_PROFILE_MAX_CONCURRENCY=1
-EMBEDDING_PROFILE_MAX_CONCURRENCY=4
+LOCAL_VLLM_ENDPOINT_MAX_CONCURRENCY=1
+REMOTE_MODEL_ENDPOINT_MAX_CONCURRENCY=6
+LOCAL_GENERATOR_PROFILE_MAX_CONCURRENCY=1
+REMOTE_STRUCTURED_PROFILE_MAX_CONCURRENCY=3
+REMOTE_EMBEDDING_PROFILE_MAX_CONCURRENCY=4
 EMBEDDING_BATCH_SIZE=32
 ```
 
@@ -298,7 +300,7 @@ Node expansion uses a shared shell with type-specific content:
 - evidence nodes show planned sources, parallel child calls, freshness, conflicts, sufficiency, and citation mappings;
 - strategy nodes show the selected strategy/version, applicable policy rules, rejected alternatives by reason code, and response constraints;
 - generation nodes show model/profile, prompt/template version, bounded parameters, token/latency data, evidence IDs supplied, and generated draft;
-- validation nodes show deterministic checks and separate Gemma/Qwen criterion matrices, disagreements, failed fields, and repair instructions;
+- validation nodes show deterministic checks, the active assurance mode, the bootstrap Qwen verdict or target Gemma/Qwen criterion matrices, disagreements, failed fields, and repair instructions;
 - handoff nodes show trigger reasons, outbox state, attempts, idempotency key, signature metadata without secrets, and downstream response.
 
 Input/output summaries come from explicit per-node presenter functions over typed contracts; the frontend does not infer meaning from arbitrary JSON. Large text and arrays are collapsed with item counts, searchable, and available in a final raw-data disclosure. A node deep link includes `trace_id`, `span_id`, and optional `event_sequence`, so a copied link opens the same expanded context.
@@ -426,7 +428,7 @@ Adopt:
 - five conversational response modes and ordered overrides;
 - emotion taxonomy and RULER-based evaluation;
 - deterministic compliance checks followed by a semantic judge;
-- 35B-A3B no-thinking generation, 9B judging, and one retry.
+- no-thinking generation, structured semantic judging, and one retry.
 
 Adapt or reject:
 
@@ -434,7 +436,7 @@ Adapt or reject:
 - do not use keyword-only denial detection;
 - replace PowerShell execution and `REASON:/REPLY:` parsing with Python and Pydantic JSON;
 - do not store native thinking output;
-- guard against observed 35B long-form essay failures using schema/output limits, deterministic checks, the configured Gemma semantic judge, one repair, and fallback.
+- guard against long-form essay failures from any generator profile using schema/output limits, deterministic checks, the configured semantic judge(s), one repair, and fallback.
 
 ## 12. Emotion Baseline Labeling
 
@@ -549,14 +551,14 @@ Before activation, a candidate runs a versioned promotion suite against the exac
 10. admission, concurrency, background-job, retry, idempotency, fallback, exact-error-location, and rollback tests;
 11. opt-in live model smoke/evaluation when the candidate changes a model profile, prompt, or provider adapter.
 
-Promotion semantic evaluation uses two independently configured model families:
+Promotion behavior depends explicitly on the captured assurance mode:
 
-1. Gemma is the **primary judge** and produces the canonical structured verdict, failed criteria, evidence references, confidence, and bounded decision summary.
-2. Qwen is the **secondary judge** and independently evaluates the same frozen candidate output without seeing the Gemma verdict.
-3. A deterministic hard-gate failure always fails the candidate, regardless of either model verdict.
-4. If both judges pass, the candidate becomes eligible for human approval; model agreement never activates it automatically.
-5. If the judges disagree, the evaluation status is `needs_adjudication` and a human must resolve the disputed criteria in an append-only `adjudicated` event. The system must not average scores into an automatic pass.
-6. The exact judge profile, model identifier, prompt/schema version, configuration checksum, raw structured verdict, and parser/repair events are stored with the evaluation record.
+1. A deterministic hard-gate failure always fails the candidate, regardless of any model or human semantic verdict.
+2. In `bootstrap` mode, remote `qwen3.5:9b` produces one advisory structured verdict. Because there is no independent model family, a passing Qwen verdict cannot make the candidate semantically eligible by itself. The later human `approved` event must include a criterion-by-criterion semantic review; unattended or model-only promotion is disabled.
+3. In target `dual_judge` mode, Gemma is the primary judge and Qwen is the secondary judge. They independently evaluate the same frozen candidate output without seeing each other's verdict.
+4. If both target judges pass, the candidate becomes eligible for human approval; model agreement never activates it automatically.
+5. If target judges disagree, the evaluation status is `needs_adjudication` and a human must resolve disputed criteria in an append-only `adjudicated` event. The system must not average scores into an automatic pass.
+6. The assurance mode, exact judge profiles, model identifiers, prompt/schema versions, configuration checksums, raw structured verdicts, and parser/repair events are stored with the evaluation record.
 
 Gemma judge adoption requires calibration against Traditional Chinese, safety, grounding, citation, and unsupported-commitment examples labeled by a human. False-pass rate is the primary selection metric. Start with the configured E4B instruct profile; switch the profile to the 12B instruct fallback only if it fails the calibration threshold. These identifiers are deployment aliases and remain replaceable through the Model Registry.
 
@@ -564,7 +566,8 @@ An `evaluation_completed` event contains suite version, source commit, dataset c
 
 An `approved` event requires `actor_type = 'human'`. An `activated` event is accepted only when:
 
-- the latest evaluation for the same iteration passed every hard gate, with any judge disagreement resolved by a later checksum-matched human `adjudicated` event;
+- the latest evaluation for the same iteration passed every hard gate;
+- in `bootstrap` mode, the later checksum-matched human approval contains the required semantic criterion review; in `dual_judge` mode, both judges passed or a later checksum-matched human `adjudicated` event resolved every disagreement;
 - the evaluated artifact/configuration/dataset checksums still match the candidate;
 - a later human approval exists for those same checksums;
 - no later rejection or candidate modification invalidated the result.
@@ -582,9 +585,9 @@ Authenticated `uv run` CLI commands call one promotion service for approval, act
 - `frontend`: separate lightweight demo frontend container that proxies same-origin API/Console requests.
 - `demo-seed`: optional Compose profile that loads mock tool fixtures, example RAG documents, and the 60 labeling candidates.
 
-Remote model services are external to Compose. Containers receive endpoint/config paths through `.env` and `config/models.yaml`. Compose includes explicit networks, named volumes, health checks, restart policy, read-only mounts where possible, and a non-root application user. Images are pinned to versions/digests during implementation rather than using floating `latest` tags.
+The host vLLM service and remote model service are external to Compose. Containers receive endpoint/config paths through `.env` and `config/models.yaml`; the app reaches host vLLM through `host.docker.internal` rather than container-localhost. Compose includes the documented Linux `host-gateway` mapping, explicit networks, named volumes, health checks, restart policy, read-only mounts where possible, and a non-root application user. Images are pinned to versions/digests during implementation rather than using floating `latest` tags.
 
-Add `Dockerfile`, `compose.yaml`, `.dockerignore`, `.env.example`, `config/models.example.yaml`, and documented development/production override files. Secrets are never baked into images or committed.
+Add `Dockerfile`, `compose.yaml`, `.dockerignore`, `.env.example`, `config/models.bootstrap.example.yaml`, `config/models.dual-judge.example.yaml`, and documented development/production override files. The bootstrap example uses the confirmed local vLLM and remote Qwen names; the dual-judge example remains inactive until its models pass inventory/calibration. Secrets are never baked into images or committed.
 
 ### 14.2 README Contents
 
@@ -615,6 +618,7 @@ The root `README.md` must document:
 - Unit tests for every node, Pydantic contract, strategy rule, risk rule, and error mapping.
 - Contract tests shared by mock and remote RAG/tool/model/Webhook adapters.
 - Model Inventory Gate tests for exact alias resolution, missing/duplicate alias, reported model digest, structured JSON, thinking disable behavior, and embedding dimension; live execution is opt-in until private `.env` exists.
+- Assurance-mode tests verify bootstrap exposes `reduced_assurance`, never invokes one profile twice as two judges, requires criterion-level human semantic approval for promotion, and rejects dual-judge profiles that share a family or resolved digest.
 - Authorization tests for self-service identity derivation, `customer:act_as`, tenant/customer/session/case ownership, trace access, manual retry, and IDOR attempts that assert no downstream model/RAG/tool call occurs.
 - PostgreSQL integration tests for migrations, vector dimension, exact cosine search, retention, and outbox delivery.
 - Retention/security tests verify 30-day raw-turn deletion, 180-day structured-trace retention, tenant-scoped raw-text access/audit, and absence of full conversation text or secrets from stdout/events.
@@ -635,6 +639,7 @@ The root `README.md` must document:
 - Manual retry creates an immutable linked trace, enforces authorization/limits, refreshes only live read-only tools, never delivers a second customer reply automatically, and never duplicates a queued/delivered handoff.
 - Ordinary tests make no production model, RAG, tool, or Webhook calls.
 - No private model profile is marked verified or readiness-healthy until its inventory and capability probes pass against the configured endpoint.
+- Host-run development resolves local vLLM at `http://localhost:8000/v1`; the Compose connectivity test resolves it through `host.docker.internal:8000/v1` and never assumes container-localhost.
 - Cross-customer and cross-tenant identifiers are rejected before downstream access in both real and mock adapter paths.
 - The 18-item emotion lock set meets macro-F1 0.80 and has no represented safety-override miss as a provisional regression tripwire; reports include sample support, raw misses, confusion matrix, and confidence intervals and make no generalization claim.
 - Latency, capacity-wait time, token counts, and throughput are recorded as a baseline; a later capacity review sets P95 release limits.
@@ -646,7 +651,7 @@ The root `README.md` must document:
 - Creating or modifying orders, appointments, refunds, accounts, or CRM records.
 - Autonomous browser or desktop actions.
 - Training or fine-tuning model weights.
-- Models larger than the available 35B-A3B role.
+- Adding models larger than the approved target profiles without a capacity and quality review.
 - A production customer-facing frontend, SSO, or full contact-center dashboard.
 - Automatic long-term customer-profile memory.
 - Raw hidden model reasoning capture.
