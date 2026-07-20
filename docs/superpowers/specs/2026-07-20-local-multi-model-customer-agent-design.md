@@ -17,11 +17,11 @@ The service must be diagnosable at node level. Every request must expose a trace
 - Backend: Python 3.12, FastAPI, Pydantic v2.
 - Package and virtual-environment management: `uv` with a committed `uv.lock`.
 - Model service: private remote OpenAI/Ollama-compatible endpoint configured only through `.env`.
-- Planned private-endpoint aliases, used as replaceable configuration rather than code-level requirements and not considered verified until the Model Inventory Gate succeeds:
-  - `qwen3.6:35b-a3b` (expected upstream `Qwen/Qwen3.6-35B-A3B`): complex strategy and customer-facing generation, with thinking disabled.
-  - `qwen3.5:9b` (expected upstream `Qwen/Qwen3.5-9B`): intent/emotion classification, structured extraction, Traditional Chinese verification, and independent secondary promotion judging.
-  - `gemma-4-E4B-it` (expected upstream `google/gemma-4-E4B-it`): primary semantic response and promotion judge; `gemma-4-12B-it` (expected upstream `google/gemma-4-12B-it`) is the configured quality fallback if calibration is insufficient.
-  - `qwen3:embedding:0.6b` (expected upstream `Qwen/Qwen3-Embedding-0.6B`): embeddings.
+- Operator-provided Ollama-style runtime model names, used as opaque replaceable endpoint identifiers rather than public repository IDs or code-level requirements. They are authoritative only for the configured private server and are not considered verified until the Model Inventory Gate succeeds:
+  - `qwen3.6:35b-a3b`: complex strategy and customer-facing generation, with thinking disabled.
+  - `qwen3.5:9b`: intent/emotion classification, structured extraction, Traditional Chinese verification, and independent secondary promotion judging.
+  - `gemma-4-E4B-it`: primary semantic response and promotion judge; `gemma-4-12B-it` is the configured quality fallback if calibration is insufficient.
+  - `qwen3:embedding:0.6b`: embeddings.
 - Multiple model calls are allowed; larger models than the listed 35B-A3B are not required.
 - Business data is not copied into local customer, product, order, or CRM master tables.
 - Business facts come only from RAG or read-only tool APIs. MVP integrations use typed mock adapters.
@@ -206,7 +206,9 @@ Users may replace every example model with another small/private model by changi
 
 The adapter interface supports OpenAI-compatible chat/embedding endpoints first. Provider-specific details such as Ollama-style thinking controls or extra request bodies live in the adapter/profile, not in `TurnPipeline`. Logs record the resolved role, profile, model, adapter, and configuration checksum but never credentials.
 
-Before any live-model integration is accepted, a **Model Inventory Gate** queries the configured endpoint's model-list API (`/v1/models`, Ollama-compatible tags, or an adapter-specific equivalent), requires an exact configured alias match, and records the server-reported identifier/digest when available. It then runs bounded sample calls for chat, structured JSON, thinking disable behavior, and embeddings. There is no fuzzy alias matching or silent substitution. Until the private `.env` is supplied and this gate passes, these names remain planned aliases and development uses contract-test fakes/mocks.
+Before any live-model integration is accepted, a **Model Inventory Gate** queries the configured endpoint's inventory API (`/api/tags` plus `/api/show` for Ollama-style servers, `/v1/models` for OpenAI-compatible servers, or an adapter-specific equivalent), requires an exact configured runtime-name match, and records the server-reported name/digest when available. It then runs bounded sample calls for chat, structured JSON, thinking disable behavior, and embeddings. There is no fuzzy name matching or silent substitution. Until the private `.env` is supplied and this gate passes, these names remain operator-provided but endpoint-unverified and development uses contract-test fakes/mocks.
+
+An optional `source_model`/license metadata field may document the upstream checkpoint, but it is informational and never used for routing or availability decisions. Different servers may legitimately expose custom, quantized, or locally renamed builds under these Ollama model names.
 
 The same capability probes run at startup to verify configured model availability, structured JSON behavior where required, reasoning/thinking disable behavior where declared, and embedding dimension. A capability failure either activates an explicitly configured compatible fallback or makes readiness fail. The service embeds a sentinel string and validates its vector dimension against the migration setting before allowing vector writes. The resolved alias, reported upstream identifier/digest, capability result, and configuration checksum are visible in readiness and the Demo Console without credentials.
 
@@ -593,7 +595,7 @@ The root `README.md` must document:
 3. quick start, configuration copy steps, migration, demo seed, and shutdown;
 4. every `.env.example` system, admission/concurrency, database, Webhook, authentication, retention, and observability setting;
 5. Model Registry roles, profiles, capabilities, fallback chains, adapter options, and environment override precedence;
-6. replacing classifier, judge, generator, strategy, and embedding models without code changes;
+6. Ollama/OpenAI-compatible runtime model names as opaque endpoint identifiers, the optional upstream `source_model` metadata, Model Inventory Gate behavior, and replacing classifier, judge, generator, strategy, and embedding models without code changes;
 7. Compose services, profiles, ports, networks, volumes, health checks, and external model connectivity;
 8. pgvector schema, migrations, embedding-dimension probe, ingestion, re-embedding, and backup/restore;
 9. mock data and demo frontend workflows;
