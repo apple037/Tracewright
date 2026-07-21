@@ -58,7 +58,7 @@ class PostgresConversationRepository:
                     JOIN observability.traces AS trace ON trace.id = turn.trace_id
                     WHERE turn.tenant_id = %s AND turn.customer_id = %s
                       AND turn.session_id = %s AND trace.status = 'succeeded'
-                    ORDER BY created_at, id
+                    ORDER BY turn.created_at, turn.id
                     """,
                     (tenant_id, customer_id, session_id),
                 )

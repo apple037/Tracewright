@@ -351,14 +351,20 @@ class PostgresTraceRepository:
                 )
                 if await cursor.fetchone() is None:
                     cursor = await connection.execute(
-                        "SELECT finished_at FROM observability.spans "
+                        "SELECT status, error_code, finished_at FROM observability.spans "
                         "WHERE id = %s AND tenant_id = %s",
                         (span_id, tenant_id),
                     )
                     existing = await cursor.fetchone()
                     if existing is None:
                         raise ValueError("span does not exist")
-                    raise ValueError("span is already finished")
+                    if (
+                        existing["finished_at"] is not None
+                        and (existing["status"], existing["error_code"])
+                        == (status, error_code)
+                    ):
+                        return
+                    raise ValueError("span is already finished with conflicting values")
 
     async def finish_trace(
         self,
@@ -404,14 +410,25 @@ class PostgresTraceRepository:
                 )
                 if cursor.rowcount != 1:
                     cursor = await connection.execute(
-                        "SELECT finished_at FROM observability.traces "
+                        "SELECT status, primary_failure_event_id, terminal_outcome, "
+                        "delivery_disposition, finished_at FROM observability.traces "
                         "WHERE id = %s AND tenant_id = %s",
                         (trace_id, tenant_id),
                     )
                     existing = await cursor.fetchone()
                     if existing is None:
                         raise ValueError("trace does not exist")
-                    raise ValueError("trace is already finalized")
+                    requested = (
+                        status, primary_failure_event_id, terminal_outcome,
+                        delivery_disposition,
+                    )
+                    stored = (
+                        existing["status"], existing["primary_failure_event_id"],
+                        existing["terminal_outcome"], existing["delivery_disposition"],
+                    )
+                    if existing["finished_at"] is not None and stored == requested:
+                        return
+                    raise ValueError("trace is already finalized with conflicting values")
 
     async def get_trace(self, trace_id: UUID, *, tenant_id: str) -> TraceRecord | None:
         async with self._pool.connection() as connection:

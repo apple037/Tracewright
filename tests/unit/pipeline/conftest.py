@@ -27,6 +27,7 @@ class TraceSpy:
     def __init__(self):
         self.completed_nodes = []
         self.events = []
+        self.finished = []
 
     async def start_span(self, trace_id, name, *, tenant_id, attempt=1):
         return uuid4()
@@ -42,6 +43,7 @@ class TraceSpy:
         return event
 
     async def finish_span(self, span_id, status, *, tenant_id, error_code=None):
+        self.finished.append((span_id, status, error_code))
         if status == "completed":
             started = next(e for e in reversed(self.events) if e.span_id == span_id)
             self.completed_nodes.append(started.payload["node"])

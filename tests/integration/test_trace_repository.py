@@ -222,6 +222,21 @@ async def test_trace_finalization_is_terminal_and_cannot_be_clobbered(
 
     with pytest.raises(ValueError, match="already finalized"):
         await trace_repository.finish_trace(trace_id, "failed", tenant_id="t1")
+
+
+@pytest.mark.asyncio
+async def test_trace_finalization_identical_replay_is_idempotent(trace_repository):
+    trace_id = await trace_repository.start_trace(
+        tenant_id="t1", customer_id="c1", session_id="s1"
+    )
+    kwargs = {"tenant_id": "t1", "terminal_outcome": "reply", "delivery_disposition": "deliver"}
+    await trace_repository.finish_trace(trace_id, "succeeded", **kwargs)
+    await trace_repository.finish_trace(trace_id, "succeeded", **kwargs)
+    with pytest.raises(ValueError, match="conflicting"):
+        await trace_repository.finish_trace(
+            trace_id, "failed", tenant_id="t1", terminal_outcome="handoff",
+            delivery_disposition="suppressed",
+        )
     with pytest.raises(ValueError, match="does not exist"):
         await trace_repository.finish_trace(uuid4(), "failed", tenant_id="t1")
 

@@ -19,6 +19,13 @@ from agent_flow.errors import AgentError
 from agent_flow.pipeline.policy import EVIDENCE_COLLECTOR_ALLOWED_ACTIONS
 
 
+class EvidenceSourceCancelled(asyncio.CancelledError):
+    def __init__(self, component: str, operation: str):
+        super().__init__(f"{component}:{operation} cancelled")
+        self.component = component
+        self.operation = operation
+
+
 def plan_evidence(classification: DialogueClassification) -> EvidencePlan:
     if classification.intent == "order_status":
         return EvidencePlan(
@@ -47,18 +54,47 @@ async def collect_evidence(
     tools: ToolClient,
 ) -> CollectedEvidence:
     _validate_action_plan(plan)
-    rag_tasks: list[asyncio.Task] = []
-    tool_tasks: list[asyncio.Task] = []
-    async with asyncio.TaskGroup() as group:
-        for query in plan.rag_queries:
-            rag_tasks.append(
-                group.create_task(_search_rag(rag, context, query))
+    task_sources: dict[asyncio.Task, tuple[str, str]] = {}
+    rag_tasks = []
+    for query in plan.rag_queries:
+        task = asyncio.create_task(_search_rag(rag, context, query))
+        rag_tasks.append(task)
+        task_sources[task] = ("rag", query)
+    tool_tasks = []
+    for call in plan.tool_calls:
+        task = asyncio.create_task(_call_tool(tools, context, call))
+        tool_tasks.append(task)
+        task_sources[task] = ("tool", call.operation)
+    tasks = [*rag_tasks, *tool_tasks]
+    if tasks:
+        try:
+            done, pending = await asyncio.wait(
+                tasks, return_when=asyncio.FIRST_EXCEPTION
             )
-        for call in plan.tool_calls:
-            tool_tasks.append(
-                group.create_task(
-                    _call_tool(tools, context, call)
-                )
+        except asyncio.CancelledError:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+        failures = [
+            error for task in done
+            if (error := task.exception()) is not None
+        ]
+        if failures:
+            for task in pending:
+                task.cancel()
+            pending_list = list(pending)
+            pending_results = await asyncio.gather(
+                *pending_list, return_exceptions=True
+            )
+            cancelled = []
+            for task, result in zip(pending_list, pending_results, strict=True):
+                if isinstance(result, asyncio.CancelledError):
+                    cancelled.append(EvidenceSourceCancelled(*task_sources[task]))
+                elif isinstance(result, BaseException):
+                    cancelled.append(result)
+            raise BaseExceptionGroup(
+                "evidence source outcomes", [*failures, *cancelled]
             )
 
     items: list[EvidenceItem] = []
@@ -74,6 +110,8 @@ async def _search_rag(
 ):
     try:
         return await rag.search(context, RagSearchRequest(query=query))
+    except asyncio.CancelledError as exc:
+        raise EvidenceSourceCancelled("rag", query) from exc
     except Exception as exc:
         raise AgentError.dependency(
             "EVIDENCE_SOURCE_FAILED",
@@ -94,6 +132,8 @@ async def _call_tool(
             context,
             ToolCallRequest(tool=call.operation, arguments=call.arguments),
         )
+    except asyncio.CancelledError as exc:
+        raise EvidenceSourceCancelled("tool", call.operation) from exc
     except Exception as exc:
         raise AgentError.dependency(
             "EVIDENCE_SOURCE_FAILED",

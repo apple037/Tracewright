@@ -17,6 +17,13 @@ class MemoryTraces:
         self._event_id = 0
 
     async def start_trace(self, **scope):
+        retry_of = scope.get("retry_of_trace_id")
+        if retry_of is not None:
+            source = self.records.get(retry_of)
+            if source is None or (
+                source.tenant_id, source.customer_id, source.session_id
+            ) != (scope["tenant_id"], scope["customer_id"], scope["session_id"]):
+                raise ValueError("retry source trace does not belong to this scope")
         trace_id = uuid4()
         self.records[trace_id] = SimpleNamespace(
             id=trace_id, spans=[], events=[], status="running", primary_failure_event_id=None,
@@ -35,6 +42,7 @@ class MemoryTraces:
         payload = kwargs["payload"]
         event = SimpleNamespace(
             id=self._event_id, node=payload.get("node"), kind=kwargs["status"],
+            event_type=kwargs["event_type"],
             metadata=payload.get("metadata", {}), payload=payload,
             error_code=kwargs.get("error_code"), component=kwargs["component"],
             operation=payload.get("operation"), span_id=kwargs["span_id"],
@@ -44,11 +52,22 @@ class MemoryTraces:
 
     async def finish_span(self, span_id, status, *, tenant_id, error_code=None):
         span = next(s for r in self.records.values() for s in r.spans if s.id == span_id)
+        if span.status != "running":
+            if (span.status, span.error_code) == (status, error_code):
+                return
+            raise ValueError("span is already finished")
         span.status, span.error_code = status, error_code
 
     async def finish_trace(self, trace_id, status, *, tenant_id, primary_failure_event_id=None, terminal_outcome=None, delivery_disposition=None):
         record = self.records[trace_id]
+        terminal = (status, primary_failure_event_id, terminal_outcome, delivery_disposition)
+        if record.status != "running":
+            existing = (record.status, record.primary_failure_event_id, record.terminal_outcome, getattr(record, "delivery_disposition", None))
+            if existing == terminal:
+                return
+            raise ValueError("trace is already finalized with conflicting values")
         record.status, record.primary_failure_event_id, record.terminal_outcome = status, primary_failure_event_id, terminal_outcome
+        record.delivery_disposition = delivery_disposition
         if primary_failure_event_id:
             event = next(e for e in record.events if e.id == primary_failure_event_id)
             record.issue_summary = SimpleNamespace(
@@ -57,22 +76,28 @@ class MemoryTraces:
             )
 
     async def get_trace(self, trace_id, *, tenant_id):
-        return self.records.get(trace_id)
+        record = self.records.get(trace_id)
+        return record if record is not None and record.tenant_id == tenant_id else None
 
 
 class MemoryConversations:
     def __init__(self, now):
-        self.now, self.persisted, self.snapshots = now, [], {}
+        self.now, self.persisted, self.snapshots, self.scopes = now, [], {}, {}
 
     async def get_snapshot(self, *, tenant_id, customer_id, session_id, trace_id):
         snapshot = ConversationSnapshot(session_id=session_id, messages=("prior",), captured_at=self.now)
         self.snapshots[trace_id] = snapshot
+        self.scopes[trace_id] = (tenant_id, customer_id, session_id)
         return snapshot
 
     async def get_retry_snapshot(self, trace_id, *, tenant_id, customer_id, bind_trace_id=None):
+        scope = self.scopes.get(trace_id)
+        if scope is None or scope[:2] != (tenant_id, customer_id):
+            raise ValueError("retry snapshot does not exist in this scope")
         snapshot = self.snapshots[trace_id]
         if bind_trace_id is not None:
             self.snapshots[bind_trace_id] = snapshot
+            self.scopes[bind_trace_id] = scope
         return snapshot
 
     async def append_turn(self, **turn):
@@ -80,8 +105,13 @@ class MemoryConversations:
 
 
 class MemoryHandoffs:
-    def __init__(self): self.items = []
-    async def enqueue(self, **item): self.items.append(item)
+    def __init__(self): self.items, self.keys = [], set()
+    async def enqueue(self, **item):
+        key = item["idempotency_key"]
+        if key not in self.keys:
+            self.keys.add(key)
+            self.items.append(item)
+        return key
 
 
 class Clock:

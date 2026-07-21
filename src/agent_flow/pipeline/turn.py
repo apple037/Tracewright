@@ -13,6 +13,7 @@ from agent_flow.contracts import (
     HandoffEvent,
     TurnRequest,
     TurnResult,
+    ConversationMode,
 )
 from agent_flow.errors import AgentError
 from agent_flow.pipeline.classify import classify_dialogue
@@ -86,6 +87,12 @@ def _causal_error(error: BaseException) -> BaseException:
     return error
 
 
+def _flatten_errors(error: BaseException) -> list[BaseException]:
+    if isinstance(error, BaseExceptionGroup):
+        return [leaf for child in error.exceptions for leaf in _flatten_errors(child)]
+    return [error]
+
+
 def _error_details(error: BaseException, node: str) -> tuple[str, str, str | None]:
     causal = _causal_error(error)
     if isinstance(causal, AgentError):
@@ -94,8 +101,30 @@ def _error_details(error: BaseException, node: str) -> tuple[str, str, str | Non
             component = "order_api"
         return causal.error_code, component, causal.operation
     if isinstance(causal, asyncio.CancelledError):
-        return "CANCELLED", node, None
+        component = getattr(causal, "component", node)
+        operation = getattr(causal, "operation", None)
+        if component == "tool" and operation == "order.lookup":
+            component = "order_api"
+        return "CANCELLED", component, operation
     return "UNEXPECTED_ERROR", node, None
+
+
+def _risk_or_raise(classification, message):
+    decision = risk_precheck(classification, message)
+    if decision.requires_handoff:
+        raise AgentError.validation(
+            decision.reason_code or "HIGH_RISK", failure_stage="risk_precheck"
+        )
+    return decision
+
+
+async def _validate_or_raise(models, draft, evidence, assurance_mode, *, final: bool):
+    result = await validate_response(models, draft, evidence, assurance_mode)
+    if not result.passed and (final or not result.repairable):
+        raise AgentError.validation(
+            "VALIDATION_EXHAUSTED", failure_stage="response_validator"
+        )
+    return result
 
 
 class TurnPipeline:
@@ -151,14 +180,62 @@ class TurnPipeline:
             state.trace_id, name, tenant_id=state.context.tenant_id, attempt=attempt
         )
         state.spans[f"{name}:{attempt}"] = span_id
-        await self._event(state, span_id, name, "started", attempt=attempt)
         try:
+            await self._event(
+                state, span_id, name, "started", attempt=attempt, metadata=metadata
+            )
             pending_or_value = operation()
             value = await pending_or_value if isawaitable(pending_or_value) else pending_or_value
         except asyncio.CancelledError as error:
-            await self._event(state, span_id, name, "cancelled", attempt=attempt, error=error)
-            await self.traces.finish_span(span_id, "cancelled", tenant_id=state.context.tenant_id, error_code="CANCELLED")
+            event = await self._bounded_cleanup(
+                self._retry_idempotent(
+                    lambda: self._cancel_node(
+                        state, span_id, name, attempt, error
+                    ),
+                    retry_cancellation=True,
+                )
+            )
+            if event is not None and state.primary_failure_event_id is None:
+                state.primary_failure_event_id = event.id
             raise
+        except BaseExceptionGroup as group:
+            leaves = _flatten_errors(group)[:20]
+            ordered = sorted(
+                leaves,
+                key=lambda value: (
+                    isinstance(value, asyncio.CancelledError),
+                    _error_details(value, name)[1],
+                    _error_details(value, name)[2] or "",
+                    _error_details(value, name)[0],
+                ),
+            )
+            causal = next(
+                (value for value in ordered if isinstance(value, AgentError)),
+                next((value for value in ordered if not isinstance(value, asyncio.CancelledError)), ordered[0]),
+            )
+            primary_event = None
+            for index, child in enumerate(ordered):
+                event = await self._child_event(
+                    state, span_id, name, attempt, child, index
+                )
+                if child is causal:
+                    primary_event = event
+            if isinstance(causal, asyncio.CancelledError):
+                await self.traces.finish_span(
+                    span_id, "cancelled", tenant_id=state.context.tenant_id,
+                    error_code="CANCELLED",
+                )
+                if primary_event is not None and state.primary_failure_event_id is None:
+                    state.primary_failure_event_id = primary_event.id
+                raise causal
+            code, _, _ = _error_details(causal, name)
+            await self.traces.finish_span(
+                span_id, "failed", tenant_id=state.context.tenant_id,
+                error_code=code,
+            )
+            if primary_event is not None and state.primary_failure_event_id is None:
+                state.primary_failure_event_id = primary_event.id
+            raise causal
         except Exception as error:
             causal = _causal_error(error)
             event = await self._event(state, span_id, name, "failed", attempt=attempt, error=causal)
@@ -171,6 +248,51 @@ class TurnPipeline:
         await self._event(state, span_id, name, "completed", attempt=attempt, metadata=metadata)
         return value
 
+    async def _child_event(self, state, span_id, name, attempt, error, index):
+        code, component, operation = _error_details(error, name)
+        status = "cancelled" if isinstance(error, asyncio.CancelledError) else "failed"
+        return await self.traces.append_event(
+            trace_id=state.trace_id, span_id=span_id,
+            tenant_id=state.context.tenant_id, event_type="node_child",
+            component=component, status=status, error_code=code,
+            payload={
+                "node": name, "attempt": attempt, "child_index": index,
+                "failure_stage": name, "operation": operation,
+            },
+        )
+
+    async def _cancel_node(self, state, span_id, name, attempt, error):
+        event = await self._event(
+            state, span_id, name, "cancelled", attempt=attempt, error=error
+        )
+        await self.traces.finish_span(
+            span_id, "cancelled", tenant_id=state.context.tenant_id,
+            error_code="CANCELLED",
+        )
+        return event
+
+    async def _bounded_cleanup(self, pending, timeout: float = 1.0):
+        task = asyncio.create_task(pending)
+        try:
+            return await asyncio.wait_for(asyncio.shield(task), timeout)
+        except asyncio.CancelledError:
+            return await asyncio.wait_for(asyncio.shield(task), timeout)
+
+    async def _retry_idempotent(
+        self, operation, attempts: int = 2, *, retry_cancellation: bool = False
+    ):
+        last_error = None
+        for _ in range(attempts):
+            try:
+                return await operation()
+            except Exception as error:
+                last_error = error
+            except asyncio.CancelledError as error:
+                if not retry_cancellation:
+                    raise
+                last_error = error
+        raise last_error
+
     def _artifact_metadata(self) -> dict[str, JSONValue]:
         if self.artifacts is None:
             return {}
@@ -179,6 +301,54 @@ class TurnPipeline:
             "response_prompt_ref": self.artifacts.response_prompt.ref.model_dump(mode="json"),
             "persona_refs": [p.ref.model_dump(mode="json") for p in self.artifacts.personas],
         }
+
+    async def _retry_artifact_metadata(self, state: TurnState, retry_of: UUID):
+        source = await self.traces.get_trace(
+            retry_of, tenant_id=state.context.tenant_id
+        )
+        if (
+            source is None
+            or source.customer_id != state.context.customer_id
+            or source.session_id != state.request.session_id
+        ):
+            raise AgentError.validation(
+                "RETRY_SCOPE_MISMATCH", failure_stage="context_loader"
+            )
+        event = next(
+            (
+                value for value in source.events
+                if value.node == "context_loader"
+                and value.kind in {"started", "completed"}
+                and value.metadata
+            ),
+            None,
+        )
+        if event is None:
+            raise AgentError.validation(
+                "ARTIFACT_SNAPSHOT_MISSING", failure_stage="context_loader"
+            )
+        return _validated_trace_metadata(event.metadata)
+
+    async def _load_context(
+        self, state: TurnState, retry_of: UUID | None,
+        frozen_artifacts: Mapping[str, JSONValue],
+    ):
+        if retry_of is not None:
+            snapshot = await self.conversations.get_retry_snapshot(
+                retry_of, tenant_id=state.context.tenant_id,
+                customer_id=state.context.customer_id, bind_trace_id=state.trace_id,
+            )
+        else:
+            snapshot = await self.conversations.get_snapshot(
+                tenant_id=state.context.tenant_id,
+                customer_id=state.context.customer_id,
+                session_id=state.request.session_id, trace_id=state.trace_id,
+            )
+        if dict(frozen_artifacts) != self._artifact_metadata():
+            raise AgentError.validation(
+                "ARTIFACT_VERSION_UNRESOLVED", failure_stage="context_loader"
+            )
+        return snapshot
 
     async def run(
         self, context: AuthorizedCustomerContext, request: TurnRequest, retry_of: UUID | None = None
@@ -191,28 +361,22 @@ class TurnPipeline:
         )
         state = TurnState(trace_id=trace_id, context=context, request=request)
         try:
+            frozen_artifacts = (
+                await self._retry_artifact_metadata(state, retry_of)
+                if retry_of is not None else self._artifact_metadata()
+            )
             state.snapshot = await self.run_node(
                 state, "context_loader",
-                lambda: self.conversations.get_retry_snapshot(
-                    retry_of, tenant_id=context.tenant_id, customer_id=context.customer_id,
-                    bind_trace_id=trace_id,
-                ) if retry_of is not None else self.conversations.get_snapshot(
-                    tenant_id=context.tenant_id, customer_id=context.customer_id,
-                    session_id=request.session_id, trace_id=trace_id,
-                ),
-                trace_metadata=self._artifact_metadata(),
+                lambda: self._load_context(state, retry_of, frozen_artifacts),
+                trace_metadata=frozen_artifacts,
             )
             state.classification = await self.run_node(
                 state, "dialogue_classifier",
                 lambda: classify_dialogue(self.models, (*state.snapshot.messages, request.message)),
             )
             state.risk = await self.run_node(
-                state, "risk_precheck", lambda: risk_precheck(state.classification, request.message)
+                state, "risk_precheck", lambda: _risk_or_raise(state.classification, request.message)
             )
-            if state.risk.requires_handoff:
-                return await self._handoff(
-                    state, state.risk.reason_code or "HIGH_RISK", failed_node="risk_precheck"
-                )
             state.persona = resolve_persona(
                 state.classification.conversation_mode, self.artifacts.personas
             )
@@ -235,7 +399,12 @@ class TurnPipeline:
                 ),
                 trace_metadata={
                     "prompt_ref": self.artifacts.strategy_prompt.ref.model_dump(mode="json"),
-                    "persona_ref": state.persona.ref.model_dump(mode="json") if state.persona else None,
+                    "persona_ref": (
+                        state.persona.ref.model_dump(mode="json")
+                        if state.persona is not None and state.classification.conversation_mode
+                        in {ConversationMode.EMOTIONAL_SUPPORT, ConversationMode.CASUAL}
+                        else None
+                    ),
                 },
             )
             state.draft = await self.run_node(
@@ -251,7 +420,10 @@ class TurnPipeline:
             )
             state.validation = await self.run_node(
                 state, "response_validator",
-                lambda: validate_response(self.models, state.draft, state.evidence, self.assurance_mode),
+                lambda: _validate_or_raise(
+                    self.models, state.draft, state.evidence, self.assurance_mode,
+                    final=False,
+                ),
             )
             if not state.validation.passed and state.validation.repairable:
                 state.draft = await self.run_node(
@@ -267,12 +439,25 @@ class TurnPipeline:
                 )
                 state.validation = await self.run_node(
                     state, "response_validator",
-                    lambda: validate_response(self.models, state.draft, state.evidence, self.assurance_mode),
+                    lambda: _validate_or_raise(
+                        self.models, state.draft, state.evidence, self.assurance_mode,
+                        final=True,
+                    ),
                     attempt=2,
                 )
-            if not state.validation.passed:
-                return await self._handoff(state, "VALIDATION_EXHAUSTED", failed_node="response_validator", attempt=2 if "response_validator:2" in state.spans else 1)
             return await self._finalize(state)
+        except asyncio.CancelledError:
+            await self._bounded_cleanup(
+                self._retry_idempotent(
+                    lambda: self.traces.finish_trace(
+                        state.trace_id, "failed", tenant_id=state.context.tenant_id,
+                        primary_failure_event_id=state.primary_failure_event_id,
+                        terminal_outcome="cancelled", delivery_disposition="suppressed",
+                    ),
+                    retry_cancellation=True,
+                )
+            )
+            raise
         except AgentError as error:
             return await self._handoff(
                 state, error.error_code, failed_node=error.failure_stage or "pipeline",
@@ -310,19 +495,21 @@ class TurnPipeline:
         safe_message = "A human specialist will review this request."
         state.handoff_reason = state.handoff_reason or reason
         if self.handoffs is not None and not state.handoff_enqueued:
-            # At-most-once controller call; the trace-scoped key also lets the
-            # handoff repository deduplicate ambiguous acknowledgements.
-            state.handoff_enqueued = True
-            await self.handoffs.enqueue(
-                trace_id=state.trace_id, tenant_id=state.context.tenant_id,
-                customer_id=state.context.customer_id, session_id=state.request.session_id,
-                reason_code=state.handoff_reason,
-                idempotency_key=str(state.trace_id),
+            await self._retry_idempotent(
+                lambda: self.handoffs.enqueue(
+                    trace_id=state.trace_id, tenant_id=state.context.tenant_id,
+                    customer_id=state.context.customer_id, session_id=state.request.session_id,
+                    reason_code=state.handoff_reason,
+                    idempotency_key=str(state.trace_id),
+                )
             )
-        await self.traces.finish_trace(
-            state.trace_id, "failed", tenant_id=state.context.tenant_id,
-            primary_failure_event_id=state.primary_failure_event_id,
-            terminal_outcome="handoff", delivery_disposition="suppressed",
+            state.handoff_enqueued = True
+        await self._retry_idempotent(
+            lambda: self.traces.finish_trace(
+                state.trace_id, "failed", tenant_id=state.context.tenant_id,
+                primary_failure_event_id=state.primary_failure_event_id,
+                terminal_outcome="handoff", delivery_disposition="suppressed",
+            )
         )
         return TurnResult(
             trace_id=state.trace_id, text=None,
@@ -350,9 +537,11 @@ class TurnPipeline:
                 citations=state.draft.citations,
             ),
         )
-        await self.traces.finish_trace(
-            state.trace_id, "succeeded", tenant_id=state.context.tenant_id,
-            terminal_outcome="reply", delivery_disposition="deliver",
+        await self._retry_idempotent(
+            lambda: self.traces.finish_trace(
+                state.trace_id, "succeeded", tenant_id=state.context.tenant_id,
+                terminal_outcome="reply", delivery_disposition="deliver",
+            )
         )
         return TurnResult(
             trace_id=state.trace_id, text=state.draft.text,

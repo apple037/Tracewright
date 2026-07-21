@@ -55,3 +55,69 @@ async def test_retry_rebinds_immutable_snapshot_for_retry_of_retry(
     assert third.reply
     assert pipeline.conversations.snapshots[first.trace_id] is pipeline.conversations.snapshots[second.trace_id]
     assert pipeline.conversations.snapshots[second.trace_id] is pipeline.conversations.snapshots[third.trace_id]
+
+
+@pytest.mark.asyncio
+async def test_strategy_trace_uses_effective_not_candidate_persona(pipeline, context):
+    from agent_flow.artifacts import RuntimeArtifacts
+    from agent_flow.contracts import ConversationMode
+    overly_broad = pipeline.artifacts.personas[0].model_copy(
+        update={"applies_to": (*pipeline.artifacts.personas[0].applies_to, ConversationMode.TRANSACTIONAL_READ)}
+    )
+    pipeline.artifacts = RuntimeArtifacts(
+        strategy_prompt=pipeline.artifacts.strategy_prompt,
+        response_prompt=pipeline.artifacts.response_prompt,
+        personas=(overly_broad,),
+    )
+    result = await pipeline.run(context, TurnRequest(session_id="s1", message="查詢訂單 o1"))
+    trace = await pipeline.traces.get_trace(result.trace_id, tenant_id="t1")
+    strategy = next(e for e in trace.events if e.node == "strategy_selector" and e.kind == "completed")
+    assert strategy.metadata["persona_ref"] is None
+
+
+@pytest.mark.asyncio
+async def test_retry_rebinds_root_artifact_refs_and_rejects_unresolved_version(
+    pipeline, context
+):
+    from agent_flow.artifacts import RuntimeArtifacts
+    request = TurnRequest(session_id="s1", message="查詢訂單 o1")
+    root = await pipeline.run(context, request)
+    root_refs = next(
+        e.metadata for e in pipeline.traces.records[root.trace_id].events
+        if e.node == "context_loader" and e.kind == "completed"
+    )
+    changed = pipeline.artifacts.response_prompt.model_copy(update={"checksum": "b" * 64})
+    pipeline.artifacts = RuntimeArtifacts(
+        strategy_prompt=pipeline.artifacts.strategy_prompt,
+        response_prompt=changed,
+        personas=pipeline.artifacts.personas,
+    )
+    retry = await pipeline.run(context, request, retry_of=root.trace_id)
+    retry_trace = pipeline.traces.records[retry.trace_id]
+    assert retry.handoff.reason_code == "ARTIFACT_VERSION_UNRESOLVED"
+    started = next(e for e in retry_trace.events if e.node == "context_loader" and e.kind == "started")
+    assert started.metadata == root_refs
+    failed = next(e for e in retry_trace.events if e.node == "context_loader" and e.kind == "failed")
+    assert failed.error_code == "ARTIFACT_VERSION_UNRESOLVED"
+    # The retry lineage never substitutes the newly loaded refs.
+    assert root_refs["response_prompt_ref"]["checksum"] != changed.ref.checksum
+
+
+@pytest.mark.asyncio
+async def test_success_postcommit_ack_loss_replays_identical_finalization(
+    pipeline, context
+):
+    original = pipeline.traces.finish_trace
+    first = True
+    async def committed_then_lost(*args, **kwargs):
+        nonlocal first
+        await original(*args, **kwargs)
+        if first:
+            first = False
+            raise OSError("ack lost after success commit")
+    pipeline.traces.finish_trace = committed_then_lost
+    result = await pipeline.run(context, TurnRequest(session_id="s1", message="查詢訂單 o1"))
+    trace = pipeline.traces.records[result.trace_id]
+    assert result.reply
+    assert trace.status == "succeeded"
+    assert len(pipeline.conversations.persisted) == 1

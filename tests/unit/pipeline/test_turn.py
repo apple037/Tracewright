@@ -1,10 +1,12 @@
 from uuid import uuid4
 
 import pytest
+import asyncio
 
 from agent_flow.auth import AuthorizedCustomerContext
 from agent_flow.contracts import TurnRequest
 from agent_flow.pipeline.turn import TurnPipeline, TurnState
+from agent_flow.errors import AgentError
 
 
 @pytest.fixture
@@ -88,3 +90,43 @@ async def test_run_node_copies_nested_artifact_metadata_before_operation(
         trace_metadata={"prompt_ref": ref},
     )
     assert trace_spy.events[-1].metadata["prompt_ref"]["checksum"] == "a" * 64
+
+
+@pytest.mark.asyncio
+async def test_run_node_shields_cancelled_span_cleanup(
+    pipeline_for_run_node, trace_state, trace_spy
+):
+    async def cancelled():
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        await pipeline_for_run_node.run_node(trace_state, "dialogue_classifier", cancelled)
+    assert trace_spy.events[-1].status == "cancelled"
+    assert trace_spy.finished[-1][1:] == ("cancelled", "CANCELLED")
+
+
+@pytest.mark.asyncio
+async def test_run_node_preserves_nested_concurrent_child_outcomes(
+    pipeline_for_run_node, trace_state, trace_spy
+):
+    tool = AgentError.dependency(
+        "EVIDENCE_SOURCE_FAILED", failure_stage="evidence_collector",
+        component="tool", operation="order.lookup",
+    )
+    rag = AgentError.dependency(
+        "EVIDENCE_SOURCE_FAILED", failure_stage="evidence_collector",
+        component="rag", operation="shipping policy",
+    )
+    async def grouped():
+        raise BaseExceptionGroup(
+            "sources", [ExceptionGroup("failures", [tool, rag]), asyncio.CancelledError()]
+        )
+    with pytest.raises(AgentError) as caught:
+        await pipeline_for_run_node.run_node(trace_state, "evidence_collector", grouped)
+    assert caught.value.component == "tool"  # normalized component key is deterministic
+    child = [e for e in trace_spy.events if e.event_type == "node_child"]
+    assert [(e.component, e.status) for e in child] == [
+        ("order_api", "failed"), ("rag", "failed"),
+        ("evidence_collector", "cancelled"),
+    ]
+    assert trace_state.primary_failure_event_id == child[0].id
