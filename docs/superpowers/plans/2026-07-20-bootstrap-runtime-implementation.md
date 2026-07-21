@@ -980,7 +980,7 @@ git commit -m "feat: add exact model inventory gate"
 
 **Interfaces:**
 - Consumes: `DATABASE_URL`, typed trace/span/event values.
-- Produces: `PostgresPool`, `TraceRepository.start_trace`, `start_span`, `append_event`, `finish_span`, `finish_trace`, `get_trace`, `events_after`, plus `ConversationRepository.get_snapshot`, `append_turn`, and `get_retry_snapshot`.
+- Produces: `PostgresPool`, `TraceRepository.start_trace`, tenant-scoped `start_span`, `append_event`, `finish_span`, `finish_trace`, `get_trace`, `events_after`, plus `ConversationRepository.get_snapshot`, `append_turn`, and `get_retry_snapshot`. Every trace/span mutation takes the already-authorized `tenant_id`; a UUID alone is never write authority.
 
 - [ ] **Step 1: Write a failing repository integration test**
 
@@ -1007,17 +1007,25 @@ async def trace_repository():
 @pytest.mark.asyncio
 async def test_trace_events_are_monotonic_and_locate_failure(trace_repository):
     trace_id = await trace_repository.start_trace(tenant_id="t1", customer_id="c1", session_id="s1")
-    span_id = await trace_repository.start_span(trace_id, "response_validator")
+    span_id = await trace_repository.start_span(
+        trace_id, "response_validator", tenant_id="t1"
+    )
     event = await trace_repository.append_event(
         trace_id=trace_id,
         span_id=span_id,
+        tenant_id="t1",
         event_type="validation.failed",
         component="qwen_judge",
         status="failed",
         error_code="VAL_GROUND_004",
         payload={"field_path": "draft.delivery_date"},
     )
-    await trace_repository.finish_trace(trace_id, "failed", primary_failure_event_id=event.id)
+    await trace_repository.finish_trace(
+        trace_id,
+        "failed",
+        tenant_id="t1",
+        primary_failure_event_id=event.id,
+    )
     loaded = await trace_repository.get_trace(trace_id, tenant_id="t1")
     assert loaded.primary_failure_event_id == event.id
     assert [item.sequence for item in loaded.events] == [1]
@@ -1031,7 +1039,7 @@ Expected: FAIL because migrations/repository do not exist.
 
 - [ ] **Step 3: Create the initial migration**
 
-Create pgvector extension plus schemas/tables: `runtime.conversations`, `runtime.turns`, `runtime.jobs`, `observability.traces`, `observability.spans`, `observability.events`, `rag.documents`, `rag.chunks VECTOR(1024)`, and `notification.outbox`. Include tenant/customer columns, trace retry lineage, monotonically unique `(trace_id, sequence)`, expiry indexes, and outbox idempotency uniqueness. Do not create HNSW in this migration.
+Create pgvector extension plus schemas/tables: `runtime.conversations`, `runtime.turns`, `runtime.jobs`, `observability.traces`, `observability.spans`, `observability.events`, `rag.documents`, `rag.chunks VECTOR(1024)`, and `notification.outbox`. Include tenant/customer columns, trace retry lineage, monotonically unique `(trace_id, sequence)`, expiry indexes, and outbox idempotency uniqueness. Add database `CHECK` constraints for every closed lifecycle set: traces (`running`, `succeeded`, `failed`), spans (`running`, `completed`, `failed`, `cancelled`, `skipped`), events (`started`, `completed`, `failed`, `cancelled`, `skipped`), jobs (`queued`, `running`, `completed`, `failed`), RAG document ingestion (`pending`, `running`, `ready`, `failed`), and outbox delivery (`queued`, `delivering`, `delivered`, `failed`). Keep `event_type` extensible and unconstrained. Do not create HNSW in this migration.
 
 ```python
 def upgrade() -> None:
@@ -1055,13 +1063,15 @@ def upgrade() -> None:
 
 - [ ] **Step 4: Implement repository transactions and tenant-scoped reads**
 
-Use `psycopg_pool.AsyncConnectionPool`; assign event sequence inside a transaction while locking the trace row. `get_trace` must include `WHERE id = %s AND tenant_id = %s`. Store typed event payloads as JSONB and never accept secrets in repository APIs.
+Use `psycopg_pool.AsyncConnectionPool`; assign event sequence inside a transaction while locking the tenant-scoped trace row. All trace/span write queries include both the object ID and `tenant_id`; `append_event` also verifies that a supplied span belongs to the same trace and tenant. `finish_trace` updates only rows whose `finished_at IS NULL`, distinguishes a missing trace from an already-finalized trace, and never lets a second terminal write clobber the first outcome. `get_trace` must include `WHERE id = %s AND tenant_id = %s`. Store typed event payloads as JSONB and never accept secrets in repository APIs.
 
 `ConversationRepository` stores each request's captured context snapshot reference before model calls, appends the final customer/assistant turn only after finalization, scopes every query by tenant/customer/session, and returns the immutable snapshot used by full-turn manual retry.
 
 - [ ] **Step 5: Run migrations and tests**
 
-Run (PowerShell): `$env:DATABASE_URL='postgresql://agent:agent@localhost:5432/agent_test'; $env:TEST_DATABASE_URL=$env:DATABASE_URL; uv run alembic upgrade head; uv run pytest tests/integration/test_trace_repository.py -v`
+Run (PowerShell): `$env:DATABASE_URL='postgresql://agent:agent@localhost:5432/agent_test'; $env:TEST_DATABASE_URL=$env:DATABASE_URL; $env:REQUIRE_DB_INTEGRATION='1'; uv run alembic upgrade head; uv run pytest tests/integration/test_trace_repository.py -v`
+
+An explicit `tests/integration/...` invocation, or `REQUIRE_DB_INTEGRATION=1`, must fail with a clear configuration error when `TEST_DATABASE_URL` is absent. An ordinary root test run may skip database integration tests when the variable is absent.
 
 Expected: migration succeeds and repository test passes.
 
@@ -1784,20 +1794,45 @@ class TurnPipeline:
         trace_metadata: Mapping[str, JSONValue] | None = None,
     ) -> T:
         metadata = trace_metadata or {}
-        span_id = await self.traces.start_span(state.trace_id, node=name, attempt=attempt)
+        span_id = await self.traces.start_span(
+            state.trace_id,
+            node=name,
+            tenant_id=state.context.tenant_id,
+            attempt=attempt,
+        )
         await self.traces.append_node_started(
-            state.trace_id, span_id, node=name, attempt=attempt, metadata=metadata
+            state.trace_id,
+            span_id,
+            tenant_id=state.context.tenant_id,
+            node=name,
+            attempt=attempt,
+            metadata=metadata,
         )
         try:
             pending_or_value = operation()
             value = await pending_or_value if isawaitable(pending_or_value) else pending_or_value
         except asyncio.CancelledError as error:
-            await self.traces.finish_node_cancelled(state.trace_id, span_id, error)
+            await self.traces.finish_node_cancelled(
+                state.trace_id,
+                span_id,
+                error,
+                tenant_id=state.context.tenant_id,
+            )
             raise
         except Exception as error:
-            await self.traces.finish_node_failed(state.trace_id, span_id, error)
+            await self.traces.finish_node_failed(
+                state.trace_id,
+                span_id,
+                error,
+                tenant_id=state.context.tenant_id,
+            )
             raise
-        await self.traces.finish_node_completed(state.trace_id, span_id, metadata=metadata)
+        await self.traces.finish_node_completed(
+            state.trace_id,
+            span_id,
+            tenant_id=state.context.tenant_id,
+            metadata=metadata,
+        )
         return value
 
     async def run(self, context: AuthorizedCustomerContext, request: TurnRequest, retry_of: UUID | None = None) -> TurnResult:
@@ -2364,7 +2399,7 @@ Use these README headings and runnable command blocks:
 ## Deferred: Incident-first Console, Dual Judge, Improvement Lifecycle
 ```
 
-Under the Model Registry heading document that `response_generator` requires `chat`, `structured_json`, and `reasoning_toggle`; show the opt-in live probe command and explain that a model name match without a passing `ResponseDraft` schema probe is not ready. Under the artifact heading document the exact files in `config/prompts/` and `config/personas/`, explain that `familiar_companion.zh-TW` applies only to emotional-support/casual modes, and show how IDs, semantic versions, and checksums appear in traces and are rolled back through committed configuration. Under the API heading include executable PowerShell `Invoke-RestMethod` examples for a successful turn, trace retrieval, incremental events, and admin manual retry. Under troubleshooting include exact checks for vLLM `/v1/models`, structured-output `response_format` rejection or invalid JSON, invalid/missing artifact readiness, Compose host routing, remote Ollama tags/show, pgvector extension, migration state, semaphore saturation, and failed outbox rows.
+Under the Model Registry heading document that `response_generator` requires `chat`, `structured_json`, and `reasoning_toggle`; show the opt-in live probe command and explain that a model name match without a passing `ResponseDraft` schema probe is not ready. Under the artifact heading document the exact files in `config/prompts/` and `config/personas/`, explain that `familiar_companion.zh-TW` applies only to emotional-support/casual modes, and show how IDs, semantic versions, and checksums appear in traces and are rolled back through committed configuration. Under the API heading include executable PowerShell `Invoke-RestMethod` examples for a successful turn, trace retrieval, incremental events, and admin manual retry. Under testing document `REQUIRE_DB_INTEGRATION=1` and the difference between an explicit integration invocation and an ordinary root suite. Under troubleshooting include exact checks for vLLM `/v1/models`, structured-output `response_format` rejection or invalid JSON, invalid/missing artifact readiness, Compose host routing, remote Ollama tags/show, pgvector extension, migration state, semaphore saturation, and failed outbox rows. Also note that psycopg async uses a Selector-compatible event loop on native Windows; the Linux Compose runtime does not require this Windows-only test/runtime adjustment.
 
 - [ ] **Step 5: Validate tests and Compose rendering**
 

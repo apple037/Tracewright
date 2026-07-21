@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -148,6 +148,7 @@ class PostgresTraceRepository:
         trace_id: UUID,
         name: str,
         *,
+        tenant_id: str,
         parent_span_id: UUID | None = None,
         attempt: int = 1,
     ) -> UUID:
@@ -159,10 +160,10 @@ class PostgresTraceRepository:
                     id, trace_id, tenant_id, customer_id, parent_span_id, name, attempt
                 )
                 SELECT %s, id, tenant_id, customer_id, %s, %s, %s
-                FROM observability.traces WHERE id = %s
+                FROM observability.traces WHERE id = %s AND tenant_id = %s
                 RETURNING id
                 """,
-                (span_id, parent_span_id, name, attempt, trace_id),
+                (span_id, parent_span_id, name, attempt, trace_id, tenant_id),
             )
             if await cursor.fetchone() is None:
                 raise ValueError("trace does not exist")
@@ -173,6 +174,7 @@ class PostgresTraceRepository:
         *,
         trace_id: UUID,
         span_id: UUID | None,
+        tenant_id: str,
         event_type: str,
         component: str,
         status: str,
@@ -186,14 +188,24 @@ class PostgresTraceRepository:
                     """
                     UPDATE observability.traces
                     SET next_event_sequence = next_event_sequence + 1
-                    WHERE id = %s
+                    WHERE id = %s AND tenant_id = %s
                     RETURNING next_event_sequence, tenant_id, customer_id
                     """,
-                    (trace_id,),
+                    (trace_id, tenant_id),
                 )
                 trace = await cursor.fetchone()
                 if trace is None:
                     raise ValueError("trace does not exist")
+                if span_id is not None:
+                    cursor = await connection.execute(
+                        """
+                        SELECT 1 FROM observability.spans
+                        WHERE id = %s AND trace_id = %s AND tenant_id = %s
+                        """,
+                        (span_id, trace_id, tenant_id),
+                    )
+                    if await cursor.fetchone() is None:
+                        raise ValueError("span must belong to the same trace and tenant")
                 cursor = await connection.execute(
                     """
                     INSERT INTO observability.events (
@@ -223,16 +235,21 @@ class PostgresTraceRepository:
         return _event(row)
 
     async def finish_span(
-        self, span_id: UUID, status: str, *, error_code: str | None = None
+        self,
+        span_id: UUID,
+        status: str,
+        *,
+        tenant_id: str,
+        error_code: str | None = None,
     ) -> None:
         async with self._pool.connection() as connection:
             cursor = await connection.execute(
                 """
                 UPDATE observability.spans
                 SET status = %s, error_code = %s, finished_at = now()
-                WHERE id = %s
+                WHERE id = %s AND tenant_id = %s
                 """,
-                (status, error_code, span_id),
+                (status, error_code, span_id, tenant_id),
             )
             if cursor.rowcount != 1:
                 raise ValueError("span does not exist")
@@ -242,16 +259,22 @@ class PostgresTraceRepository:
         trace_id: UUID,
         status: str,
         *,
+        tenant_id: str,
         primary_failure_event_id: int | None = None,
         terminal_outcome: str | None = None,
         delivery_disposition: str | None = None,
     ) -> None:
+        if status not in {"succeeded", "failed"}:
+            raise ValueError("finish_trace requires a terminal status")
         async with self._pool.connection() as connection:
             async with connection.transaction():
                 if primary_failure_event_id is not None:
                     cursor = await connection.execute(
-                        "SELECT 1 FROM observability.events WHERE id = %s AND trace_id = %s",
-                        (primary_failure_event_id, trace_id),
+                        """
+                        SELECT 1 FROM observability.events
+                        WHERE id = %s AND trace_id = %s AND tenant_id = %s
+                        """,
+                        (primary_failure_event_id, trace_id, tenant_id),
                     )
                     if await cursor.fetchone() is None:
                         raise ValueError("primary failure event does not belong to trace")
@@ -262,7 +285,7 @@ class PostgresTraceRepository:
                         primary_failure_event_id = %s,
                         delivery_disposition = COALESCE(%s, delivery_disposition),
                         finished_at = now()
-                    WHERE id = %s
+                    WHERE id = %s AND tenant_id = %s AND finished_at IS NULL
                     """,
                     (
                         status,
@@ -270,10 +293,19 @@ class PostgresTraceRepository:
                         primary_failure_event_id,
                         delivery_disposition,
                         trace_id,
+                        tenant_id,
                     ),
                 )
                 if cursor.rowcount != 1:
-                    raise ValueError("trace does not exist")
+                    cursor = await connection.execute(
+                        "SELECT finished_at FROM observability.traces "
+                        "WHERE id = %s AND tenant_id = %s",
+                        (trace_id, tenant_id),
+                    )
+                    existing = await cursor.fetchone()
+                    if existing is None:
+                        raise ValueError("trace does not exist")
+                    raise ValueError("trace is already finalized")
 
     async def get_trace(self, trace_id: UUID, *, tenant_id: str) -> TraceRecord | None:
         async with self._pool.connection() as connection:

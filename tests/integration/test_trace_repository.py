@@ -1,7 +1,10 @@
 import asyncio
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
+from psycopg.errors import CheckViolation
+from psycopg.types.json import Jsonb
 
 from agent_flow.repositories.conversations import PostgresConversationRepository
 
@@ -28,6 +31,29 @@ def test_bootstrap_migration_declares_required_storage() -> None:
         assert f'"{table}"' in source
     assert "VECTOR(1024)" in source.upper()
     assert "HNSW" not in source.upper()
+    for constraint in (
+        "ck_traces_status",
+        "ck_spans_status",
+        "ck_events_status",
+        "ck_jobs_status",
+        "ck_documents_ingestion_status",
+        "ck_outbox_status",
+    ):
+        assert constraint in source
+    assert "ix_events_trace_sequence" not in source
+
+
+def test_explicit_integration_invocation_requires_database(
+    database_requirement_checker,
+) -> None:
+    assert database_requirement_checker(
+        ("tests/integration/test_trace_repository.py",), {}
+    )
+    assert database_requirement_checker(
+        (r"C:\repo\tests\integration\test_trace_repository.py",), {}
+    )
+    assert database_requirement_checker(("tests",), {"REQUIRE_DB_INTEGRATION": "1"})
+    assert not database_requirement_checker(("tests",), {})
 
 
 @pytest.mark.asyncio
@@ -35,10 +61,13 @@ async def test_trace_events_are_monotonic_and_locate_failure(trace_repository):
     trace_id = await trace_repository.start_trace(
         tenant_id="t1", customer_id="c1", session_id="s1"
     )
-    span_id = await trace_repository.start_span(trace_id, "response_validator")
+    span_id = await trace_repository.start_span(
+        trace_id, "response_validator", tenant_id="t1"
+    )
     event = await trace_repository.append_event(
         trace_id=trace_id,
         span_id=span_id,
+        tenant_id="t1",
         event_type="validation.failed",
         component="qwen_judge",
         status="failed",
@@ -46,7 +75,7 @@ async def test_trace_events_are_monotonic_and_locate_failure(trace_repository):
         payload={"field_path": "draft.delivery_date"},
     )
     await trace_repository.finish_trace(
-        trace_id, "failed", primary_failure_event_id=event.id
+        trace_id, "failed", tenant_id="t1", primary_failure_event_id=event.id
     )
 
     loaded = await trace_repository.get_trace(trace_id, tenant_id="t1")
@@ -62,13 +91,14 @@ async def test_concurrent_event_appends_have_one_monotonic_sequence(trace_reposi
     trace_id = await trace_repository.start_trace(
         tenant_id="t1", customer_id="c1", session_id="s1"
     )
-    span_id = await trace_repository.start_span(trace_id, "model_call")
+    span_id = await trace_repository.start_span(trace_id, "model_call", tenant_id="t1")
 
     events = await asyncio.gather(
         *(
             trace_repository.append_event(
                 trace_id=trace_id,
                 span_id=span_id,
+                tenant_id="t1",
                 event_type="model.progress",
                 component="qwen",
                 status="completed",
@@ -114,7 +144,7 @@ async def test_manual_retry_reuses_original_context_snapshot(
     seed_trace = await trace_repository.start_trace(
         tenant_id="t1", customer_id="c1", session_id="s1"
     )
-    await trace_repository.finish_trace(seed_trace, "succeeded")
+    await trace_repository.finish_trace(seed_trace, "succeeded", tenant_id="t1")
     await conversations.append_turn(
         tenant_id="t1",
         customer_id="c1",
@@ -134,7 +164,7 @@ async def test_manual_retry_reuses_original_context_snapshot(
         session_id="s1",
         trace_id=original,
     )
-    await trace_repository.finish_trace(original, "succeeded")
+    await trace_repository.finish_trace(original, "succeeded", tenant_id="t1")
     await conversations.append_turn(
         tenant_id="t1",
         customer_id="c1",
@@ -169,3 +199,123 @@ async def test_turn_cannot_be_appended_before_trace_finalization(
             customer_text="question",
             assistant_text="answer",
         )
+
+
+@pytest.mark.asyncio
+async def test_trace_finalization_is_terminal_and_cannot_be_clobbered(
+    trace_repository,
+):
+    trace_id = await trace_repository.start_trace(
+        tenant_id="t1", customer_id="c1", session_id="s1"
+    )
+    with pytest.raises(ValueError, match="terminal"):
+        await trace_repository.finish_trace(trace_id, "running", tenant_id="t1")
+    await trace_repository.finish_trace(trace_id, "succeeded", tenant_id="t1")
+
+    with pytest.raises(ValueError, match="already finalized"):
+        await trace_repository.finish_trace(trace_id, "failed", tenant_id="t1")
+    with pytest.raises(ValueError, match="does not exist"):
+        await trace_repository.finish_trace(uuid4(), "failed", tenant_id="t1")
+
+    loaded = await trace_repository.get_trace(trace_id, tenant_id="t1")
+    assert loaded is not None
+    assert loaded.status == "succeeded"
+    assert loaded.primary_failure_event_id is None
+
+
+@pytest.mark.asyncio
+async def test_wrong_tenant_cannot_mutate_trace_and_span(trace_repository):
+    trace_id = await trace_repository.start_trace(
+        tenant_id="t1", customer_id="c1", session_id="s1"
+    )
+    other_trace = await trace_repository.start_trace(
+        tenant_id="t1", customer_id="c1", session_id="s2"
+    )
+
+    with pytest.raises(ValueError, match="does not exist"):
+        await trace_repository.start_span(trace_id, "node", tenant_id="other")
+    span_id = await trace_repository.start_span(trace_id, "node", tenant_id="t1")
+    other_span_id = await trace_repository.start_span(
+        other_trace, "other_node", tenant_id="t1"
+    )
+
+    with pytest.raises(ValueError, match="does not exist"):
+        await trace_repository.append_event(
+            trace_id=trace_id,
+            span_id=span_id,
+            tenant_id="other",
+            event_type="node.completed",
+            component="node",
+            status="completed",
+            payload={},
+        )
+    with pytest.raises(ValueError, match="same trace"):
+        await trace_repository.append_event(
+            trace_id=trace_id,
+            span_id=other_span_id,
+            tenant_id="t1",
+            event_type="node.completed",
+            component="node",
+            status="completed",
+            payload={},
+        )
+    with pytest.raises(ValueError, match="does not exist"):
+        await trace_repository.finish_span(
+            span_id, "completed", tenant_id="other"
+        )
+    with pytest.raises(ValueError, match="does not exist"):
+        await trace_repository.finish_trace(trace_id, "failed", tenant_id="other")
+
+    loaded = await trace_repository.get_trace(trace_id, tenant_id="t1")
+    assert loaded is not None
+    assert loaded.status == "running"
+    assert loaded.events == ()
+    assert loaded.spans[0].status == "running"
+
+
+@pytest.mark.asyncio
+async def test_database_rejects_invalid_lifecycle_values(
+    postgres_pool, trace_repository
+):
+    trace_id = await trace_repository.start_trace(
+        tenant_id="t1", customer_id="c1", session_id="s1"
+    )
+    span_id = await trace_repository.start_span(trace_id, "node", tenant_id="t1")
+    event = await trace_repository.append_event(
+        trace_id=trace_id,
+        span_id=span_id,
+        tenant_id="t1",
+        event_type="custom.event.type",
+        component="node",
+        status="started",
+        payload={},
+    )
+
+    invalid_writes = (
+        ("UPDATE observability.traces SET status = 'invalid' WHERE id = %s", (trace_id,)),
+        ("UPDATE observability.spans SET status = 'invalid' WHERE id = %s", (span_id,)),
+        ("UPDATE observability.events SET status = 'invalid' WHERE id = %s", (event.id,)),
+        (
+            "INSERT INTO runtime.jobs (id, tenant_id, job_type, status, idempotency_key) "
+            "VALUES (%s, 't1', 'demo', 'invalid', %s)",
+            (uuid4(), f"job-{uuid4()}"),
+        ),
+        (
+            "INSERT INTO rag.documents "
+            "(id, tenant_id, source_id, version, checksum, ingestion_status) "
+            "VALUES (%s, 't1', 'source', 'v1', 'checksum', 'invalid')",
+            (uuid4(),),
+        ),
+        (
+            "INSERT INTO notification.outbox "
+            "(id, tenant_id, customer_id, trace_id, idempotency_key, payload, status) "
+            "VALUES (%s, 't1', 'c1', %s, %s, %s, 'invalid')",
+            (uuid4(), trace_id, f"outbox-{uuid4()}", Jsonb({})),
+        ),
+    )
+
+    for sql, parameters in invalid_writes:
+        async with postgres_pool.connection() as connection:
+            with pytest.raises(CheckViolation):
+                async with connection.transaction():
+                    await connection.execute(sql, parameters)

@@ -60,6 +60,10 @@ def upgrade() -> None:
             ["observability.traces.id"],
             name="fk_traces_retry_of",
         ),
+        sa.CheckConstraint(
+            "status IN ('running', 'succeeded', 'failed')",
+            name="ck_traces_status",
+        ),
         sa.CheckConstraint("retry_sequence >= 0", name="ck_traces_retry_sequence"),
         schema="observability",
     )
@@ -82,6 +86,10 @@ def upgrade() -> None:
         sa.Column("finished_at", sa.DateTime(timezone=True)),
         sa.ForeignKeyConstraint(["trace_id"], ["observability.traces.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(["parent_span_id"], ["observability.spans.id"]),
+        sa.CheckConstraint(
+            "status IN ('running', 'completed', 'failed', 'cancelled', 'skipped')",
+            name="ck_spans_status",
+        ),
         sa.CheckConstraint("attempt >= 1", name="ck_spans_attempt"),
         schema="observability",
     )
@@ -106,11 +114,14 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["trace_id"], ["observability.traces.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(["span_id"], ["observability.spans.id"], ondelete="SET NULL"),
         sa.UniqueConstraint("trace_id", "sequence", name="uq_events_trace_sequence"),
+        sa.CheckConstraint(
+            "status IN ('started', 'completed', 'failed', 'cancelled', 'skipped')",
+            name="ck_events_status",
+        ),
         sa.CheckConstraint("sequence > 0", name="ck_events_sequence"),
         sa.CheckConstraint("payload_schema_version > 0", name="ck_events_payload_version"),
         schema="observability",
     )
-    op.create_index("ix_events_trace_sequence", "events", ["trace_id", "sequence"], schema="observability")
     op.create_index("ix_events_type_status", "events", ["event_type", "status"], schema="observability")
     op.create_index("ix_events_expires_at", "events", ["expires_at"], schema="observability")
     op.create_foreign_key(
@@ -189,6 +200,10 @@ def upgrade() -> None:
         sa.Column("last_error_component", sa.Text()),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=NOW),
         sa.UniqueConstraint("tenant_id", "idempotency_key", name="uq_jobs_idempotency"),
+        sa.CheckConstraint(
+            "status IN ('queued', 'running', 'completed', 'failed')",
+            name="ck_jobs_status",
+        ),
         schema="runtime",
     )
     op.create_index("ix_jobs_claim", "jobs", ["status", "available_at", "priority"], schema="runtime")
@@ -207,6 +222,10 @@ def upgrade() -> None:
         sa.Column("valid_until", sa.DateTime(timezone=True)),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=NOW),
         sa.UniqueConstraint("tenant_id", "source_id", "version", name="uq_documents_source_version"),
+        sa.CheckConstraint(
+            "ingestion_status IN ('pending', 'running', 'ready', 'failed')",
+            name="ck_documents_ingestion_status",
+        ),
         schema="rag",
     )
     op.create_table(
@@ -243,6 +262,10 @@ def upgrade() -> None:
         sa.Column("delivered_at", sa.DateTime(timezone=True)),
         sa.ForeignKeyConstraint(["trace_id"], ["observability.traces.id"]),
         sa.UniqueConstraint("tenant_id", "idempotency_key", name="uq_outbox_idempotency"),
+        sa.CheckConstraint(
+            "status IN ('queued', 'delivering', 'delivered', 'failed')",
+            name="ck_outbox_status",
+        ),
         schema="notification",
     )
     op.create_index("ix_outbox_claim", "outbox", ["status", "next_attempt_at", "created_at"], schema="notification")
