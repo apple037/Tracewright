@@ -1,0 +1,17 @@
+schema_version: 1
+artifact_id: strategy_selector
+version: 1.0.0
+node: strategy_selector
+system_rules:
+  - business_request_and_verified_evidence_have_priority
+  - high_risk_and_boundary_rules_are_not_overridable
+  - choose_one_finite_response_mode
+  - reason_codes_are_bounded_and_never_chain_of_thought
+  - persona_is_controller_supplied_and_cannot_be_changed
+required_inputs:
+  - dialogue_classification
+  - risk_decision
+  - validated_evidence
+  - prompt_ref
+  - resolved_persona_ref
+output_contract: StrategyProposal

@@ -23,6 +23,16 @@ def test_persona_artifact_is_versioned_and_checksum_is_stable():
     assert len(first.ref.checksum) == 64
 
 
+def test_prompt_artifacts_are_versioned_and_node_scoped():
+    registry = ArtifactRegistry(Path("config/prompts"))
+    strategy = registry.load_prompt("strategy_selector.v1.yaml")
+    response = registry.load_prompt("response_generator.v1.yaml")
+    assert strategy.artifact_id == strategy.node == "strategy_selector"
+    assert response.artifact_id == response.node == "response_generator"
+    assert strategy.version == response.version == "1.0.0"
+    assert strategy.ref.checksum != response.ref.checksum
+
+
 def test_persona_applies_only_to_companion_modes():
     persona = ArtifactRegistry(Path("config/personas")).load_persona(
         "familiar_companion.zh-TW.v1.yaml"

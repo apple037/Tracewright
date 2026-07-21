@@ -1,0 +1,18 @@
+schema_version: 1
+artifact_id: response_generator
+version: 1.0.0
+node: response_generator
+system_rules:
+  - answer_only_from_validated_evidence
+  - preserve_citations_and_evidence_ids
+  - never_claim_an_unverified_action_commitment_price_or_date
+  - business_modes_answer_verified_facts_first
+  - companion_persona_is_expression_only_and_never_changes_business_policy
+  - do_not_emit_classification_reasoning_or_hidden_thinking
+required_inputs:
+  - conversation_snapshot
+  - strategy_decision
+  - validated_evidence
+  - prompt_ref
+  - resolved_persona
+output_contract: ResponseDraft
