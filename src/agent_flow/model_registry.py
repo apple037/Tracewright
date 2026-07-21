@@ -118,12 +118,30 @@ class ModelInventoryProbe:
 
     async def probe_role(self, role: str) -> InventoryResult:
         resolved = self.registry.resolve(role)
-        if resolved.adapter == "openai_compatible":
-            digest, max_model_len = await self._require_openai_model(resolved)
-        elif resolved.adapter == "ollama_compatible":
-            digest, max_model_len = await self._require_ollama_model(resolved)
-        else:  # ModelConfig currently prevents this, but keep the boundary explicit.
-            raise RuntimeError(f"unsupported model adapter: {resolved.adapter}")
+        try:
+            if resolved.adapter == "openai_compatible":
+                digest, max_model_len = await self._require_openai_model(resolved)
+            elif resolved.adapter == "ollama_compatible":
+                digest, max_model_len = await self._require_ollama_model(resolved)
+            else:  # ModelConfig prevents this, but keep the boundary explicit.
+                raise RuntimeError(f"unsupported model adapter: {resolved.adapter}")
+        except RuntimeError as exc:
+            if str(exc).startswith("exact model not found:"):
+                raise
+            raise RuntimeError(
+                f"inventory probe failed for role {role} at inventory: {exc}"
+            ) from exc
+        except (
+            httpx.HTTPError,
+            ValueError,
+            KeyError,
+            TypeError,
+            AttributeError,
+            IndexError,
+        ) as exc:
+            raise RuntimeError(
+                f"inventory probe failed for role {role} at inventory: {exc}"
+            ) from exc
 
         verified: set[str] = set()
         try:
@@ -145,12 +163,6 @@ class ModelInventoryProbe:
                     ResponseDraft,
                 )
                 verified.update({"chat", "structured_json"})
-                if "reasoning_toggle" in resolved.capabilities:
-                    if resolved.request_options.get("enable_thinking") is not False:
-                        raise RuntimeError(
-                            "reasoning_toggle requires enable_thinking=false for the probe"
-                        )
-                    verified.add("reasoning_toggle")
             elif "chat" in resolved.capabilities:
                 from agent_flow.adapters.models import ModelGateway
 
@@ -159,8 +171,27 @@ class ModelInventoryProbe:
                     {"messages": [{"role": "user", "content": "Reply with ok."}]},
                 )
                 verified.add("chat")
-        except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
-            raise RuntimeError(f"capability probe failed for role {role}: {exc}") from exc
+            if (
+                "reasoning_toggle" in resolved.capabilities
+                and "chat" in verified
+            ):
+                if resolved.request_options.get("enable_thinking") is not False:
+                    raise RuntimeError(
+                        "reasoning_toggle requires enable_thinking=false for the probe"
+                    )
+                verified.add("reasoning_toggle")
+        except (
+            httpx.HTTPError,
+            RuntimeError,
+            ValueError,
+            KeyError,
+            TypeError,
+            AttributeError,
+            IndexError,
+        ) as exc:
+            raise RuntimeError(
+                f"capability probe failed for role {role} at capability: {exc}"
+            ) from exc
 
         missing = resolved.capabilities - verified
         if missing:

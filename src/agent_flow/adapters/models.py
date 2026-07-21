@@ -106,11 +106,28 @@ class ModelGateway:
             response = await client.post("/chat/completions", json=payload)
             response.raise_for_status()
         body = response.json()
-        choice = body["choices"][0]
-        usage = body.get("usage", {})
+        try:
+            choices = body["choices"]
+            if not isinstance(choices, list) or not choices:
+                raise RuntimeError("choices must be a non-empty list")
+            choice = choices[0]
+            content = choice["message"]["content"]
+            if not isinstance(content, str):
+                raise RuntimeError("message content must be a string")
+            usage = body.get("usage", {})
+            if not isinstance(usage, dict):
+                raise RuntimeError("usage must be an object")
+        except RuntimeError as exc:
+            raise RuntimeError(
+                f"model response malformed for role {resolved.role} at openai_chat: {exc}"
+            ) from exc
+        except (KeyError, TypeError, IndexError) as exc:
+            raise RuntimeError(
+                f"model response malformed for role {resolved.role} at openai_chat: {exc}"
+            ) from exc
         return ModelResponse(
-            text=choice["message"]["content"],
-            finish_reason=choice.get("finish_reason", "unknown"),
+            text=content,
+            finish_reason=choice.get("finish_reason") or "unknown",
             input_tokens=usage.get("prompt_tokens"),
             output_tokens=usage.get("completion_tokens"),
         )

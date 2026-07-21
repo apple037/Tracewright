@@ -245,3 +245,100 @@ def test_openai_endpoint_rejects_ambiguous_double_v1_suffix():
 
     with pytest.raises(RuntimeError, match="multiple /v1 suffixes"):
         registry.resolve("response_generator")
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_reasoning_toggle_probes_without_structured_json():
+    config = ModelConfig.model_validate(
+        {
+            "mode": "bootstrap",
+            "promotion_semantic_mode": "human_only",
+            "endpoints": {
+                "local": {
+                    "adapter": "openai_compatible",
+                    "base_url_env": "LOCAL_VLLM_BASE_URL",
+                    "max_concurrency": 1,
+                }
+            },
+            "profiles": {
+                "thinking_chat": {
+                    "endpoint": "local",
+                    "model": "custom/thinking-chat",
+                    "family": "custom",
+                    "capabilities": ["chat", "reasoning_toggle"],
+                    "request_options": {"enable_thinking": False},
+                    "max_concurrency": 1,
+                }
+            },
+            "roles": {"thinking_writer": "thinking_chat"},
+        }
+    )
+    registry = ModelRegistry(
+        config,
+        Settings(
+            database_url="postgresql://agent:agent@localhost/agent",
+            local_vllm_base_url="http://localhost:8000/v1",
+        ),
+    )
+    respx.get("http://localhost:8000/v1/models").mock(
+        return_value=httpx.Response(
+            200, json={"data": [{"id": "custom/thinking-chat"}]}
+        )
+    )
+    chat = respx.post("http://localhost:8000/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "ok"}}]},
+        )
+    )
+
+    result = await ModelInventoryProbe(registry).probe_role("thinking_writer")
+
+    assert result.verified_capabilities == frozenset({"chat", "reasoning_toggle"})
+    payload = __import__("json").loads(chat.calls.last.request.content)
+    assert payload["chat_template_kwargs"]["enable_thinking"] is False
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_openai_empty_choices_is_classified_as_malformed_response(
+    bootstrap_registry,
+):
+    respx.post("http://localhost:8000/v1/chat/completions").mock(
+        return_value=httpx.Response(200, json={"choices": []})
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="model response malformed for role response_generator at openai_chat",
+    ):
+        await ModelGateway(bootstrap_registry).structured(
+            "response_generator", {"messages": []}, ResponseDraft
+        )
+
+
+@pytest.mark.asyncio
+@respx.mock
+@pytest.mark.parametrize(
+    "inventory_response",
+    [
+        httpx.Response(503, text="temporarily unavailable"),
+        httpx.Response(200, content=b"not-json"),
+    ],
+    ids=["transport", "parse"],
+)
+async def test_inventory_transport_or_parse_failure_includes_role_and_stage(
+    bootstrap_registry, inventory_response
+):
+    respx.get("http://localhost:8000/v1/models").mock(
+        return_value=inventory_response
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="inventory probe failed for role response_generator at inventory",
+    ) as failure:
+        await ModelInventoryProbe(bootstrap_registry).probe_role("response_generator")
+
+    assert "local-secret" not in str(failure.value)
