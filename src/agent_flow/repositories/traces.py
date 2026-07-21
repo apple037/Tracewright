@@ -69,6 +69,25 @@ class PostgresTraceRepository:
     def __init__(self, pool: PostgresPool) -> None:
         self._pool = pool
 
+    async def _lock_running_trace(
+        self, connection, trace_id: UUID, tenant_id: str
+    ) -> dict[str, Any]:
+        cursor = await connection.execute(
+            """
+            SELECT id, tenant_id, customer_id, status, finished_at
+            FROM observability.traces
+            WHERE id = %s AND tenant_id = %s
+            FOR UPDATE
+            """,
+            (trace_id, tenant_id),
+        )
+        trace = await cursor.fetchone()
+        if trace is None:
+            raise ValueError("trace does not exist")
+        if trace["status"] != "running" or trace["finished_at"] is not None:
+            raise ValueError("trace is already finalized")
+        return trace
+
     async def clear_test_data(self) -> None:
         async with self._pool.connection() as connection:
             database = await connection.execute("SELECT current_database() AS name")
@@ -154,19 +173,36 @@ class PostgresTraceRepository:
     ) -> UUID:
         span_id = uuid4()
         async with self._pool.connection() as connection:
-            cursor = await connection.execute(
-                """
-                INSERT INTO observability.spans (
-                    id, trace_id, tenant_id, customer_id, parent_span_id, name, attempt
+            async with connection.transaction():
+                trace = await self._lock_running_trace(connection, trace_id, tenant_id)
+                if parent_span_id is not None:
+                    cursor = await connection.execute(
+                        """
+                        SELECT 1 FROM observability.spans
+                        WHERE id = %s AND trace_id = %s AND tenant_id = %s
+                        """,
+                        (parent_span_id, trace_id, tenant_id),
+                    )
+                    if await cursor.fetchone() is None:
+                        raise ValueError(
+                            "parent span must belong to the same trace and tenant"
+                        )
+                await connection.execute(
+                    """
+                    INSERT INTO observability.spans (
+                        id, trace_id, tenant_id, customer_id, parent_span_id, name, attempt
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        span_id,
+                        trace_id,
+                        tenant_id,
+                        trace["customer_id"],
+                        parent_span_id,
+                        name,
+                        attempt,
+                    ),
                 )
-                SELECT %s, id, tenant_id, customer_id, %s, %s, %s
-                FROM observability.traces WHERE id = %s AND tenant_id = %s
-                RETURNING id
-                """,
-                (span_id, parent_span_id, name, attempt, trace_id, tenant_id),
-            )
-            if await cursor.fetchone() is None:
-                raise ValueError("trace does not exist")
         return span_id
 
     async def append_event(
@@ -184,18 +220,7 @@ class PostgresTraceRepository:
     ) -> TraceEvent:
         async with self._pool.connection() as connection:
             async with connection.transaction():
-                cursor = await connection.execute(
-                    """
-                    UPDATE observability.traces
-                    SET next_event_sequence = next_event_sequence + 1
-                    WHERE id = %s AND tenant_id = %s
-                    RETURNING next_event_sequence, tenant_id, customer_id
-                    """,
-                    (trace_id, tenant_id),
-                )
-                trace = await cursor.fetchone()
-                if trace is None:
-                    raise ValueError("trace does not exist")
+                trace = await self._lock_running_trace(connection, trace_id, tenant_id)
                 if span_id is not None:
                     cursor = await connection.execute(
                         """
@@ -206,6 +231,16 @@ class PostgresTraceRepository:
                     )
                     if await cursor.fetchone() is None:
                         raise ValueError("span must belong to the same trace and tenant")
+                cursor = await connection.execute(
+                    """
+                    UPDATE observability.traces
+                    SET next_event_sequence = next_event_sequence + 1
+                    WHERE id = %s AND tenant_id = %s
+                    RETURNING next_event_sequence
+                    """,
+                    (trace_id, tenant_id),
+                )
+                sequence = (await cursor.fetchone())["next_event_sequence"]
                 cursor = await connection.execute(
                     """
                     INSERT INTO observability.events (
@@ -222,7 +257,7 @@ class PostgresTraceRepository:
                         span_id,
                         trace["tenant_id"],
                         trace["customer_id"],
-                        trace["next_event_sequence"],
+                        sequence,
                         event_type,
                         component,
                         status,
@@ -242,17 +277,40 @@ class PostgresTraceRepository:
         tenant_id: str,
         error_code: str | None = None,
     ) -> None:
+        if status not in {"completed", "failed", "cancelled", "skipped"}:
+            raise ValueError("finish_span requires a terminal status")
         async with self._pool.connection() as connection:
-            cursor = await connection.execute(
-                """
-                UPDATE observability.spans
-                SET status = %s, error_code = %s, finished_at = now()
-                WHERE id = %s AND tenant_id = %s
-                """,
-                (status, error_code, span_id, tenant_id),
-            )
-            if cursor.rowcount != 1:
-                raise ValueError("span does not exist")
+            async with connection.transaction():
+                cursor = await connection.execute(
+                    "SELECT trace_id FROM observability.spans "
+                    "WHERE id = %s AND tenant_id = %s",
+                    (span_id, tenant_id),
+                )
+                span = await cursor.fetchone()
+                if span is None:
+                    raise ValueError("span does not exist")
+                await self._lock_running_trace(
+                    connection, span["trace_id"], tenant_id
+                )
+                cursor = await connection.execute(
+                    """
+                    UPDATE observability.spans
+                    SET status = %s, error_code = %s, finished_at = now()
+                    WHERE id = %s AND tenant_id = %s AND finished_at IS NULL
+                    RETURNING id
+                    """,
+                    (status, error_code, span_id, tenant_id),
+                )
+                if await cursor.fetchone() is None:
+                    cursor = await connection.execute(
+                        "SELECT finished_at FROM observability.spans "
+                        "WHERE id = %s AND tenant_id = %s",
+                        (span_id, tenant_id),
+                    )
+                    existing = await cursor.fetchone()
+                    if existing is None:
+                        raise ValueError("span does not exist")
+                    raise ValueError("span is already finished")
 
     async def finish_trace(
         self,

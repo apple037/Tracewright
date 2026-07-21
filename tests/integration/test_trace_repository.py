@@ -224,6 +224,110 @@ async def test_trace_finalization_is_terminal_and_cannot_be_clobbered(
 
 
 @pytest.mark.asyncio
+async def test_finalized_trace_rejects_all_child_mutations_without_state_change(
+    postgres_pool, trace_repository
+):
+    trace_id = await trace_repository.start_trace(
+        tenant_id="t1", customer_id="c1", session_id="s1"
+    )
+    span_id = await trace_repository.start_span(trace_id, "node", tenant_id="t1")
+    initial_event = await trace_repository.append_event(
+        trace_id=trace_id,
+        span_id=span_id,
+        tenant_id="t1",
+        event_type="node.started",
+        component="node",
+        status="started",
+        payload={},
+    )
+    await trace_repository.finish_trace(trace_id, "succeeded", tenant_id="t1")
+
+    with pytest.raises(ValueError, match="already finalized"):
+        await trace_repository.start_span(trace_id, "late_node", tenant_id="t1")
+    with pytest.raises(ValueError, match="already finalized"):
+        await trace_repository.append_event(
+            trace_id=trace_id,
+            span_id=span_id,
+            tenant_id="t1",
+            event_type="node.completed",
+            component="node",
+            status="completed",
+            payload={},
+        )
+    with pytest.raises(ValueError, match="already finalized"):
+        await trace_repository.finish_span(span_id, "completed", tenant_id="t1")
+
+    loaded = await trace_repository.get_trace(trace_id, tenant_id="t1")
+    assert loaded is not None
+    assert [span.status for span in loaded.spans] == ["running"]
+    assert [event.id for event in loaded.events] == [initial_event.id]
+    async with postgres_pool.connection() as connection:
+        cursor = await connection.execute(
+            "SELECT next_event_sequence FROM observability.traces WHERE id = %s",
+            (trace_id,),
+        )
+        assert (await cursor.fetchone())["next_event_sequence"] == 1
+
+
+@pytest.mark.asyncio
+async def test_finish_span_is_terminal_and_immutable(trace_repository):
+    trace_id = await trace_repository.start_trace(
+        tenant_id="t1", customer_id="c1", session_id="s1"
+    )
+    span_id = await trace_repository.start_span(trace_id, "node", tenant_id="t1")
+
+    with pytest.raises(ValueError, match="terminal"):
+        await trace_repository.finish_span(span_id, "running", tenant_id="t1")
+    await trace_repository.finish_span(span_id, "completed", tenant_id="t1")
+    with pytest.raises(ValueError, match="already finished"):
+        await trace_repository.finish_span(span_id, "failed", tenant_id="t1")
+    with pytest.raises(ValueError, match="does not exist"):
+        await trace_repository.finish_span(uuid4(), "failed", tenant_id="t1")
+
+    loaded = await trace_repository.get_trace(trace_id, tenant_id="t1")
+    assert loaded is not None
+    assert loaded.spans[0].status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_parent_span_must_share_trace_and_tenant(trace_repository):
+    trace_id = await trace_repository.start_trace(
+        tenant_id="t1", customer_id="c1", session_id="s1"
+    )
+    other_trace = await trace_repository.start_trace(
+        tenant_id="t1", customer_id="c1", session_id="s2"
+    )
+    other_tenant_trace = await trace_repository.start_trace(
+        tenant_id="t2", customer_id="c2", session_id="s3"
+    )
+    cross_trace_parent = await trace_repository.start_span(
+        other_trace, "parent", tenant_id="t1"
+    )
+    cross_tenant_parent = await trace_repository.start_span(
+        other_tenant_trace, "parent", tenant_id="t2"
+    )
+
+    with pytest.raises(ValueError, match="parent span must belong"):
+        await trace_repository.start_span(
+            trace_id,
+            "child",
+            tenant_id="t1",
+            parent_span_id=cross_trace_parent,
+        )
+    with pytest.raises(ValueError, match="parent span must belong"):
+        await trace_repository.start_span(
+            trace_id,
+            "child",
+            tenant_id="t1",
+            parent_span_id=cross_tenant_parent,
+        )
+
+    loaded = await trace_repository.get_trace(trace_id, tenant_id="t1")
+    assert loaded is not None
+    assert loaded.spans == ()
+
+
+@pytest.mark.asyncio
 async def test_wrong_tenant_cannot_mutate_trace_and_span(trace_repository):
     trace_id = await trace_repository.start_trace(
         tenant_id="t1", customer_id="c1", session_id="s1"
