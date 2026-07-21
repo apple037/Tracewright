@@ -6,6 +6,7 @@ import pytest
 import pytest_asyncio
 
 from agent_flow.repositories.postgres import PostgresPool
+from agent_flow.repositories.rag import RagRepository
 from agent_flow.repositories.traces import PostgresTraceRepository
 
 
@@ -63,3 +64,20 @@ async def trace_repository(postgres_pool: PostgresPool):
     await repository.clear_test_data()
     yield repository
     await repository.clear_test_data()
+
+
+async def _clear_rag_test_data(pool: PostgresPool) -> None:
+    async with pool.connection() as connection:
+        database = await connection.execute("SELECT current_database() AS name")
+        name = (await database.fetchone())["name"]
+        if "test" not in name.lower():
+            raise RuntimeError("RAG cleanup is restricted to test databases")
+        await connection.execute("TRUNCATE rag.documents CASCADE")
+
+
+@pytest_asyncio.fixture
+async def rag_repository(postgres_pool: PostgresPool):
+    repository = RagRepository(postgres_pool)
+    await _clear_rag_test_data(postgres_pool)
+    yield repository
+    await _clear_rag_test_data(postgres_pool)

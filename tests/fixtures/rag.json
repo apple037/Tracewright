@@ -1,0 +1,9 @@
+[
+  {
+    "tenant_id": "t1",
+    "source_id": "policy-1",
+    "version": "v1",
+    "content": "標準保固期為一年。",
+    "valid_until": "2099-12-31T00:00:00Z"
+  }
+]
