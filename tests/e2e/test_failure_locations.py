@@ -75,3 +75,45 @@ async def test_second_validation_failure_handoffs_without_persisting_draft(
     assert [span.attempt for span in validators] == [1, 2]
     repair = next(e for e in trace.events if e.node == "response_repair" and e.kind == "completed")
     assert repair.metadata["prompt_ref"] == pipeline.artifacts.response_prompt.ref.model_dump(mode="json")
+
+
+@pytest.mark.asyncio
+async def test_conversation_persistence_failure_never_marks_trace_success(
+    pipeline, context
+):
+    async def fail_append(**turn):
+        raise OSError("conversation store unavailable")
+
+    pipeline.conversations.append_turn = fail_append
+    result = await pipeline.run(context, TurnRequest(session_id="s1", message="查詢訂單 o1"))
+    trace = await pipeline.traces.get_trace(result.trace_id, tenant_id="t1")
+    assert result.handoff_status == "queued"
+    assert trace.status == "failed"
+    assert trace.terminal_outcome == "handoff"
+    assert trace.issue_summary.failed_node == "conversation_persistence"
+
+
+@pytest.mark.asyncio
+async def test_handoff_finish_retry_does_not_enqueue_twice(
+    pipeline, context, fake_models
+):
+    fake_models.responses["dialogue_classifier"].clear()
+    fake_models.responses["dialogue_classifier"].append({
+        "intent": "support", "conversation_mode": "boundary", "urgency": "critical", "language": "zh-TW",
+        "emotion": {"category": "fear_avoidance", "dialogue_stage": "surface", "override": "boundary", "response_mode": "brief_acknowledgment", "confidence": 1, "evidence_spans": [], "reason_codes": ["EXPLICIT_FEAR_AVOIDANCE"]},
+    })
+    original = pipeline.traces.finish_trace
+    attempts = 0
+
+    async def fail_once(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("lost finish acknowledgement")
+        await original(*args, **kwargs)
+
+    pipeline.traces.finish_trace = fail_once
+    result = await pipeline.run(context, TurnRequest(session_id="s1", message="我現在有危險"))
+    assert result.handoff_status == "queued"
+    assert len(pipeline.handoffs.items) == 1
+    assert pipeline.handoffs.items[0]["idempotency_key"] == str(result.trace_id)

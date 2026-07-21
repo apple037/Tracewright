@@ -53,9 +53,11 @@ class PostgresConversationRepository:
                 )
                 cursor = await connection.execute(
                     """
-                    SELECT customer_text, assistant_text
-                    FROM runtime.turns
-                    WHERE tenant_id = %s AND customer_id = %s AND session_id = %s
+                    SELECT turn.customer_text, turn.assistant_text
+                    FROM runtime.turns AS turn
+                    JOIN observability.traces AS trace ON trace.id = turn.trace_id
+                    WHERE turn.tenant_id = %s AND turn.customer_id = %s
+                      AND turn.session_id = %s AND trace.status = 'succeeded'
                     ORDER BY created_at, id
                     """,
                     (tenant_id, customer_id, session_id),
@@ -176,8 +178,8 @@ class PostgresConversationRepository:
                 trace = await cursor.fetchone()
                 if trace is None:
                     raise ValueError("trace does not belong to conversation scope")
-                if trace["finished_at"] is None or trace["status"] == "running":
-                    raise ValueError("trace must be finalized before appending a turn")
+                if trace["status"] not in {"running", "succeeded"}:
+                    raise ValueError("failed traces cannot persist assistant turns")
                 conversation_id = await self._ensure_conversation(
                     connection, tenant_id, customer_id, session_id
                 )
@@ -188,6 +190,7 @@ class PostgresConversationRepository:
                         trace_id, customer_text, assistant_text, citations, expires_at
                     ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s,
                               now() + interval '30 days')
+                    ON CONFLICT (trace_id) DO NOTHING
                     """,
                     (
                         conversation_id,

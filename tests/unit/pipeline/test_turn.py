@@ -71,3 +71,20 @@ async def test_run_node_rejects_prompt_bodies_from_trace_metadata(
             trace_state, "context_loader", lambda: "snapshot",
             trace_metadata={"snapshot_ref": {"persona": "hidden body"}},
         )
+
+
+@pytest.mark.asyncio
+async def test_run_node_copies_nested_artifact_metadata_before_operation(
+    pipeline_for_run_node, trace_state, trace_spy
+):
+    ref = {"artifact_id": "response", "version": "1.0.0", "checksum": "a" * 64}
+
+    def operation():
+        ref["checksum"] = "b" * 64
+        return "draft"
+
+    await pipeline_for_run_node.run_node(
+        trace_state, "response_generator", operation,
+        trace_metadata={"prompt_ref": ref},
+    )
+    assert trace_spy.events[-1].metadata["prompt_ref"]["checksum"] == "a" * 64

@@ -71,6 +71,8 @@ class TurnState:
     strategy: Any = None
     draft: Any = None
     validation: Any = None
+    handoff_enqueued: bool = False
+    handoff_reason: str | None = None
 
 
 def _causal_error(error: BaseException) -> BaseException:
@@ -278,7 +280,8 @@ class TurnPipeline:
             )
         except Exception:
             return await self._handoff(
-                state, "UNEXPECTED_ERROR", failed_node="pipeline", existing_failure=True
+                state, state.handoff_reason or "UNEXPECTED_ERROR",
+                failed_node="pipeline", existing_failure=True,
             )
 
     async def _mark_failure(self, state: TurnState, reason: str, failed_node: str, attempt: int = 1) -> int:
@@ -305,11 +308,16 @@ class TurnPipeline:
         if not existing_failure or state.primary_failure_event_id is None:
             await self._mark_failure(state, reason, failed_node, attempt)
         safe_message = "A human specialist will review this request."
-        if self.handoffs is not None:
+        state.handoff_reason = state.handoff_reason or reason
+        if self.handoffs is not None and not state.handoff_enqueued:
+            # At-most-once controller call; the trace-scoped key also lets the
+            # handoff repository deduplicate ambiguous acknowledgements.
+            state.handoff_enqueued = True
             await self.handoffs.enqueue(
                 trace_id=state.trace_id, tenant_id=state.context.tenant_id,
                 customer_id=state.context.customer_id, session_id=state.request.session_id,
-                reason_code=reason,
+                reason_code=state.handoff_reason,
+                idempotency_key=str(state.trace_id),
             )
         await self.traces.finish_trace(
             state.trace_id, "failed", tenant_id=state.context.tenant_id,
@@ -318,7 +326,7 @@ class TurnPipeline:
         )
         return TurnResult(
             trace_id=state.trace_id, text=None,
-            handoff=HandoffEvent(required=True, reason_code=reason, safe_message=safe_message),
+            handoff=HandoffEvent(required=True, reason_code=state.handoff_reason, safe_message=safe_message),
             assurance=self._assurance(),
         )
 
@@ -329,15 +337,22 @@ class TurnPipeline:
         )
 
     async def _finalize(self, state: TurnState) -> TurnResult:
+        await self.run_node(
+            state,
+            "conversation_persistence",
+            lambda: self.conversations.append_turn(
+                tenant_id=state.context.tenant_id,
+                customer_id=state.context.customer_id,
+                session_id=state.request.session_id,
+                trace_id=state.trace_id,
+                customer_text=state.request.message,
+                assistant_text=state.draft.text,
+                citations=state.draft.citations,
+            ),
+        )
         await self.traces.finish_trace(
             state.trace_id, "succeeded", tenant_id=state.context.tenant_id,
             terminal_outcome="reply", delivery_disposition="deliver",
-        )
-        await self.conversations.append_turn(
-            tenant_id=state.context.tenant_id, customer_id=state.context.customer_id,
-            session_id=state.request.session_id, trace_id=state.trace_id,
-            customer_text=state.request.message, assistant_text=state.draft.text,
-            citations=state.draft.citations,
         )
         return TurnResult(
             trace_id=state.trace_id, text=state.draft.text,

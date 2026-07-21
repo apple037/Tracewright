@@ -182,7 +182,7 @@ async def test_manual_retry_reuses_original_context_snapshot(
 
 
 @pytest.mark.asyncio
-async def test_turn_cannot_be_appended_before_trace_finalization(
+async def test_turn_append_is_idempotent_by_trace_before_finalization(
     postgres_pool, trace_repository
 ):
     conversations = PostgresConversationRepository(postgres_pool)
@@ -190,7 +190,7 @@ async def test_turn_cannot_be_appended_before_trace_finalization(
         tenant_id="t1", customer_id="c1", session_id="s1"
     )
 
-    with pytest.raises(ValueError, match="finalized"):
+    for _ in range(2):
         await conversations.append_turn(
             tenant_id="t1",
             customer_id="c1",
@@ -199,6 +199,14 @@ async def test_turn_cannot_be_appended_before_trace_finalization(
             customer_text="question",
             assistant_text="answer",
         )
+    await trace_repository.finish_trace(trace_id, "succeeded", tenant_id="t1")
+    reader_trace = await trace_repository.start_trace(
+        tenant_id="t1", customer_id="c1", session_id="s1"
+    )
+    snapshot = await conversations.get_snapshot(
+        tenant_id="t1", customer_id="c1", session_id="s1", trace_id=reader_trace
+    )
+    assert snapshot.messages == ("question", "answer")
 
 
 @pytest.mark.asyncio
