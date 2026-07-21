@@ -61,6 +61,7 @@ class TurnState:
     context: AuthorizedCustomerContext
     request: TurnRequest
     spans: dict[str, UUID] = field(default_factory=dict)
+    spans_finished: set[UUID] = field(default_factory=set)
     primary_failure_event_id: int | None = None
     snapshot: Any = None
     classification: Any = None
@@ -143,6 +144,7 @@ class TurnPipeline:
         self.artifacts = artifacts
         self.clock = clock
         self.assurance_mode = assurance_mode
+        self._cleanup_tasks: set[asyncio.Task] = set()
 
     async def _event(
         self, state: TurnState, span_id: UUID, node: str, status: str, *,
@@ -234,38 +236,83 @@ class TurnPipeline:
                 (value for value in ordered if isinstance(value, AgentError)),
                 next((value for value in ordered if not isinstance(value, asyncio.CancelledError)), ordered[0]),
             )
-            primary_event = None
-            for index, child in enumerate(ordered):
-                event = await self._child_event(
-                    state, span_id, name, attempt, child, index
-                )
-                if child is causal:
-                    primary_event = event
             if isinstance(causal, asyncio.CancelledError):
-                await self.traces.finish_span(
-                    span_id, "cancelled", tenant_id=state.context.tenant_id,
-                    error_code="CANCELLED",
+                await self._settle_failure_safely(
+                    state, span_id, name, attempt, ordered, causal,
+                    terminal_status="cancelled", is_group=True,
                 )
-                if primary_event is not None and state.primary_failure_event_id is None:
-                    state.primary_failure_event_id = primary_event.id
                 raise causal
-            code, _, _ = _error_details(causal, name)
-            await self.traces.finish_span(
-                span_id, "failed", tenant_id=state.context.tenant_id,
-                error_code=code,
+            await self._settle_failure_safely(
+                state, span_id, name, attempt, ordered, causal, is_group=True
             )
-            if primary_event is not None and state.primary_failure_event_id is None:
-                state.primary_failure_event_id = primary_event.id
             raise causal
         except Exception as error:
             causal = _causal_error(error)
-            event = await self._event(state, span_id, name, "failed", attempt=attempt, error=causal)
-            code, _, _ = _error_details(causal, name)
-            await self.traces.finish_span(span_id, "failed", tenant_id=state.context.tenant_id, error_code=code)
-            if state.primary_failure_event_id is None:
-                state.primary_failure_event_id = event.id
+            await self._settle_failure_safely(
+                state, span_id, name, attempt, [causal], causal
+            )
             raise causal
         return value
+
+    async def _settle_failure_safely(
+        self, state, span_id, name, attempt, outcomes, causal, *,
+        terminal_status="failed", ensure_span=False, is_group=False,
+    ):
+        operation = lambda: self._settle_failure(
+            state, span_id, name, attempt, outcomes, causal,
+            terminal_status=terminal_status, ensure_span=ensure_span, is_group=is_group,
+        )
+        try:
+            return await operation()
+        except asyncio.CancelledError:
+            await self._bounded_cleanup(operation())
+            raise
+
+    async def _settle_failure(
+        self, state, span_id, name, attempt, outcomes, causal, *,
+        terminal_status="failed", ensure_span=False, is_group=False,
+    ):
+        if ensure_span:
+            await self._retry_idempotent(
+                lambda: self.traces.start_span(
+                    state.trace_id, name, tenant_id=state.context.tenant_id,
+                    attempt=attempt, span_id=span_id,
+                ), retry_cancellation=True,
+            )
+            await self._retry_idempotent(
+                lambda: self._event(
+                    state, span_id, name, "started", attempt=attempt
+                ), retry_cancellation=True,
+            )
+        primary = None
+        if is_group:
+            for index, child in enumerate(outcomes[:20]):
+                event = await self._retry_idempotent(
+                    lambda child=child, index=index: self._child_event(
+                        state, span_id, name, attempt, child, index
+                    ), retry_cancellation=True,
+                )
+                if child is causal:
+                    primary = event
+        else:
+            primary = await self._retry_idempotent(
+                lambda: self._event(
+                    state, span_id, name, terminal_status, attempt=attempt,
+                    error=causal,
+                ), retry_cancellation=True,
+            )
+        if primary is not None and state.primary_failure_event_id is None:
+            state.primary_failure_event_id = primary.id
+        if span_id not in state.spans_finished:
+            code, _, _ = _error_details(causal, name)
+            await self._retry_idempotent(
+                lambda: self.traces.finish_span(
+                    span_id, terminal_status, tenant_id=state.context.tenant_id,
+                    error_code=code,
+                ), retry_cancellation=True,
+            )
+            state.spans_finished.add(span_id)
+        return primary
 
     async def _settle_cancelled_node(
         self, state, span_id, name, attempt, error, metadata, *, operation_done
@@ -333,12 +380,20 @@ class TurnPipeline:
 
     async def _bounded_cleanup(self, pending, timeout: float = 1.0):
         task = asyncio.create_task(pending)
+        self._cleanup_tasks.add(task)
+        def consume(done):
+            self._cleanup_tasks.discard(done)
+            try:
+                done.result()
+            except BaseException:
+                pass
+        task.add_done_callback(consume)
         deadline = asyncio.get_running_loop().time() + timeout
         while not task.done():
             remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
                 task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
+                await asyncio.wait({task}, timeout=min(.01, timeout))
                 return None
             try:
                 await asyncio.wait_for(asyncio.shield(task), remaining)
@@ -348,7 +403,7 @@ class TurnPipeline:
                 continue
             except TimeoutError:
                 task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
+                await asyncio.wait({task}, timeout=min(.01, timeout))
                 return None
             except Exception:
                 return None
@@ -550,17 +605,13 @@ class TurnPipeline:
         span_id = state.spans.get(f"{failed_node}:{attempt}")
         created_span = span_id is None
         if span_id is None:
-            span_id = await self.traces.start_span(
-                state.trace_id, failed_node, tenant_id=state.context.tenant_id, attempt=attempt
-            )
+            span_id = uuid4()
+            state.spans[f"{failed_node}:{attempt}"] = span_id
         error = AgentError.validation(reason, failure_stage=failed_node)
-        event = await self._event(state, span_id, failed_node, "failed", attempt=attempt, error=error)
-        if created_span:
-            await self.traces.finish_span(
-                span_id, "failed", tenant_id=state.context.tenant_id,
-                error_code=reason,
-            )
-        state.primary_failure_event_id = event.id
+        event = await self._settle_failure_safely(
+            state, span_id, failed_node, attempt, [error], error,
+            ensure_span=created_span,
+        )
         return event.id
 
     async def _handoff(

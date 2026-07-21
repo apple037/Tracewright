@@ -178,3 +178,195 @@ async def test_bounded_cleanup_cancels_and_awaits_hanging_task(pipeline_for_run_
             finished.set()
     assert await pipeline_for_run_node._bounded_cleanup(hanging(), timeout=.01) is None
     assert finished.is_set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["failed_event", "failed_finish"])
+async def test_ordinary_failure_bookkeeping_replays_postcommit_ack_loss(
+    pipeline_for_run_node, trace_state, trace_spy, boundary
+):
+    original_event, original_finish = trace_spy.append_event, trace_spy.finish_span
+    fired = False
+    async def event(**kwargs):
+        nonlocal fired
+        result = await original_event(**kwargs)
+        if boundary == "failed_event" and kwargs["status"] == "failed" and not fired:
+            fired = True; raise OSError("failed event ack lost")
+        return result
+    async def finish(*args, **kwargs):
+        nonlocal fired
+        await original_finish(*args, **kwargs)
+        if boundary == "failed_finish" and args[1] == "failed" and not fired:
+            fired = True; raise OSError("failed finish ack lost")
+    trace_spy.append_event, trace_spy.finish_span = event, finish
+    error = AgentError.validation("BOOM", failure_stage="risk_precheck")
+    with pytest.raises(AgentError):
+        await pipeline_for_run_node.run_node(
+            trace_state, "risk_precheck", lambda: (_ for _ in ()).throw(error)
+        )
+    failed = [e for e in trace_spy.events if e.status == "failed"]
+    assert len(failed) == 1
+    assert trace_state.primary_failure_event_id == failed[0].id
+
+
+@pytest.mark.asyncio
+async def test_group_child_event_ack_loss_preserves_exact_primary(
+    pipeline_for_run_node, trace_state, trace_spy
+):
+    original = trace_spy.append_event
+    fired = False
+    async def event(**kwargs):
+        nonlocal fired
+        result = await original(**kwargs)
+        if kwargs["event_type"] == "node_child" and not fired:
+            fired = True; raise OSError("child ack lost")
+        return result
+    trace_spy.append_event = event
+    causal = AgentError.dependency("SOURCE", failure_stage="evidence_collector", component="rag", operation="q")
+    async def grouped(): raise ExceptionGroup("sources", [causal, ValueError("other")])
+    with pytest.raises(AgentError):
+        await pipeline_for_run_node.run_node(trace_state, "evidence_collector", grouped)
+    primary = next(e for e in trace_spy.events if e.id == trace_state.primary_failure_event_id)
+    assert primary.component == "rag"
+
+
+@pytest.mark.asyncio
+async def test_noncooperative_cleanup_is_owned_after_deadline_and_registry_drains(
+    pipeline_for_run_node
+):
+    release = asyncio.Event()
+    async def noncooperative():
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await release.wait()
+            raise RuntimeError("late cleanup failure")
+    started = asyncio.get_running_loop().time()
+    assert await pipeline_for_run_node._bounded_cleanup(noncooperative(), timeout=.01) is None
+    assert asyncio.get_running_loop().time() - started < .1
+    assert len(pipeline_for_run_node._cleanup_tasks) == 1
+    release.set()
+    for _ in range(10):
+        if not pipeline_for_run_node._cleanup_tasks: break
+        await asyncio.sleep(0)
+    assert not pipeline_for_run_node._cleanup_tasks
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mode", ["ordinary_event", "ordinary_finish", "group_child_event", "group_finish"]
+)
+async def test_settle_failure_completes_via_bounded_cleanup_after_cancellation_exhausts_retry(
+    pipeline_for_run_node, trace_state, trace_spy, mode
+):
+    original_event, original_finish = trace_spy.append_event, trace_spy.finish_span
+    raises_left = 2  # exhaust _retry_idempotent's two attempts, forcing escape to _settle_failure_safely
+
+    async def event(**kwargs):
+        nonlocal raises_left
+        hit = (
+            (mode == "ordinary_event" and kwargs["event_type"] == "node" and kwargs["status"] == "failed")
+            or (mode == "group_child_event" and kwargs["event_type"] == "node_child")
+        )
+        if hit and raises_left > 0:
+            raises_left -= 1
+            raise asyncio.CancelledError
+        return await original_event(**kwargs)
+
+    async def finish(*args, **kwargs):
+        nonlocal raises_left
+        if mode in {"ordinary_finish", "group_finish"} and args[1] == "failed" and raises_left > 0:
+            raises_left -= 1
+            raise asyncio.CancelledError
+        return await original_finish(*args, **kwargs)
+
+    trace_spy.append_event, trace_spy.finish_span = event, finish
+
+    if mode in {"ordinary_event", "ordinary_finish"}:
+        node_name = "risk_precheck"
+        causal = AgentError.validation("BOOM", failure_stage="risk_precheck")
+        async def operation():
+            raise causal
+    else:
+        node_name = "evidence_collector"
+        causal = AgentError.dependency("SOURCE", failure_stage="evidence_collector", component="rag", operation="q")
+        async def operation():
+            raise ExceptionGroup("sources", [causal, ValueError("other")])
+
+    with pytest.raises(asyncio.CancelledError):
+        await pipeline_for_run_node.run_node(trace_state, node_name, operation)
+
+    assert raises_left == 0  # the injected cancellation actually fired and was exhausted
+    failed = [e for e in trace_spy.events if e.status == "failed"]
+    assert trace_state.primary_failure_event_id is not None
+    primary = next(e for e in trace_spy.events if e.id == trace_state.primary_failure_event_id)
+    if mode in {"ordinary_event", "ordinary_finish"}:
+        assert len(failed) == 1
+        assert primary is failed[0]
+    else:
+        child = [e for e in trace_spy.events if e.event_type == "node_child"]
+        assert len(child) == 2  # no duplicate child events from the retried settlement
+        assert primary.component == "rag"
+    assert trace_spy.finished[-1][1:] == (
+        "failed", "BOOM" if mode in {"ordinary_event", "ordinary_finish"} else "SOURCE"
+    )
+
+
+@pytest.mark.asyncio
+async def test_mark_failure_allocates_synthetic_span_once_and_reuses_it(
+    pipeline_for_run_node, trace_state, trace_spy
+):
+    start_calls = []
+    original_start = trace_spy.start_span
+    async def start(*args, **kwargs):
+        start_calls.append(kwargs.get("span_id"))
+        return await original_start(*args, **kwargs)
+    trace_spy.start_span = start
+
+    event_id = await pipeline_for_run_node._mark_failure(trace_state, "UNEXPECTED_ERROR", "pipeline")
+    span_id = trace_state.spans["pipeline:1"]
+
+    assert len(start_calls) == 1
+    started = [e for e in trace_spy.events if e.status == "started" and e.span_id == span_id]
+    failed = [e for e in trace_spy.events if e.status == "failed" and e.span_id == span_id]
+    assert len(started) == 1
+    assert len(failed) == 1 and failed[0].id == event_id
+    assert trace_spy.finished[-1] == (span_id, "failed", "UNEXPECTED_ERROR")
+
+    second_id = await pipeline_for_run_node._mark_failure(trace_state, "UNEXPECTED_ERROR", "pipeline")
+
+    assert trace_state.spans["pipeline:1"] == span_id
+    assert len(start_calls) == 1  # reused, not re-created
+    assert second_id == event_id  # idempotent replay dedups to the same event
+
+
+@pytest.mark.asyncio
+async def test_single_leaf_group_emits_node_child_not_plain_node_event(
+    pipeline_for_run_node, trace_state, trace_spy
+):
+    causal = AgentError.dependency(
+        "SOURCE", failure_stage="evidence_collector", component="rag", operation="q"
+    )
+    async def grouped():
+        raise BaseExceptionGroup("sources", [causal])
+    with pytest.raises(AgentError):
+        await pipeline_for_run_node.run_node(trace_state, "evidence_collector", grouped)
+    node_failed = [e for e in trace_spy.events if e.event_type == "node" and e.status == "failed"]
+    child = [e for e in trace_spy.events if e.event_type == "node_child"]
+    assert node_failed == []
+    assert len(child) == 1
+    assert trace_state.primary_failure_event_id == child[0].id
+
+
+@pytest.mark.asyncio
+async def test_mark_failure_never_refinishes_a_reused_span_with_conflicting_values(
+    pipeline_for_run_node, trace_state, trace_spy
+):
+    await pipeline_for_run_node._mark_failure(trace_state, "FIRST_REASON", "pipeline")
+    span_id = trace_state.spans["pipeline:1"]
+    assert trace_spy.finished == [(span_id, "failed", "FIRST_REASON")]
+
+    await pipeline_for_run_node._mark_failure(trace_state, "SECOND_REASON", "pipeline")
+
+    assert trace_state.spans["pipeline:1"] == span_id
+    assert trace_spy.finished == [(span_id, "failed", "FIRST_REASON")]
