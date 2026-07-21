@@ -1,0 +1,42 @@
+[
+  {
+    "tenant_id": "t1",
+    "source_id": "active",
+    "version": "v1",
+    "content": "有效內容。",
+    "effective_at": "2025-12-31T23:59:59Z",
+    "valid_until": "2026-01-01T00:00:01Z"
+  },
+  {
+    "tenant_id": "t1",
+    "source_id": "effective-boundary",
+    "version": "v1",
+    "content": "生效邊界內容。",
+    "effective_at": "2026-01-01T00:00:00Z",
+    "valid_until": "2026-01-01T00:00:01Z"
+  },
+  {
+    "tenant_id": "t1",
+    "source_id": "future",
+    "version": "v1",
+    "content": "尚未生效內容。",
+    "effective_at": "2026-01-01T00:00:01Z",
+    "valid_until": "2026-01-01T00:00:02Z"
+  },
+  {
+    "tenant_id": "t1",
+    "source_id": "expired",
+    "version": "v1",
+    "content": "已過期內容。",
+    "effective_at": "2025-01-01T00:00:00Z",
+    "valid_until": "2025-12-31T23:59:59Z"
+  },
+  {
+    "tenant_id": "t1",
+    "source_id": "expiry-boundary",
+    "version": "v1",
+    "content": "到期邊界內容。",
+    "effective_at": "2025-01-01T00:00:00Z",
+    "valid_until": "2026-01-01T00:00:00Z"
+  }
+]

@@ -1,0 +1,18 @@
+[
+  {
+    "tenant_id": "t1",
+    "customer_id": "c1",
+    "source_id": "customer-c1",
+    "version": "v1",
+    "content": "第一位客戶的專屬內容。",
+    "valid_until": "2099-12-31T00:00:00Z"
+  },
+  {
+    "tenant_id": "t1",
+    "customer_id": "c2",
+    "source_id": "customer-c2",
+    "version": "v1",
+    "content": "第二位客戶的專屬內容。",
+    "valid_until": "2099-12-31T00:00:00Z"
+  }
+]

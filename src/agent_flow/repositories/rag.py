@@ -17,6 +17,8 @@ def _vector_literal(embedding: Sequence[float]) -> str:
     values = tuple(float(value) for value in embedding)
     if not all(math.isfinite(value) for value in values):
         raise ValueError("embedding values must be finite")
+    if math.hypot(*values) == 0.0:
+        raise ValueError("embedding must have a non-zero norm")
     return "[" + ",".join(format(value, ".17g") for value in values) + "]"
 
 
@@ -39,27 +41,35 @@ class RagRepository:
         async with self._pool.connection() as connection:
             cursor = await connection.execute(
                 """
+                WITH candidates AS (
+                    SELECT
+                        c.id AS evidence_id,
+                        d.source_id,
+                        d.version,
+                        c.content,
+                        statement_timestamp() AS retrieved_at,
+                        d.effective_at,
+                        d.valid_until,
+                        c.embedding <=> %s::vector AS distance,
+                        d.access_metadata,
+                        c.metadata AS chunk_metadata
+                    FROM rag.chunks AS c
+                    JOIN rag.documents AS d ON d.id = c.document_id
+                    WHERE d.tenant_id = %s
+                      AND c.tenant_id = %s
+                      AND (d.customer_id IS NULL OR d.customer_id = %s)
+                      AND (c.customer_id IS NULL OR c.customer_id = %s)
+                      AND d.ingestion_status = 'ready'
+                      AND (d.effective_at IS NULL OR d.effective_at <= statement_timestamp())
+                      AND (d.valid_until IS NULL OR d.valid_until > statement_timestamp())
+                )
                 SELECT
-                    c.id AS evidence_id,
-                    d.source_id,
-                    d.version,
-                    c.content,
-                    statement_timestamp() AS retrieved_at,
-                    d.effective_at,
-                    d.valid_until,
-                    1 - (c.embedding <=> %s::vector) AS score,
-                    d.access_metadata,
-                    c.metadata AS chunk_metadata
-                FROM rag.chunks AS c
-                JOIN rag.documents AS d ON d.id = c.document_id
-                WHERE d.tenant_id = %s
-                  AND c.tenant_id = %s
-                  AND (d.customer_id IS NULL OR d.customer_id = %s)
-                  AND (c.customer_id IS NULL OR c.customer_id = %s)
-                  AND d.ingestion_status = 'ready'
-                  AND (d.effective_at IS NULL OR d.effective_at <= statement_timestamp())
-                  AND (d.valid_until IS NULL OR d.valid_until > statement_timestamp())
-                ORDER BY c.embedding <=> %s::vector, c.id
+                    evidence_id, source_id, version, content, retrieved_at,
+                    effective_at, valid_until, 1 - distance AS score,
+                    access_metadata, chunk_metadata
+                FROM candidates
+                WHERE distance BETWEEN 0.0 AND 2.0
+                ORDER BY distance, evidence_id
                 LIMIT %s
                 """,
                 (
@@ -68,7 +78,6 @@ class RagRepository:
                     context.tenant_id,
                     context.customer_id,
                     context.customer_id,
-                    vector,
                     request.limit,
                 ),
             )
@@ -79,6 +88,9 @@ class RagRepository:
     @staticmethod
     def _evidence(row: dict[str, Any]) -> EvidenceItem:
         content_checksum = hashlib.sha256(row["content"].encode("utf-8")).hexdigest()
+        score = float(row["score"])
+        if not math.isfinite(score):
+            raise ValueError("cosine search returned a non-finite score")
         return EvidenceItem(
             evidence_id=str(row["evidence_id"]),
             source_id=row["source_id"],
@@ -88,7 +100,7 @@ class RagRepository:
             retrieved_at=row["retrieved_at"],
             effective_at=row["effective_at"],
             valid_until=row["valid_until"],
-            score=float(row["score"]),
+            score=score,
             metadata={
                 "access": row["access_metadata"],
                 "chunk": row["chunk_metadata"],

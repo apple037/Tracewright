@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 from collections.abc import Mapping, Sequence
 
 import pytest
@@ -8,6 +9,15 @@ import pytest_asyncio
 from agent_flow.repositories.postgres import PostgresPool
 from agent_flow.repositories.rag import RagRepository
 from agent_flow.repositories.traces import PostgresTraceRepository
+
+
+RAG_PYTEST_OWNER = "agent-flow-task6"
+
+
+def _is_unambiguous_test_database(name: str) -> bool:
+    if re.fullmatch(r"[A-Za-z0-9]+(?:[_-][A-Za-z0-9]+)*", name) is None:
+        return False
+    return "test" in re.split(r"[_-]", name.lower())
 
 
 def database_integration_required(
@@ -70,9 +80,13 @@ async def _clear_rag_test_data(pool: PostgresPool) -> None:
     async with pool.connection() as connection:
         database = await connection.execute("SELECT current_database() AS name")
         name = (await database.fetchone())["name"]
-        if "test" not in name.lower():
+        if not _is_unambiguous_test_database(name):
             raise RuntimeError("RAG cleanup is restricted to test databases")
-        await connection.execute("TRUNCATE rag.documents CASCADE")
+        await connection.execute(
+            "DELETE FROM rag.documents "
+            "WHERE access_metadata ->> 'pytest_owner' = %s",
+            (RAG_PYTEST_OWNER,),
+        )
 
 
 @pytest_asyncio.fixture

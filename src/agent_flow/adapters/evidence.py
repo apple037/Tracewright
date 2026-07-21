@@ -85,12 +85,28 @@ def _fixture_payload(path: str | Path) -> list[dict[str, Any]]:
 
 
 class MockRagClient:
-    def __init__(self, records: tuple[_RagFixture, ...]) -> None:
+    def __init__(
+        self,
+        records: tuple[_RagFixture, ...],
+        *,
+        as_of: datetime = FIXTURE_RETRIEVED_AT,
+    ) -> None:
+        if as_of.tzinfo is None or as_of.utcoffset() is None:
+            raise ValueError("as_of must be timezone-aware")
         self._records = records
+        self._as_of = as_of
 
     @classmethod
-    def from_fixture(cls, path: str | Path) -> Self:
-        return cls(tuple(_RagFixture.model_validate(row) for row in _fixture_payload(path)))
+    def from_fixture(
+        cls,
+        path: str | Path,
+        *,
+        as_of: datetime = FIXTURE_RETRIEVED_AT,
+    ) -> Self:
+        return cls(
+            tuple(_RagFixture.model_validate(row) for row in _fixture_payload(path)),
+            as_of=as_of,
+        )
 
     async def search(
         self, context: AuthorizedCustomerContext, request: RagSearchRequest
@@ -101,6 +117,8 @@ class MockRagClient:
             for record in self._records
             if record.tenant_id == context.tenant_id
             and record.customer_id in (None, context.customer_id)
+            and (record.effective_at is None or record.effective_at <= self._as_of)
+            and (record.valid_until is None or record.valid_until > self._as_of)
         )
         ordered = sorted(
             eligible,
@@ -113,8 +131,7 @@ class MockRagClient:
         items = tuple(self._evidence(record) for record in ordered[: request.limit])
         return RagSearchResult(items=items)
 
-    @staticmethod
-    def _evidence(record: _RagFixture) -> EvidenceItem:
+    def _evidence(self, record: _RagFixture) -> EvidenceItem:
         checksum = _checksum(record.content)
         metadata = {
             **record.metadata,
@@ -127,7 +144,7 @@ class MockRagClient:
             version=record.version,
             content=record.content,
             content_checksum=checksum,
-            retrieved_at=record.retrieved_at,
+            retrieved_at=self._as_of,
             effective_at=record.effective_at,
             valid_until=record.valid_until,
             score=record.score,

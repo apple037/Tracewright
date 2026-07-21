@@ -1,5 +1,6 @@
 import hashlib
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -53,6 +54,43 @@ async def test_rag_filters_before_returning_other_tenant_or_customer_data():
     )
 
     assert result.items == ()
+
+
+@pytest.mark.asyncio
+async def test_rag_filters_same_tenant_different_customer_data(authorized_context):
+    client = MockRagClient.from_fixture("tests/fixtures/rag_authorization.json")
+
+    result = await client.search(
+        authorized_context, RagSearchRequest(query="專屬內容", limit=10)
+    )
+
+    assert [item.source_id for item in result.items] == ["customer-c1"]
+
+
+@pytest.mark.asyncio
+async def test_rag_applies_sql_equivalent_freshness_boundaries(authorized_context):
+    as_of = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    client = MockRagClient.from_fixture(
+        "tests/fixtures/rag_freshness.json", as_of=as_of
+    )
+
+    result = await client.search(
+        authorized_context, RagSearchRequest(query="內容", limit=10)
+    )
+
+    assert [item.source_id for item in result.items] == [
+        "active",
+        "effective-boundary",
+    ]
+    assert all(item.retrieved_at == as_of for item in result.items)
+
+
+@pytest.mark.asyncio
+async def test_rag_rejects_wrong_context_before_record_access():
+    client = MockRagClient.from_fixture("tests/fixtures/rag.json")
+
+    with pytest.raises(TypeError, match="AuthorizedCustomerContext"):
+        await client.search(object(), RagSearchRequest(query="保固"))
 
 
 @pytest.mark.asyncio
