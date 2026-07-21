@@ -65,8 +65,6 @@ class ModelConfig(BaseModel):
         for profile_name, profile in self.profiles.items():
             if profile.endpoint not in self.endpoints:
                 raise ValueError(f"profile {profile_name} references unknown endpoint")
-            if profile.max_concurrency > self.endpoints[profile.endpoint].max_concurrency:
-                raise ValueError(f"profile {profile_name} exceeds endpoint concurrency")
         roles = sorted(self.roles.items(), key=lambda item: item[0] != "response_generator")
         for role, profile_name in roles:
             if profile_name not in self.profiles:

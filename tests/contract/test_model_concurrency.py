@@ -1,38 +1,83 @@
 import asyncio
 
+import httpx
 import pytest
+import respx
 
-from agent_flow.adapters.models import CapacityGuard
-from agent_flow.config import EndpointConfig, ModelConfig, ProfileConfig
+from agent_flow.adapters.models import CapacityGuard, EmbeddingModel, ModelGateway
+from agent_flow.config import ModelConfig, Settings
+from agent_flow.contracts import ResponseDraft
+from agent_flow.model_registry import ModelRegistry
 
 
 def _config(
     *, endpoint_limit: int, profile_limits: dict[str, int]
 ) -> ModelConfig:
-    endpoint = EndpointConfig(
-        adapter="openai_compatible",
-        base_url_env="LOCAL_VLLM_BASE_URL",
-        max_concurrency=endpoint_limit,
+    return ModelConfig.model_validate(
+        {
+            "endpoints": {
+                "shared": {
+                    "adapter": "openai_compatible",
+                    "base_url_env": "LOCAL_VLLM_BASE_URL",
+                    "max_concurrency": endpoint_limit,
+                }
+            },
+            "profiles": {
+                name: {
+                    "endpoint": "shared",
+                    "model": f"test-{name}",
+                    "family": "test",
+                    "capabilities": ["chat"],
+                    "max_concurrency": limit,
+                }
+                for name, limit in profile_limits.items()
+            },
+            "roles": {},
+            "mode": "bootstrap",
+            "disabled_roles": [],
+            "promotion_semantic_mode": "human_only",
+        }
     )
-    profiles = {
-        name: ProfileConfig(
-            endpoint="shared",
-            model=f"test-{name}",
-            family="test",
-            capabilities={"chat"},
-            max_concurrency=limit,
-        )
-        for name, limit in profile_limits.items()
-    }
-    # CapacityGuard must independently enforce both configured ceilings. Constructing
-    # an otherwise impossible wider profile makes the endpoint invariant observable.
-    return ModelConfig.model_construct(
-        endpoints={"shared": endpoint},
-        profiles=profiles,
-        roles={},
-        mode="bootstrap",
-        disabled_roles=set(),
-        promotion_semantic_mode="human_only",
+
+
+def _gateway_registry(*, endpoint_limit: int, profile_limit: int) -> ModelRegistry:
+    config = ModelConfig.model_validate(
+        {
+            "endpoints": {
+                "remote": {
+                    "adapter": "ollama_compatible",
+                    "base_url_env": "REMOTE_MODEL_BASE_URL",
+                    "max_concurrency": endpoint_limit,
+                }
+            },
+            "profiles": {
+                "chat": {
+                    "endpoint": "remote",
+                    "model": "chat-model",
+                    "family": "test",
+                    "capabilities": ["chat", "structured_json"],
+                    "max_concurrency": profile_limit,
+                },
+                "embedding": {
+                    "endpoint": "remote",
+                    "model": "embedding-model",
+                    "family": "test",
+                    "capabilities": ["embedding"],
+                    "max_concurrency": profile_limit,
+                },
+            },
+            "roles": {"chat": "chat", "embedding": "embedding"},
+            "mode": "bootstrap",
+            "disabled_roles": [],
+            "promotion_semantic_mode": "human_only",
+        }
+    )
+    return ModelRegistry(
+        config,
+        Settings(
+            database_url="postgresql://agent:agent@localhost/agent",
+            remote_model_base_url="http://remote-models:11434",
+        ),
     )
 
 
@@ -56,6 +101,79 @@ async def test_endpoint_limit_wins_when_profile_limit_is_larger():
     finally:
         release.set()
         await holder
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_gateway_and_embedding_instances_share_endpoint_capacity():
+    registry = _gateway_registry(endpoint_limit=1, profile_limit=1)
+    chat_started = asyncio.Event()
+    release_chat = asyncio.Event()
+
+    async def block_chat(request):
+        chat_started.set()
+        await release_chat.wait()
+        return httpx.Response(200, json={"message": {"content": "ok"}})
+
+    chat_route = respx.post("http://remote-models:11434/api/chat").mock(
+        side_effect=block_chat
+    )
+    embed_route = respx.post("http://remote-models:11434/api/embed").mock(
+        return_value=httpx.Response(200, json={"embeddings": [[0.1]]})
+    )
+    chat_task = asyncio.create_task(
+        ModelGateway(registry).complete("chat", {"messages": []})
+    )
+    await chat_started.wait()
+    try:
+        with pytest.raises(TimeoutError):
+            await EmbeddingModel(registry, acquire_timeout_ms=10).embed(
+                "embedding", ["hello"]
+            )
+        assert not embed_route.called
+    finally:
+        release_chat.set()
+        assert await chat_task == "ok"
+    assert chat_route.call_count == 1
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_gateway_instances_share_profile_capacity_for_structured_and_chat():
+    registry = _gateway_registry(endpoint_limit=2, profile_limit=1)
+    structured_started = asyncio.Event()
+    release_structured = asyncio.Event()
+
+    async def block_structured(request):
+        structured_started.set()
+        await release_structured.wait()
+        return httpx.Response(
+            200,
+            json={
+                "message": {
+                    "content": '{"text":"ok","citations":[],"evidence_ids":[]}'
+                }
+            },
+        )
+
+    chat_route = respx.post("http://remote-models:11434/api/chat").mock(
+        side_effect=block_structured
+    )
+    structured_task = asyncio.create_task(
+        ModelGateway(registry).structured(
+            "chat", {"messages": []}, ResponseDraft
+        )
+    )
+    await structured_started.wait()
+    try:
+        with pytest.raises(TimeoutError):
+            await ModelGateway(registry, acquire_timeout_ms=10).complete(
+                "chat", {"messages": []}
+            )
+    finally:
+        release_structured.set()
+        assert (await structured_task).text == "ok"
+    assert chat_route.call_count == 1
 
 
 @pytest.mark.asyncio

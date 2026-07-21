@@ -60,3 +60,33 @@ def test_response_generator_profile_requires_structured_json():
     data["profiles"]["local_generator"]["capabilities"].remove("structured_json")
     with pytest.raises(ValueError, match="response_generator.*structured_json"):
         ModelConfig.model_validate(data)
+
+
+def test_profile_concurrency_is_an_independent_ceiling_from_endpoint():
+    config = ModelConfig.model_validate(
+        {
+            "endpoints": {
+                "shared": {
+                    "adapter": "openai_compatible",
+                    "base_url_env": "LOCAL_VLLM_BASE_URL",
+                    "max_concurrency": 1,
+                }
+            },
+            "profiles": {
+                "wide": {
+                    "endpoint": "shared",
+                    "model": "test-model",
+                    "family": "test",
+                    "capabilities": ["chat"],
+                    "max_concurrency": 3,
+                }
+            },
+            "roles": {},
+            "mode": "bootstrap",
+            "disabled_roles": [],
+            "promotion_semantic_mode": "human_only",
+        }
+    )
+
+    assert config.endpoints["shared"].max_concurrency == 1
+    assert config.profiles["wide"].max_concurrency == 3

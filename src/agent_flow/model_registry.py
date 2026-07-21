@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import httpx
 from pydantic import BaseModel
 
 from agent_flow.config import ModelConfig, Settings, model_config_checksum
 from agent_flow.contracts import ResponseDraft
+
+
+if TYPE_CHECKING:
+    from agent_flow.adapters.models import CapacityGuard
 
 
 class ChatMessage(BaseModel):
@@ -65,6 +69,15 @@ class ModelRegistry:
         self.config = config
         self.settings = settings
         self.checksum = model_config_checksum(config)
+        self._capacity_guard: CapacityGuard | None = None
+
+    @property
+    def capacity_guard(self) -> CapacityGuard:
+        if self._capacity_guard is None:
+            from agent_flow.adapters.models import CapacityGuard
+
+            self._capacity_guard = CapacityGuard(self.config)
+        return self._capacity_guard
 
     def resolve(self, role: str) -> ResolvedModel:
         if role in self.config.disabled_roles:

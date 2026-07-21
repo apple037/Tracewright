@@ -88,9 +88,16 @@ def _request_dict(request: object) -> dict[str, Any]:
 
 
 class ModelGateway:
-    def __init__(self, registry: ModelRegistry, *, timeout: float = 30.0):
+    def __init__(
+        self,
+        registry: ModelRegistry,
+        *,
+        timeout: float = 30.0,
+        acquire_timeout_ms: int = 5000,
+    ):
         self.registry = registry
         self.timeout = timeout
+        self.acquire_timeout_ms = acquire_timeout_ms
 
     async def complete(self, role: str, request: object) -> str:
         resolved = self.registry.resolve(role)
@@ -161,13 +168,18 @@ class ModelGateway:
             if key != "enable_thinking"
         }
         payload.update(passthrough)
-        async with httpx.AsyncClient(
-            base_url=resolved.base_url,
-            headers=_authorization_header(resolved),
-            timeout=self.timeout,
-        ) as client:
-            response = await client.post("/chat/completions", json=payload)
-            response.raise_for_status()
+        async with self.registry.capacity_guard.acquire(
+            resolved.endpoint_name,
+            resolved.profile_name,
+            self.acquire_timeout_ms,
+        ):
+            async with httpx.AsyncClient(
+                base_url=resolved.base_url,
+                headers=_authorization_header(resolved),
+                timeout=self.timeout,
+            ) as client:
+                response = await client.post("/chat/completions", json=payload)
+                response.raise_for_status()
         body = response.json()
         try:
             choices = body["choices"]
@@ -216,20 +228,32 @@ class ModelGateway:
         for key, value in resolved.request_options.items():
             if key != "enable_thinking":
                 payload[key] = value
-        async with httpx.AsyncClient(
-            base_url=resolved.base_url,
-            headers=_authorization_header(resolved),
-            timeout=self.timeout,
-        ) as client:
-            response = await client.post("/api/chat", json=payload)
-            response.raise_for_status()
+        async with self.registry.capacity_guard.acquire(
+            resolved.endpoint_name,
+            resolved.profile_name,
+            self.acquire_timeout_ms,
+        ):
+            async with httpx.AsyncClient(
+                base_url=resolved.base_url,
+                headers=_authorization_header(resolved),
+                timeout=self.timeout,
+            ) as client:
+                response = await client.post("/api/chat", json=payload)
+                response.raise_for_status()
         return str(response.json()["message"]["content"])
 
 
 class EmbeddingModel:
-    def __init__(self, registry: ModelRegistry, *, timeout: float = 30.0):
+    def __init__(
+        self,
+        registry: ModelRegistry,
+        *,
+        timeout: float = 30.0,
+        acquire_timeout_ms: int = 5000,
+    ):
         self.registry = registry
         self.timeout = timeout
+        self.acquire_timeout_ms = acquire_timeout_ms
 
     async def embed(self, role: str, texts: list[str]) -> list[list[float]]:
         resolved = self.registry.resolve(role)
@@ -247,13 +271,18 @@ class EmbeddingModel:
             result_key = "data"
         else:
             raise RuntimeError(f"unsupported model adapter: {resolved.adapter}")
-        async with httpx.AsyncClient(
-            base_url=resolved.base_url,
-            headers=_authorization_header(resolved),
-            timeout=self.timeout,
-        ) as client:
-            response = await client.post(path, json=payload)
-            response.raise_for_status()
+        async with self.registry.capacity_guard.acquire(
+            resolved.endpoint_name,
+            resolved.profile_name,
+            self.acquire_timeout_ms,
+        ):
+            async with httpx.AsyncClient(
+                base_url=resolved.base_url,
+                headers=_authorization_header(resolved),
+                timeout=self.timeout,
+            ) as client:
+                response = await client.post(path, json=payload)
+                response.raise_for_status()
         body = response.json()
         if result_key == "data":
             vectors = [entry["embedding"] for entry in body[result_key]]
