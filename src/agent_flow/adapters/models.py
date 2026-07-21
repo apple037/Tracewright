@@ -1,19 +1,82 @@
 from __future__ import annotations
 
+import asyncio
+import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any, TypeVar
 
 import httpx
 from pydantic import BaseModel
 
+from agent_flow.config import ModelConfig
 from agent_flow.model_registry import (
     ModelRegistry,
     ModelResponse,
     ResolvedModel,
     _authorization_header,
 )
+from agent_flow.retry import CapacityWait
 
 
 T = TypeVar("T", bound=BaseModel)
+
+
+class CapacityGuard:
+    def __init__(self, config: ModelConfig):
+        self._endpoints = {
+            name: asyncio.Semaphore(endpoint.max_concurrency)
+            for name, endpoint in config.endpoints.items()
+        }
+        self._profiles = {
+            name: asyncio.Semaphore(profile.max_concurrency)
+            for name, profile in config.profiles.items()
+        }
+        self._profile_endpoints = {
+            name: profile.endpoint for name, profile in config.profiles.items()
+        }
+
+    @asynccontextmanager
+    async def acquire(
+        self, endpoint_name: str, profile_name: str, timeout_ms: int
+    ) -> AsyncIterator[CapacityWait]:
+        endpoint = self._endpoints[endpoint_name]
+        profile = self._profiles[profile_name]
+        if self._profile_endpoints[profile_name] != endpoint_name:
+            raise ValueError(
+                f"profile {profile_name} is not configured for endpoint {endpoint_name}"
+            )
+
+        started = time.monotonic()
+        endpoint_blocked = endpoint.locked()
+        endpoint_acquired = False
+        profile_acquired = False
+        profile_blocked = False
+        try:
+            async with asyncio.timeout(timeout_ms / 1000):
+                await endpoint.acquire()
+                endpoint_acquired = True
+                profile_blocked = profile.locked()
+                await profile.acquire()
+                profile_acquired = True
+
+            if endpoint_blocked:
+                limit_kind = "endpoint"
+            elif profile_blocked:
+                limit_kind = "profile"
+            else:
+                limit_kind = "none"
+            yield CapacityWait(
+                endpoint_name=endpoint_name,
+                profile_name=profile_name,
+                wait_ms=int((time.monotonic() - started) * 1000),
+                wait_limit_kind=limit_kind,
+            )
+        finally:
+            if profile_acquired:
+                profile.release()
+            if endpoint_acquired:
+                endpoint.release()
 
 
 def _request_dict(request: object) -> dict[str, Any]:
