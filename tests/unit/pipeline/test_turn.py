@@ -130,3 +130,51 @@ async def test_run_node_preserves_nested_concurrent_child_outcomes(
         ("evidence_collector", "cancelled"),
     ]
     assert trace_state.primary_failure_event_id == child[0].id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["start_span", "started", "finish_span", "completed"])
+async def test_run_node_recovers_cancellation_at_each_lifecycle_boundary(
+    pipeline_for_run_node, trace_state, trace_spy, boundary
+):
+    original_start = trace_spy.start_span
+    original_event = trace_spy.append_event
+    original_finish = trace_spy.finish_span
+    fired = False
+    async def start(*args, **kwargs):
+        nonlocal fired
+        value = await original_start(*args, **kwargs)
+        if boundary == "start_span" and not fired:
+            fired = True
+            raise asyncio.CancelledError
+        return value
+    async def event(**kwargs):
+        nonlocal fired
+        value = await original_event(**kwargs)
+        if kwargs["status"] == boundary and not fired:
+            fired = True
+            raise asyncio.CancelledError
+        return value
+    async def finish(*args, **kwargs):
+        nonlocal fired
+        await original_finish(*args, **kwargs)
+        if boundary == "finish_span" and args[1] == "completed" and not fired:
+            fired = True
+            raise asyncio.CancelledError
+    trace_spy.start_span, trace_spy.append_event, trace_spy.finish_span = start, event, finish
+    with pytest.raises(asyncio.CancelledError):
+        await pipeline_for_run_node.run_node(trace_state, "risk_precheck", lambda: "ok")
+    terminals = [e.status for e in trace_spy.events if e.status in {"completed", "cancelled"}]
+    assert terminals == (["completed"] if boundary in {"finish_span", "completed"} else ["cancelled"])
+
+
+@pytest.mark.asyncio
+async def test_bounded_cleanup_cancels_and_awaits_hanging_task(pipeline_for_run_node):
+    finished = asyncio.Event()
+    async def hanging():
+        try:
+            await asyncio.Event().wait()
+        finally:
+            finished.set()
+    assert await pipeline_for_run_node._bounded_cleanup(hanging(), timeout=.01) is None
+    assert finished.is_set()

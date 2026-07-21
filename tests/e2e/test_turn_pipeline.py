@@ -121,3 +121,22 @@ async def test_success_postcommit_ack_loss_replays_identical_finalization(
     assert result.reply
     assert trace.status == "succeeded"
     assert len(pipeline.conversations.persisted) == 1
+
+
+@pytest.mark.asyncio
+async def test_postcommit_conversation_ack_loss_retries_without_duplicate(
+    pipeline, context
+):
+    original = pipeline.conversations.append_turn
+    calls = 0
+    async def committed_then_lost(**turn):
+        nonlocal calls
+        calls += 1
+        await original(**turn)
+        if calls == 1:
+            raise OSError("conversation acknowledgement lost")
+    pipeline.conversations.append_turn = committed_then_lost
+    result = await pipeline.run(context, TurnRequest(session_id="s1", message="查詢訂單 o1"))
+    assert result.reply
+    assert calls == 2
+    assert len(pipeline.conversations.persisted) == 1

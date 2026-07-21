@@ -239,11 +239,31 @@ async def test_trace_finalization_identical_replay_is_idempotent(trace_repositor
         )
     with pytest.raises(ValueError, match="does not exist"):
         await trace_repository.finish_trace(uuid4(), "failed", tenant_id="t1")
-
     loaded = await trace_repository.get_trace(trace_id, tenant_id="t1")
     assert loaded is not None
     assert loaded.status == "succeeded"
     assert loaded.primary_failure_event_id is None
+
+
+@pytest.mark.asyncio
+async def test_start_span_identity_replay_is_idempotent_and_conflicts_rejected(
+    trace_repository,
+):
+    from uuid import uuid4
+    trace_id = await trace_repository.start_trace(
+        tenant_id="t1", customer_id="c1", session_id="s1"
+    )
+    span_id = uuid4()
+    assert await trace_repository.start_span(
+        trace_id, "context_loader", tenant_id="t1", span_id=span_id
+    ) == span_id
+    assert await trace_repository.start_span(
+        trace_id, "context_loader", tenant_id="t1", span_id=span_id
+    ) == span_id
+    with pytest.raises(ValueError, match="conflicts"):
+        await trace_repository.start_span(
+            trace_id, "dialogue_classifier", tenant_id="t1", span_id=span_id
+        )
 
 
 @pytest.mark.asyncio

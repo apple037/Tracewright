@@ -26,6 +26,12 @@ class EvidenceSourceCancelled(asyncio.CancelledError):
         self.operation = operation
 
 
+class EvidenceCollectionCancelled(asyncio.CancelledError):
+    def __init__(self, outcomes: tuple[BaseException, ...]):
+        super().__init__("evidence collection cancelled")
+        self.outcomes = outcomes
+
+
 def plan_evidence(classification: DialogueClassification) -> EvidencePlan:
     if classification.intent == "order_status":
         return EvidencePlan(
@@ -74,8 +80,14 @@ async def collect_evidence(
         except asyncio.CancelledError:
             for task in tasks:
                 task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            raise
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            outcomes: list[BaseException] = []
+            for task, result in zip(tasks, results, strict=True):
+                if isinstance(result, asyncio.CancelledError):
+                    outcomes.append(EvidenceSourceCancelled(*task_sources[task]))
+                elif isinstance(result, BaseException):
+                    outcomes.append(result)
+            raise EvidenceCollectionCancelled(tuple(outcomes[:20]))
         failures = [
             error for task in done
             if (error := task.exception()) is not None

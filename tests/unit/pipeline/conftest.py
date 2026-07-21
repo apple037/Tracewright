@@ -29,11 +29,18 @@ class TraceSpy:
         self.events = []
         self.finished = []
 
-    async def start_span(self, trace_id, name, *, tenant_id, attempt=1):
-        return uuid4()
+    async def start_span(self, trace_id, name, *, tenant_id, attempt=1, span_id=None):
+        return span_id or uuid4()
 
     async def append_event(self, **kwargs):
         from types import SimpleNamespace
+        lifecycle_id = kwargs["payload"].get("lifecycle_id")
+        existing = next(
+            (event for event in self.events if event.payload.get("lifecycle_id") == lifecycle_id),
+            None,
+        ) if lifecycle_id else None
+        if existing is not None:
+            return existing
         event = SimpleNamespace(
             id=len(self.events) + 1,
             metadata=kwargs["payload"].get("metadata", {}),

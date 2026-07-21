@@ -260,3 +260,74 @@ async def test_cancellation_during_trace_cleanup_is_retried_bounded(pipeline, co
     trace = next(iter(pipeline.traces.records.values()))
     assert calls == 2
     assert trace.status == "failed"
+
+
+@pytest.mark.asyncio
+async def test_external_evidence_cancellation_records_each_running_child(
+    pipeline, context, monkeypatch
+):
+    import asyncio
+    from agent_flow.contracts import EvidencePlan, EvidenceToolCall
+    monkeypatch.setattr(
+        "agent_flow.pipeline.turn.plan_evidence",
+        lambda classification: EvidencePlan(
+            rag_queries=("shipping policy",),
+            tool_calls=(EvidenceToolCall(operation="order.lookup", arguments={"order_id": "current"}, freshness_seconds=60),),
+        ),
+    )
+    both_started = asyncio.Event()
+    count = 0
+    async def block():
+        nonlocal count
+        count += 1
+        if count == 2: both_started.set()
+        await asyncio.Event().wait()
+    class Rag:
+        async def search(self, context, request): await block()
+    class Tool:
+        async def call(self, context, request): await block()
+    pipeline.rag, pipeline.tools = Rag(), Tool()
+    task = asyncio.create_task(pipeline.run(context, TurnRequest(session_id="s1", message="查詢訂單 o1")))
+    await asyncio.wait_for(both_started.wait(), .2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError): await task
+    trace = next(iter(pipeline.traces.records.values()))
+    child = [e for e in trace.events if e.event_type == "node_child"]
+    assert [(e.component, e.kind) for e in child] == [("order_api", "cancelled"), ("rag", "cancelled")]
+
+
+@pytest.mark.asyncio
+async def test_external_evidence_cancellation_retains_child_failure_race(
+    pipeline, context, monkeypatch
+):
+    import asyncio
+    from agent_flow.contracts import EvidencePlan, EvidenceToolCall
+    monkeypatch.setattr(
+        "agent_flow.pipeline.turn.plan_evidence",
+        lambda classification: EvidencePlan(
+            rag_queries=("shipping policy",),
+            tool_calls=(EvidenceToolCall(operation="order.lookup", arguments={"order_id": "current"}, freshness_seconds=60),),
+        ),
+    )
+    both_started = asyncio.Event()
+    count = 0
+    async def started():
+        nonlocal count
+        count += 1
+        if count == 2: both_started.set()
+    class Rag:
+        async def search(self, context, request):
+            await started(); await asyncio.Event().wait()
+    class Tool:
+        async def call(self, context, request):
+            await started()
+            try: await asyncio.Event().wait()
+            except asyncio.CancelledError: raise OSError("failure raced cancellation")
+    pipeline.rag, pipeline.tools = Rag(), Tool()
+    task = asyncio.create_task(pipeline.run(context, TurnRequest(session_id="s1", message="查詢訂單 o1")))
+    await asyncio.wait_for(both_started.wait(), .2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError): await task
+    trace = next(iter(pipeline.traces.records.values()))
+    child = [e for e in trace.events if e.event_type == "node_child"]
+    assert [(e.component, e.kind) for e in child] == [("order_api", "failed"), ("rag", "cancelled")]

@@ -31,15 +31,37 @@ class MemoryTraces:
         )
         return trace_id
 
-    async def start_span(self, trace_id, name, *, tenant_id, attempt=1):
-        span = SimpleNamespace(id=uuid4(), node=name, name=name, attempt=attempt, status="running", error_code=None)
+    async def start_span(self, trace_id, name, *, tenant_id, attempt=1, span_id=None):
+        record = self.records[trace_id]
+        if record.tenant_id != tenant_id or record.status != "running":
+            raise ValueError("trace is not mutable in this tenant")
+        span_id = span_id or uuid4()
+        existing = next((s for s in record.spans if s.id == span_id), None)
+        if existing is not None:
+            if (existing.name, existing.attempt) == (name, attempt): return span_id
+            raise ValueError("span identity replay conflicts")
+        span = SimpleNamespace(id=span_id, node=name, name=name, attempt=attempt, status="running", error_code=None)
         self.records[trace_id].spans.append(span)
         return span.id
 
     async def append_event(self, **kwargs):
         self._event_id += 1
         record = self.records[kwargs["trace_id"]]
+        if record.tenant_id != kwargs["tenant_id"] or record.status != "running":
+            raise ValueError("trace is not mutable in this tenant")
         payload = kwargs["payload"]
+        lifecycle_id = payload.get("lifecycle_id")
+        existing = next((e for e in record.events if e.payload.get("lifecycle_id") == lifecycle_id), None) if lifecycle_id else None
+        if existing is not None:
+            if (
+                existing.span_id, existing.event_type, existing.component,
+                existing.kind, existing.error_code, existing.payload
+            ) == (
+                kwargs["span_id"], kwargs["event_type"], kwargs["component"],
+                kwargs["status"], kwargs.get("error_code"), payload,
+            ):
+                return existing
+            raise ValueError("event lifecycle replay conflicts")
         event = SimpleNamespace(
             id=self._event_id, node=payload.get("node"), kind=kwargs["status"],
             event_type=kwargs["event_type"],
@@ -81,11 +103,19 @@ class MemoryTraces:
 
 
 class MemoryConversations:
-    def __init__(self, now):
-        self.now, self.persisted, self.snapshots, self.scopes = now, [], {}, {}
+    def __init__(self, now, traces):
+        self.now, self.traces = now, traces
+        self.persisted, self.turns_by_trace, self.snapshots, self.scopes = [], {}, {}, {}
 
     async def get_snapshot(self, *, tenant_id, customer_id, session_id, trace_id):
-        snapshot = ConversationSnapshot(session_id=session_id, messages=("prior",), captured_at=self.now)
+        messages = ["prior"]
+        for source_trace, turn in self.turns_by_trace.items():
+            record = self.traces.records[source_trace]
+            if record.status == "succeeded" and (
+                record.tenant_id, record.customer_id, record.session_id
+            ) == (tenant_id, customer_id, session_id):
+                messages.extend((turn["customer_text"], turn["assistant_text"]))
+        snapshot = ConversationSnapshot(session_id=session_id, messages=tuple(messages), captured_at=self.now)
         self.snapshots[trace_id] = snapshot
         self.scopes[trace_id] = (tenant_id, customer_id, session_id)
         return snapshot
@@ -101,7 +131,14 @@ class MemoryConversations:
         return snapshot
 
     async def append_turn(self, **turn):
-        self.persisted.append(turn)
+        trace = self.traces.records[turn["trace_id"]]
+        if trace.status not in {"running", "succeeded"} or (
+            trace.tenant_id, trace.customer_id, trace.session_id
+        ) != (turn["tenant_id"], turn["customer_id"], turn["session_id"]):
+            raise ValueError("trace does not belong to conversation scope")
+        if turn["trace_id"] not in self.turns_by_trace:
+            self.turns_by_trace[turn["trace_id"]] = turn
+            self.persisted.append(turn)
 
 
 class MemoryHandoffs:
@@ -147,8 +184,9 @@ def pipeline(fake_models):
         "citations": ["tool-result-1"], "evidence_ids": ["tool-result-1"],
     })
     clock = Clock()
+    traces = MemoryTraces()
     return TurnPipeline(
-        traces=MemoryTraces(), conversations=MemoryConversations(clock.value), handoffs=MemoryHandoffs(),
+        traces=traces, conversations=MemoryConversations(clock.value, traces), handoffs=MemoryHandoffs(),
         models=fake_models, rag=Rag(), tools=Tool(), artifacts=load_runtime_artifacts(__import__("pathlib").Path("config")),
         clock=clock, assurance_mode="bootstrap",
     )

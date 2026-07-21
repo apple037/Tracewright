@@ -3,7 +3,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from inspect import isawaitable
 from typing import Any, TypeVar
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from agent_flow.artifacts import RuntimeArtifacts, resolve_persona
 from agent_flow.auth import AuthorizedCustomerContext
@@ -154,7 +154,10 @@ class TurnPipeline:
         operation = None
         if error is not None:
             error_code, component, operation = _error_details(error, node)
-        payload: dict[str, Any] = {"node": node, "attempt": attempt}
+        payload: dict[str, Any] = {
+            "node": node, "attempt": attempt,
+            "lifecycle_id": f"{span_id}:{status}",
+        }
         if metadata:
             payload["metadata"] = dict(metadata)
         if error is not None:
@@ -176,23 +179,41 @@ class TurnPipeline:
         trace_metadata: Mapping[str, JSONValue] | None = None,
     ) -> T:
         metadata = _validated_trace_metadata(trace_metadata)
-        span_id = await self.traces.start_span(
-            state.trace_id, name, tenant_id=state.context.tenant_id, attempt=attempt
-        )
+        span_id = uuid4()
         state.spans[f"{name}:{attempt}"] = span_id
+        operation_done = False
         try:
-            await self._event(
-                state, span_id, name, "started", attempt=attempt, metadata=metadata
+            await self._retry_idempotent(
+                lambda: self.traces.start_span(
+                    state.trace_id, name, tenant_id=state.context.tenant_id,
+                    attempt=attempt, span_id=span_id,
+                )
+            )
+            await self._retry_idempotent(
+                lambda: self._event(
+                    state, span_id, name, "started", attempt=attempt,
+                    metadata=metadata,
+                )
             )
             pending_or_value = operation()
             value = await pending_or_value if isawaitable(pending_or_value) else pending_or_value
+            operation_done = True
+            await self._retry_idempotent(
+                lambda: self.traces.finish_span(
+                    span_id, "completed", tenant_id=state.context.tenant_id
+                )
+            )
+            await self._retry_idempotent(
+                lambda: self._event(
+                    state, span_id, name, "completed", attempt=attempt,
+                    metadata=metadata,
+                )
+            )
         except asyncio.CancelledError as error:
             event = await self._bounded_cleanup(
-                self._retry_idempotent(
-                    lambda: self._cancel_node(
-                        state, span_id, name, attempt, error
-                    ),
-                    retry_cancellation=True,
+                self._settle_cancelled_node(
+                    state, span_id, name, attempt, error, metadata,
+                    operation_done=operation_done,
                 )
             )
             if event is not None and state.primary_failure_event_id is None:
@@ -244,9 +265,34 @@ class TurnPipeline:
             if state.primary_failure_event_id is None:
                 state.primary_failure_event_id = event.id
             raise causal
-        await self.traces.finish_span(span_id, "completed", tenant_id=state.context.tenant_id)
-        await self._event(state, span_id, name, "completed", attempt=attempt, metadata=metadata)
         return value
+
+    async def _settle_cancelled_node(
+        self, state, span_id, name, attempt, error, metadata, *, operation_done
+    ):
+        await self._retry_idempotent(
+            lambda: self.traces.start_span(
+                state.trace_id, name, tenant_id=state.context.tenant_id,
+                attempt=attempt, span_id=span_id,
+            ), retry_cancellation=True,
+        )
+        if operation_done:
+            await self._retry_idempotent(
+                lambda: self.traces.finish_span(
+                    span_id, "completed", tenant_id=state.context.tenant_id
+                ), retry_cancellation=True,
+            )
+            await self._retry_idempotent(
+                lambda: self._event(
+                    state, span_id, name, "completed", attempt=attempt,
+                    metadata=metadata,
+                ), retry_cancellation=True,
+            )
+            return None
+        return await self._retry_idempotent(
+            lambda: self._cancel_node(state, span_id, name, attempt, error),
+            retry_cancellation=True,
+        )
 
     async def _child_event(self, state, span_id, name, attempt, error, index):
         code, component, operation = _error_details(error, name)
@@ -258,10 +304,24 @@ class TurnPipeline:
             payload={
                 "node": name, "attempt": attempt, "child_index": index,
                 "failure_stage": name, "operation": operation,
+                "lifecycle_id": f"{span_id}:child:{index}",
             },
         )
 
     async def _cancel_node(self, state, span_id, name, attempt, error):
+        outcomes = getattr(error, "outcomes", ())
+        ordered = sorted(
+            outcomes[:20],
+            key=lambda child: (
+                _error_details(child, name)[1],
+                _error_details(child, name)[2] or "",
+                _error_details(child, name)[0],
+            ),
+        )
+        for index, child in enumerate(ordered):
+            await self._child_event(
+                state, span_id, name, attempt, child, index
+            )
         event = await self._event(
             state, span_id, name, "cancelled", attempt=attempt, error=error
         )
@@ -273,10 +333,27 @@ class TurnPipeline:
 
     async def _bounded_cleanup(self, pending, timeout: float = 1.0):
         task = asyncio.create_task(pending)
-        try:
-            return await asyncio.wait_for(asyncio.shield(task), timeout)
-        except asyncio.CancelledError:
-            return await asyncio.wait_for(asyncio.shield(task), timeout)
+        deadline = asyncio.get_running_loop().time() + timeout
+        while not task.done():
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                return None
+            try:
+                await asyncio.wait_for(asyncio.shield(task), remaining)
+            except asyncio.CancelledError:
+                if task.done():
+                    break
+                continue
+            except TimeoutError:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                return None
+            except Exception:
+                return None
+        result = await asyncio.gather(task, return_exceptions=True)
+        return None if isinstance(result[0], BaseException) else result[0]
 
     async def _retry_idempotent(
         self, operation, attempts: int = 2, *, retry_cancellation: bool = False
@@ -527,14 +604,16 @@ class TurnPipeline:
         await self.run_node(
             state,
             "conversation_persistence",
-            lambda: self.conversations.append_turn(
-                tenant_id=state.context.tenant_id,
-                customer_id=state.context.customer_id,
-                session_id=state.request.session_id,
-                trace_id=state.trace_id,
-                customer_text=state.request.message,
-                assistant_text=state.draft.text,
-                citations=state.draft.citations,
+            lambda: self._retry_idempotent(
+                lambda: self.conversations.append_turn(
+                    tenant_id=state.context.tenant_id,
+                    customer_id=state.context.customer_id,
+                    session_id=state.request.session_id,
+                    trace_id=state.trace_id,
+                    customer_text=state.request.message,
+                    assistant_text=state.draft.text,
+                    citations=state.draft.citations,
+                )
             ),
         )
         await self._retry_idempotent(

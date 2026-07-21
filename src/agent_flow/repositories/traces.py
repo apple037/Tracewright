@@ -218,8 +218,9 @@ class PostgresTraceRepository:
         tenant_id: str,
         parent_span_id: UUID | None = None,
         attempt: int = 1,
+        span_id: UUID | None = None,
     ) -> UUID:
-        span_id = uuid4()
+        span_id = span_id or uuid4()
         async with self._pool.connection() as connection:
             async with connection.transaction():
                 trace = await self._lock_running_trace(connection, trace_id, tenant_id)
@@ -240,6 +241,7 @@ class PostgresTraceRepository:
                     INSERT INTO observability.spans (
                         id, trace_id, tenant_id, customer_id, parent_span_id, name, attempt
                     ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (id) DO NOTHING
                     """,
                     (
                         span_id,
@@ -251,6 +253,19 @@ class PostgresTraceRepository:
                         attempt,
                     ),
                 )
+                cursor = await connection.execute(
+                    """
+                    SELECT trace_id, tenant_id, parent_span_id, name, attempt
+                    FROM observability.spans WHERE id = %s
+                    """,
+                    (span_id,),
+                )
+                stored = await cursor.fetchone()
+                if stored is None or (
+                    stored["trace_id"], stored["tenant_id"],
+                    stored["parent_span_id"], stored["name"], stored["attempt"]
+                ) != (trace_id, tenant_id, parent_span_id, name, attempt):
+                    raise ValueError("span identity replay conflicts with stored span")
         return span_id
 
     async def append_event(
@@ -269,6 +284,27 @@ class PostgresTraceRepository:
         async with self._pool.connection() as connection:
             async with connection.transaction():
                 trace = await self._lock_running_trace(connection, trace_id, tenant_id)
+                lifecycle_id = payload.get("lifecycle_id")
+                if isinstance(lifecycle_id, str):
+                    cursor = await connection.execute(
+                        """
+                        SELECT id, trace_id, span_id, sequence, event_type, component,
+                               status, error_code, payload_schema_version, payload, created_at
+                        FROM observability.events
+                        WHERE trace_id = %s AND tenant_id = %s
+                          AND payload ->> 'lifecycle_id' = %s
+                        """,
+                        (trace_id, tenant_id, lifecycle_id),
+                    )
+                    existing = await cursor.fetchone()
+                    if existing is not None:
+                        event = _event(existing)
+                        if (
+                            event.span_id, event.event_type, event.component,
+                            event.status, event.error_code, event.payload
+                        ) == (span_id, event_type, component, status, error_code, payload):
+                            return event
+                        raise ValueError("event lifecycle replay conflicts with stored event")
                 if span_id is not None:
                     cursor = await connection.execute(
                         """
