@@ -243,10 +243,19 @@ class TurnRequest(StrictModel):
 
 class TurnResult(StrictModel):
     trace_id: UUID
-    text: str
+    text: str | None
     citations: tuple[str, ...] = ()
     handoff: HandoffEvent | None = None
     assurance: AssuranceMetadata
+
+    @property
+    def reply(self) -> str | None:
+        """Compatibility name used by turn-controller clients."""
+        return self.text
+
+    @property
+    def handoff_status(self) -> Literal["queued"] | None:
+        return "queued" if self.handoff is not None and self.handoff.required else None
 
 
 class ConversationSnapshot(StrictModel):

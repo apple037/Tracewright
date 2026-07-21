@@ -22,6 +22,25 @@ class TraceEvent:
     payload: dict[str, Any]
     created_at: datetime
 
+    @property
+    def node(self) -> str | None:
+        value = self.payload.get("node")
+        return value if isinstance(value, str) else None
+
+    @property
+    def kind(self) -> str:
+        return self.status
+
+    @property
+    def metadata(self) -> dict[str, Any]:
+        value = self.payload.get("metadata", {})
+        return value if isinstance(value, dict) else {}
+
+    @property
+    def operation(self) -> str | None:
+        value = self.payload.get("operation")
+        return value if isinstance(value, str) else None
+
 
 @dataclass(frozen=True)
 class TraceSpan:
@@ -34,6 +53,18 @@ class TraceSpan:
     error_code: str | None
     created_at: datetime
     finished_at: datetime | None
+
+    @property
+    def node(self) -> str:
+        return self.name
+
+
+@dataclass(frozen=True)
+class TraceIssueSummary:
+    error_code: str | None
+    failed_node: str | None
+    component: str
+    operation: str | None
 
 
 @dataclass(frozen=True)
@@ -55,6 +86,23 @@ class TraceRecord:
     finished_at: datetime | None
     spans: tuple[TraceSpan, ...]
     events: tuple[TraceEvent, ...]
+
+    @property
+    def issue_summary(self) -> TraceIssueSummary | None:
+        if self.primary_failure_event_id is None:
+            return None
+        event = next(
+            (value for value in self.events if value.id == self.primary_failure_event_id),
+            None,
+        )
+        if event is None:
+            return None
+        return TraceIssueSummary(
+            error_code=event.error_code,
+            failed_node=event.node,
+            component=event.component,
+            operation=event.operation,
+        )
 
 
 def _event(row: dict[str, Any]) -> TraceEvent:

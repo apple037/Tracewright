@@ -1,0 +1,57 @@
+import pytest
+
+from agent_flow.contracts import TurnRequest
+
+
+@pytest.mark.asyncio
+async def test_pipeline_returns_reduced_assurance_reply(pipeline, context, fake_models):
+    result = await pipeline.run(context, TurnRequest(session_id="s1", message="查詢訂單 o1"))
+    assert result.reply
+    assert result.assurance.mode == "reduced_assurance"
+    assert result.handoff_status is None
+    assert fake_models.calls == ["dialogue_classifier", "strategy_advisor", "response_generator", "response_judge"]
+    trace = await pipeline.traces.get_trace(result.trace_id, tenant_id="t1")
+    assert trace.spans[0].node == "context_loader"
+    strategy = next(e for e in trace.events if e.node == "strategy_selector" and e.kind == "completed")
+    generation = next(e for e in trace.events if e.node == "response_generator" and e.kind == "completed")
+    assert strategy.metadata["prompt_ref"] == pipeline.artifacts.strategy_prompt.ref.model_dump(mode="json")
+    assert strategy.metadata["persona_ref"] is None
+    assert generation.metadata["prompt_ref"] == pipeline.artifacts.response_prompt.ref.model_dump(mode="json")
+    assert not any("system_rules" in str(e.payload) or "persona_directives" in str(e.payload) for e in trace.events)
+
+
+@pytest.mark.asyncio
+async def test_retry_rebinds_immutable_snapshot_for_retry_of_retry(
+    pipeline, context, fake_models
+):
+    request = TurnRequest(session_id="s1", message="查詢訂單 o1")
+    first = await pipeline.run(context, request)
+
+    def replenish():
+        fake_models.responses["dialogue_classifier"].append({
+            "intent": "order_status", "conversation_mode": "transactional_read",
+            "urgency": "normal", "language": "zh-TW",
+            "emotion": {"category": "neutral", "dialogue_stage": "not_applicable",
+                        "override": "none", "response_mode": "business_first",
+                        "confidence": 1, "evidence_spans": [], "reason_codes": ["NO_EMOTIONAL_CONTENT"]},
+        })
+        fake_models.responses["strategy_advisor"].append({
+            "strategy_version": "bootstrap-v1", "response_mode": "business_first",
+            "answer_order": ["verified_fact"], "reason_codes": ["TRANSACTIONAL_READ"],
+        })
+        fake_models.responses["response_generator"].append({
+            "text": "訂單仍在運送中。", "citations": ["tool-result-1"],
+            "evidence_ids": ["tool-result-1"],
+        })
+        fake_models.responses["response_judge"].append({
+            "passed": True, "failed_criteria": [], "confidence": 1,
+            "reason_codes": ["GROUNDED"],
+        })
+
+    replenish()
+    second = await pipeline.run(context, request, retry_of=first.trace_id)
+    replenish()
+    third = await pipeline.run(context, request, retry_of=second.trace_id)
+    assert third.reply
+    assert pipeline.conversations.snapshots[first.trace_id] is pipeline.conversations.snapshots[second.trace_id]
+    assert pipeline.conversations.snapshots[second.trace_id] is pipeline.conversations.snapshots[third.trace_id]

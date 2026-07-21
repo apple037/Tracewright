@@ -100,20 +100,51 @@ class PostgresConversationRepository:
         )
 
     async def get_retry_snapshot(
-        self, trace_id: UUID, *, tenant_id: str, customer_id: str
+        self,
+        trace_id: UUID,
+        *,
+        tenant_id: str,
+        customer_id: str,
+        bind_trace_id: UUID | None = None,
     ) -> ConversationSnapshot:
         async with self._pool.connection() as connection:
-            cursor = await connection.execute(
-                """
-                SELECT session_id, messages, captured_at
-                FROM runtime.conversation_snapshots
-                WHERE trace_id = %s AND tenant_id = %s AND customer_id = %s
-                """,
-                (trace_id, tenant_id, customer_id),
-            )
-            row = await cursor.fetchone()
-            if row is None:
-                raise ValueError("retry snapshot does not exist in this scope")
+            async with connection.transaction():
+                cursor = await connection.execute(
+                    """
+                    SELECT conversation_id, session_id, messages, captured_at
+                    FROM runtime.conversation_snapshots
+                    WHERE trace_id = %s AND tenant_id = %s AND customer_id = %s
+                    """,
+                    (trace_id, tenant_id, customer_id),
+                )
+                row = await cursor.fetchone()
+                if row is None:
+                    raise ValueError("retry snapshot does not exist in this scope")
+                if bind_trace_id is not None:
+                    cursor = await connection.execute(
+                        """
+                        SELECT 1 FROM observability.traces
+                        WHERE id = %s AND tenant_id = %s AND customer_id = %s
+                          AND session_id = %s
+                        """,
+                        (bind_trace_id, tenant_id, customer_id, row["session_id"]),
+                    )
+                    if await cursor.fetchone() is None:
+                        raise ValueError("retry trace does not belong to snapshot scope")
+                    await connection.execute(
+                        """
+                        INSERT INTO runtime.conversation_snapshots (
+                            id, trace_id, conversation_id, tenant_id, customer_id,
+                            session_id, messages, captured_at
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (trace_id) DO NOTHING
+                        """,
+                        (
+                            uuid4(), bind_trace_id, row["conversation_id"], tenant_id,
+                            customer_id, row["session_id"], Jsonb(row["messages"]),
+                            row["captured_at"],
+                        ),
+                    )
         return ConversationSnapshot(
             session_id=row["session_id"],
             messages=tuple(row["messages"]),

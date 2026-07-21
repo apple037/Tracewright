@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from uuid import uuid4
 
 from agent_flow.artifacts import ArtifactRegistry
 from agent_flow.auth import AuthorizedCustomerContext
@@ -20,6 +21,35 @@ from agent_flow.contracts import (
     ValidatedEvidence,
     ValidationResult,
 )
+
+
+class TraceSpy:
+    def __init__(self):
+        self.completed_nodes = []
+        self.events = []
+
+    async def start_span(self, trace_id, name, *, tenant_id, attempt=1):
+        return uuid4()
+
+    async def append_event(self, **kwargs):
+        from types import SimpleNamespace
+        event = SimpleNamespace(
+            id=len(self.events) + 1,
+            metadata=kwargs["payload"].get("metadata", {}),
+            **kwargs,
+        )
+        self.events.append(event)
+        return event
+
+    async def finish_span(self, span_id, status, *, tenant_id, error_code=None):
+        if status == "completed":
+            started = next(e for e in reversed(self.events) if e.span_id == span_id)
+            self.completed_nodes.append(started.payload["node"])
+
+
+@pytest.fixture
+def trace_spy():
+    return TraceSpy()
 
 
 def _item(
