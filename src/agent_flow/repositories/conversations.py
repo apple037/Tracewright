@@ -1,0 +1,171 @@
+from datetime import datetime
+from uuid import UUID, uuid4
+
+from psycopg.types.json import Jsonb
+
+from agent_flow.contracts import ConversationSnapshot
+from agent_flow.repositories.postgres import PostgresPool
+
+
+class PostgresConversationRepository:
+    def __init__(self, pool: PostgresPool) -> None:
+        self._pool = pool
+
+    async def _ensure_conversation(
+        self, connection, tenant_id: str, customer_id: str, session_id: str
+    ) -> UUID:
+        conversation_id = uuid4()
+        cursor = await connection.execute(
+            """
+            INSERT INTO runtime.conversations (
+                id, tenant_id, customer_id, session_id, expires_at
+            ) VALUES (%s, %s, %s, %s, now() + interval '30 days')
+            ON CONFLICT (tenant_id, customer_id, session_id) DO UPDATE
+            SET updated_at = now(), expires_at = now() + interval '30 days'
+            RETURNING id
+            """,
+            (conversation_id, tenant_id, customer_id, session_id),
+        )
+        return (await cursor.fetchone())["id"]
+
+    async def get_snapshot(
+        self,
+        *,
+        tenant_id: str,
+        customer_id: str,
+        session_id: str,
+        trace_id: UUID,
+    ) -> ConversationSnapshot:
+        async with self._pool.connection() as connection:
+            async with connection.transaction():
+                cursor = await connection.execute(
+                    """
+                    SELECT 1 FROM observability.traces
+                    WHERE id = %s AND tenant_id = %s AND customer_id = %s
+                      AND session_id = %s
+                    """,
+                    (trace_id, tenant_id, customer_id, session_id),
+                )
+                if await cursor.fetchone() is None:
+                    raise ValueError("trace does not belong to conversation scope")
+                conversation_id = await self._ensure_conversation(
+                    connection, tenant_id, customer_id, session_id
+                )
+                cursor = await connection.execute(
+                    """
+                    SELECT customer_text, assistant_text
+                    FROM runtime.turns
+                    WHERE tenant_id = %s AND customer_id = %s AND session_id = %s
+                    ORDER BY created_at, id
+                    """,
+                    (tenant_id, customer_id, session_id),
+                )
+                messages = tuple(
+                    text
+                    for row in await cursor.fetchall()
+                    for text in (row["customer_text"], row["assistant_text"])
+                )
+                snapshot_id = uuid4()
+                await connection.execute(
+                    """
+                    INSERT INTO runtime.conversation_snapshots (
+                        id, trace_id, conversation_id, tenant_id, customer_id,
+                        session_id, messages
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (trace_id) DO NOTHING
+                    """,
+                    (
+                        snapshot_id,
+                        trace_id,
+                        conversation_id,
+                        tenant_id,
+                        customer_id,
+                        session_id,
+                        Jsonb(messages),
+                    ),
+                )
+                cursor = await connection.execute(
+                    """
+                    SELECT session_id, messages, captured_at
+                    FROM runtime.conversation_snapshots
+                    WHERE trace_id = %s AND tenant_id = %s AND customer_id = %s
+                    """,
+                    (trace_id, tenant_id, customer_id),
+                )
+                row = await cursor.fetchone()
+        return ConversationSnapshot(
+            session_id=row["session_id"],
+            messages=tuple(row["messages"]),
+            captured_at=row["captured_at"],
+        )
+
+    async def get_retry_snapshot(
+        self, trace_id: UUID, *, tenant_id: str, customer_id: str
+    ) -> ConversationSnapshot:
+        async with self._pool.connection() as connection:
+            cursor = await connection.execute(
+                """
+                SELECT session_id, messages, captured_at
+                FROM runtime.conversation_snapshots
+                WHERE trace_id = %s AND tenant_id = %s AND customer_id = %s
+                """,
+                (trace_id, tenant_id, customer_id),
+            )
+            row = await cursor.fetchone()
+            if row is None:
+                raise ValueError("retry snapshot does not exist in this scope")
+        return ConversationSnapshot(
+            session_id=row["session_id"],
+            messages=tuple(row["messages"]),
+            captured_at=row["captured_at"],
+        )
+
+    async def append_turn(
+        self,
+        *,
+        tenant_id: str,
+        customer_id: str,
+        session_id: str,
+        trace_id: UUID,
+        customer_text: str,
+        assistant_text: str,
+        citations: tuple[str, ...] = (),
+    ) -> None:
+        async with self._pool.connection() as connection:
+            async with connection.transaction():
+                cursor = await connection.execute(
+                    """
+                    SELECT status, finished_at FROM observability.traces
+                    WHERE id = %s AND tenant_id = %s AND customer_id = %s
+                      AND session_id = %s
+                    FOR SHARE
+                    """,
+                    (trace_id, tenant_id, customer_id, session_id),
+                )
+                trace = await cursor.fetchone()
+                if trace is None:
+                    raise ValueError("trace does not belong to conversation scope")
+                if trace["finished_at"] is None or trace["status"] == "running":
+                    raise ValueError("trace must be finalized before appending a turn")
+                conversation_id = await self._ensure_conversation(
+                    connection, tenant_id, customer_id, session_id
+                )
+                await connection.execute(
+                    """
+                    INSERT INTO runtime.turns (
+                        conversation_id, tenant_id, customer_id, session_id,
+                        trace_id, customer_text, assistant_text, citations, expires_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s,
+                              now() + interval '30 days')
+                    """,
+                    (
+                        conversation_id,
+                        tenant_id,
+                        customer_id,
+                        session_id,
+                        trace_id,
+                        customer_text,
+                        assistant_text,
+                        Jsonb(citations),
+                    ),
+                )
