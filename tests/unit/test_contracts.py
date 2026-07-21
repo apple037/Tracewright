@@ -76,10 +76,23 @@ def test_artifact_reference_is_immutable_and_validates_checksum():
         )
 
 
-def test_emotion_assessment_uses_finite_labels_and_bounded_confidence():
+def test_emotion_assessment_rejects_unknown_category():
     with pytest.raises(ValidationError):
         EmotionAssessment(
             category="invented_emotion",
+            dialogue_stage="surface",
+            override="none",
+            response_mode="business_first",
+            confidence=0.5,
+            evidence_spans=(),
+            reason_codes=(),
+        )
+
+
+def test_emotion_assessment_rejects_confidence_above_one():
+    with pytest.raises(ValidationError):
+        EmotionAssessment(
+            category="neutral",
             dialogue_stage="surface",
             override="none",
             response_mode="business_first",

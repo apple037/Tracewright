@@ -32,6 +32,9 @@ def test_persona_applies_only_to_companion_modes():
     assert resolve_persona(ConversationMode.CASUAL, [persona]) == persona
     assert resolve_persona(ConversationMode.TRANSACTIONAL_READ, [persona]) is None
     assert resolve_persona(ConversationMode.INFORMATIONAL, [persona]) is None
+    assert resolve_persona(ConversationMode.COMPLAINT, [persona]) is None
+    assert resolve_persona(ConversationMode.BOUNDARY, [persona]) is None
+    assert resolve_persona(ConversationMode.UNKNOWN, [persona]) is None
 
 
 def test_artifact_registry_rejects_path_traversal():
