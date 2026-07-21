@@ -1486,6 +1486,10 @@ Expected: FAIL because node functions do not exist.
 
 Each model node sends a finite JSON schema, validates with Pydantic, records bounded reason codes, and never stores native reasoning output. `classify_dialogue` returns intent and emotion in one call. `risk_precheck` performs the high-risk rules before any evidence calls. `plan_evidence` declares required facts and freshness constraints; `collect_evidence` uses `asyncio.TaskGroup` and reports each source independently; `validate_evidence` rejects missing, expired, conflicting, or incomplete required facts with non-retryable `EVIDENCE_INSUFFICIENT` at `failure_stage="evidence_validator"`. `validate_response` runs deterministic checks before the semantic judge and returns failed criteria plus repairability. Strategy and generation requests include the loaded prompt `ArtifactRef`; persona directives are included only when the deterministic applicability check passes. Model output cannot override `persona_ref`.
 
+The controller owns an explicit action policy. Every model role (`dialogue_classifier`, `strategy_advisor`, `response_generator`, and all runtime/promotion judge roles) has an empty allowed-action set: model output can satisfy only its declared Pydantic result schema and can never invoke a tool. Only `evidence_collector` executes actions from the controller-built `EvidencePlan`. Before starting its `TaskGroup`, it validates each tool operation against the bootstrap allowlist and its argument schema (`order.lookup` requires a non-empty `order_id`), then rejects duplicate canonical `(operation, arguments)` signatures. Invalid or duplicate actions fail before any RAG/tool call. This is a node-level guard for the fixed pipeline, not a generic executor or loop runtime.
+
+`ValidationResult.failed_criteria` is the typed validator-feedback archive for the one allowed repair attempt. `repair_response` receives those criteria directly and includes only them plus the frozen grounded evidence in its constrained request. Do not add a parallel free-form `missing_requirements` channel or a multi-attempt feedback loop.
+
 Create the strategy prompt artifact exactly as:
 
 ```yaml
@@ -2430,4 +2434,5 @@ git commit -m "docs: containerize and document bootstrap runtime"
 ## Follow-on Plans
 
 1. **Incident-first Demo Console:** horizontal clickable flow, default failed-node expansion, typed node details, incremental polling, filters, attempt timeline, and manual-retry UI.
-2. **Evaluation and Improvement:** 60-item emotion labeling, safety/grounding golden sets, append-only improvement ledger, bootstrap human-only semantic approval, future Gemma/Qwen dual judging, atomic activation, and rollback.
+2. **Bounded Context and Role Views:** add deterministic turn/token budgets, compress-on-write snapshot segments, and per-role context rendering while preserving immutable manual-retry snapshots. Start with extractive/structured compaction; permit model-written summaries only after evidence-preservation, contradiction, and replay tests prove they do not change business facts or risk signals.
+3. **Evaluation and Improvement:** 60-item emotion labeling, safety/grounding golden sets, append-only improvement ledger, bootstrap human-only semantic approval, future Gemma/Qwen dual judging, atomic activation, and rollback.
