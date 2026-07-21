@@ -72,6 +72,20 @@ class ModelConfig(BaseModel):
             missing = required_role_capabilities.get(role, set()) - self.profiles[profile_name].capabilities
             if missing:
                 raise ValueError(f"role {role} missing capabilities: {sorted(missing)}")
+        if self.mode == "dual_judge":
+            primary = self.roles.get("response_judge")
+            verifier = self.roles.get("response_judge_zh_verifier")
+            if primary is None or verifier is None:
+                raise ValueError("dual_judge requires both response judge roles")
+            if {
+                "response_judge",
+                "response_judge_zh_verifier",
+            } & self.disabled_roles:
+                raise ValueError("dual_judge requires both response judges enabled")
+            if primary == verifier:
+                raise ValueError("dual judges must use different profiles")
+            if self.profiles[primary].family == self.profiles[verifier].family:
+                raise ValueError("dual judges must use different families")
         return self
 
 

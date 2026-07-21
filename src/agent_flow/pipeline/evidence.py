@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 from datetime import datetime
 
@@ -132,70 +133,75 @@ def _validate_action_plan(plan: EvidencePlan) -> None:
         signatures.add(signature)
 
 
-def _facts(item: EvidenceItem) -> frozenset[str]:
-    declared = item.metadata.get("facts")
-    if isinstance(declared, (list, tuple, set, frozenset)):
-        return frozenset(str(value) for value in declared)
-    fact = item.metadata.get("fact")
-    if isinstance(fact, str):
-        return frozenset((fact,))
-    tool = item.metadata.get("tool")
-    fallback = {
-        "order.lookup": "order.current_status",
-        "refund.lookup": "refund.current_status",
-    }.get(tool)
-    return frozenset((fallback,)) if fallback else frozenset()
-
-
-def _freshness_for(fact: str, plan: EvidencePlan) -> int | None:
-    operation = {
-        "order.current_status": "order.lookup",
-        "refund.current_status": "refund.lookup",
-    }.get(fact)
-    return next(
-        (
-            call.freshness_seconds
-            for call in plan.tool_calls
-            if call.operation == operation
-        ),
-        None,
-    )
-
-
-def _is_fresh(item: EvidenceItem, fact: str, plan: EvidencePlan, now: datetime) -> bool:
+def _is_fresh(item: EvidenceItem, freshness_seconds: int, now: datetime) -> bool:
     if item.retrieved_at.tzinfo is None or now.tzinfo is None:
         return False
     if item.retrieved_at > now:
         return False
     if item.valid_until is not None and item.valid_until <= now:
         return False
-    freshness = _freshness_for(fact, plan)
-    return freshness is None or (now - item.retrieved_at).total_seconds() <= freshness
+    return (now - item.retrieved_at).total_seconds() <= freshness_seconds
+
+
+def _order_status(
+    item: EvidenceItem, call: EvidenceToolCall, now: datetime
+) -> str | None:
+    if item.source_id != "tool:order.lookup":
+        return None
+    if item.metadata.get("tool") != call.operation:
+        return None
+    if item.metadata.get("arguments") != call.arguments:
+        return None
+    if hashlib.sha256(item.content.encode("utf-8")).hexdigest() != item.content_checksum:
+        return None
+    try:
+        payload = json.loads(item.content)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    status = payload.get("status")
+    if not isinstance(status, str) or not status.strip():
+        return None
+    if not _is_fresh(item, call.freshness_seconds, now):
+        return None
+    return status.strip()
+
+
+def _raise_insufficient():
+    raise AgentError.validation(
+        "EVIDENCE_INSUFFICIENT",
+        retryable=False,
+        failure_stage="evidence_validator",
+    )
 
 
 def validate_evidence(
     plan: EvidencePlan, evidence: CollectedEvidence, now: datetime
 ) -> ValidatedEvidence:
-    insufficient = False
+    validated_items: list[EvidenceItem] = []
     for fact in plan.required_facts:
-        matches = [item for item in evidence.items if fact in _facts(item)]
-        fresh = [
-            item
-            for item in matches
-            if item.content.strip() and _is_fresh(item, fact, plan, now)
-        ]
-        if not fresh or len({item.content for item in fresh}) > 1:
-            insufficient = True
-            break
-    if insufficient:
-        raise AgentError.validation(
-            "EVIDENCE_INSUFFICIENT",
-            retryable=False,
-            failure_stage="evidence_validator",
+        if fact != "order.current_status":
+            _raise_insufficient()
+        call = next(
+            (value for value in plan.tool_calls if value.operation == "order.lookup"),
+            None,
         )
+        if call is None:
+            _raise_insufficient()
+        matches = [
+            (item, status)
+            for item in evidence.items
+            if (status := _order_status(item, call, now)) is not None
+        ]
+        if not matches or len({status for _, status in matches}) > 1:
+            _raise_insufficient()
+        validated_items.extend(item for item, _ in matches)
     reason = (
         "REQUIRED_EVIDENCE_PRESENT" if plan.required_facts else "NO_EVIDENCE_REQUIRED"
     )
     return ValidatedEvidence(
-        items=evidence.items, sufficient=True, reason_codes=(reason,)
+        items=(tuple(validated_items) if plan.required_facts else evidence.items),
+        sufficient=True,
+        reason_codes=(reason,),
     )

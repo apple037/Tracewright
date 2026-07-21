@@ -17,6 +17,7 @@ from agent_flow.pipeline.model_outputs import (
     StrategyProposalResult,
     validate_failed_criteria,
 )
+from agent_flow.pipeline.policy import invoke_structured_model
 
 
 class StrategyRequest(StrictModel):
@@ -77,7 +78,8 @@ async def select_strategy(
         resolved_persona_ref=effective.ref if effective else None,
         persona_directives=effective.expression_principles if effective else (),
     )
-    proposed = await models.structured(
+    proposed = await invoke_structured_model(
+        models,
         "strategy_advisor", request, StrategyProposalResult
     )
     return StrategyDecision(
@@ -93,6 +95,7 @@ async def generate_response(
     prompt: PromptArtifact,
     persona: PersonaArtifact | None,
 ) -> ResponseDraft:
+    """Internal node; Task 8's controller owns caller and persona provenance."""
     effective = (
         persona
         if persona is not None and strategy.persona_ref == persona.ref
@@ -105,7 +108,9 @@ async def generate_response(
         prompt_ref=prompt.ref,
         persona=effective,
     )
-    return await models.structured("response_generator", request, ResponseDraft)
+    return await invoke_structured_model(
+        models, "response_generator", request, ResponseDraft
+    )
 
 
 async def repair_response(
@@ -117,6 +122,7 @@ async def repair_response(
     prompt: PromptArtifact,
     persona: PersonaArtifact | None,
 ) -> ResponseDraft:
+    """Internal node; Task 8's controller owns caller and persona provenance."""
     effective = (
         persona
         if persona is not None and strategy.persona_ref == persona.ref
@@ -130,4 +136,6 @@ async def repair_response(
         prompt_ref=prompt.ref,
         persona=effective,
     )
-    return await models.structured("response_generator", request, ResponseDraft)
+    return await invoke_structured_model(
+        models, "response_generator", request, ResponseDraft
+    )

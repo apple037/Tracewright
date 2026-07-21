@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import Field, TypeAdapter
+from pydantic import Field, TypeAdapter, model_validator
 
 from agent_flow.contracts import (
     DialogueClassification,
@@ -80,6 +80,14 @@ class StrategyProposalResult(StrategyProposal):
 class JudgeVerdictResult(JudgeVerdict):
     failed_criteria: tuple[JudgeCriterion, ...] = Field(max_length=20)
     reason_codes: tuple[JudgeReasonCode, ...] = Field(max_length=20)
+
+    @model_validator(mode="after")
+    def validate_consistency(self):
+        if self.passed and self.failed_criteria:
+            raise ValueError("passed verdict cannot contain failed criteria")
+        if not self.passed and not self.failed_criteria:
+            raise ValueError("failed verdict requires failed criteria")
+        return self
 
 
 _FAILED_CRITERIA_ADAPTER = TypeAdapter(tuple[JudgeCriterion, ...])

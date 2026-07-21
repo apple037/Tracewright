@@ -90,3 +90,43 @@ def test_profile_concurrency_is_an_independent_ceiling_from_endpoint():
 
     assert config.endpoints["shared"].max_concurrency == 1
     assert config.profiles["wide"].max_concurrency == 3
+
+
+def _dual_judge_config():
+    config = load_model_config(Path("config/models.bootstrap.example.yaml"))
+    data = config.model_dump(mode="python")
+    data["mode"] = "dual_judge"
+    data["disabled_roles"].discard("response_judge_zh_verifier")
+    data["profiles"]["zh_verifier"] = {
+        **data["profiles"]["remote_structured"],
+        "model": "independent-verifier",
+        "family": "independent-family",
+    }
+    data["roles"]["response_judge_zh_verifier"] = "zh_verifier"
+    return data
+
+
+def test_dual_judge_config_rejects_same_profile_alias():
+    data = _dual_judge_config()
+    data["roles"]["response_judge_zh_verifier"] = data["roles"]["response_judge"]
+    with pytest.raises(ValueError, match="different profiles"):
+        ModelConfig.model_validate(data)
+
+
+def test_dual_judge_config_rejects_same_declared_family():
+    data = _dual_judge_config()
+    data["profiles"]["zh_verifier"]["family"] = data["profiles"]["remote_structured"]["family"]
+    with pytest.raises(ValueError, match="different families"):
+        ModelConfig.model_validate(data)
+
+
+def test_dual_judge_config_accepts_distinct_profiles_and_families():
+    config = ModelConfig.model_validate(_dual_judge_config())
+    assert config.mode == "dual_judge"
+
+
+def test_dual_judge_config_requires_both_judges_enabled():
+    data = _dual_judge_config()
+    data["disabled_roles"].add("response_judge_zh_verifier")
+    with pytest.raises(ValueError, match="enabled"):
+        ModelConfig.model_validate(data)

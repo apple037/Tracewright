@@ -1,4 +1,5 @@
 import hashlib
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -29,15 +30,22 @@ def _item(
     fact: str = "order.current_status",
     valid_until: datetime | None = None,
 ) -> EvidenceItem:
+    structured_content = json.dumps(
+        {"status": content}, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
     return EvidenceItem(
         evidence_id=evidence_id,
         source_id="tool:order.lookup",
         version="v1",
-        content=content,
-        content_checksum=hashlib.sha256(content.encode()).hexdigest(),
+        content=structured_content,
+        content_checksum=hashlib.sha256(structured_content.encode()).hexdigest(),
         retrieved_at=retrieved_at,
         valid_until=valid_until,
-        metadata={"fact": fact, "tool": "order.lookup"},
+        metadata={
+            "fact": fact,
+            "tool": "order.lookup",
+            "arguments": {"order_id": "order-1"},
+        },
     )
 
 

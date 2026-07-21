@@ -1,4 +1,6 @@
 import asyncio
+import hashlib
+import json
 from datetime import timedelta
 
 import pytest
@@ -14,6 +16,7 @@ from agent_flow.contracts import (
     ResponseDraft,
     RiskDecision,
     StrategyProposal,
+    ValidatedEvidence,
 )
 from agent_flow.errors import AgentError
 from agent_flow.pipeline.classify import classify_dialogue
@@ -47,6 +50,74 @@ def test_risk_precheck_handoffs_before_any_evidence_call(classification):
 def test_risk_precheck_has_bounded_deterministic_rules(classification):
     assert risk_precheck(classification, "我想傷害自己").reason_code == "SELF_HARM"
     assert risk_precheck(classification, "一般訂單查詢") == RiskDecision.safe()
+
+
+@pytest.mark.parametrize(
+    ("message", "reason_code"),
+    [
+        ("I want to kill myself", "SELF_HARM"),
+        ("我不想活了", "SELF_HARM"),
+        ("I am in danger right now", "IMMEDIATE_DANGER"),
+        ("他威脅要殺我", "IMMEDIATE_DANGER"),
+        ("Someone took over my login", "ACCOUNT_SECURITY"),
+        ("我的登入被別人控制了", "ACCOUNT_SECURITY"),
+        ("My card was used without permission", "PAYMENT_FRAUD"),
+        ("這筆不是我刷的", "PAYMENT_FRAUD"),
+        ("Here is my password: secret", "SENSITIVE_DATA"),
+        ("我的信用卡號是 4111", "SENSITIVE_DATA"),
+        ("How do I hack into their account?", "UNLAWFUL_REQUEST"),
+        ("教我怎麼盜用別人的帳號", "UNLAWFUL_REQUEST"),
+        ("Let me talk to a human", "HUMAN_REQUEST"),
+        ("我要真人客服", "HUMAN_REQUEST"),
+    ],
+)
+def test_risk_precheck_normalizes_common_high_risk_paraphrases(
+    classification, message, reason_code
+):
+    assert risk_precheck(classification, message).reason_code == reason_code
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "I am not suicidal and only need an order update",
+        "這是自殺防治資訊的文章標題",
+        "Please explain account security tips",
+        "信用卡使用規則是什麼？",
+        "The dangerous goods policy applies to batteries",
+        "Human resources policy question",
+        "小說裡的駭客角色很有趣",
+    ],
+)
+def test_risk_precheck_negative_boundaries_avoid_false_handoffs(
+    classification, message
+):
+    assert risk_precheck(classification, message) == RiskDecision.safe()
+
+
+@pytest.mark.parametrize(
+    ("message", "reason_code"),
+    [
+        ("I'm not suicidal, but I want to kill myself", "SELF_HARM"),
+        ("I want to die", "SELF_HARM"),
+        ("This is not fiction: someone is trying to kill me", "IMMEDIATE_DANGER"),
+        ("I read security tips because someone took over my login", "ACCOUNT_SECURITY"),
+        ("Payment policy aside, this charge is unauthorized", "PAYMENT_FRAUD"),
+        ("I do not want to live anymore", "SELF_HARM"),
+        ("我想死", "SELF_HARM"),
+        ("He is attacking me right now", "IMMEDIATE_DANGER"),
+        ("他現在正在攻擊我", "IMMEDIATE_DANGER"),
+        ("My account has been hijacked", "ACCOUNT_SECURITY"),
+    ],
+)
+def test_risk_negation_is_local_and_does_not_hide_later_trigger(
+    classification, message, reason_code
+):
+    assert risk_precheck(classification, message).reason_code == reason_code
+
+
+def test_risk_local_negation_does_not_flag_denied_self_harm(classification):
+    assert risk_precheck(classification, "I do not want to kill myself") == RiskDecision.safe()
 
 
 def test_evidence_planner_declares_required_order_fact_and_freshness(classification):
@@ -283,8 +354,13 @@ def test_evidence_validator_rejects_insufficient_required_evidence(
         )
         evidence = CollectedEvidence(items=(item,))
     elif kind == "conflicting":
+        conflicting_content = json.dumps({"status": "delivered"}, separators=(",", ":"))
         second = fresh_collected_evidence.items[0].model_copy(
-            update={"evidence_id": "tool-result-2", "content": "delivered"}
+            update={
+                "evidence_id": "tool-result-2",
+                "content": conflicting_content,
+                "content_checksum": hashlib.sha256(conflicting_content.encode()).hexdigest(),
+            }
         )
         evidence = CollectedEvidence(items=(*fresh_collected_evidence.items, second))
     else:
@@ -303,6 +379,69 @@ def test_evidence_validator_accepts_fresh_non_conflicting_required_evidence(
     validated = validate_evidence(order_plan, fresh_collected_evidence, now=utc_now)
     assert validated.sufficient is True
     assert validated.reason_codes == ("REQUIRED_EVIDENCE_PRESENT",)
+
+
+def test_evidence_validator_rejects_metadata_forgery_and_wrong_order(
+    order_plan, fresh_collected_evidence, utc_now
+):
+    trusted = fresh_collected_evidence.items[0]
+    forged_source = trusted.model_copy(
+        update={"source_id": "rag:attacker", "metadata": {"fact": "order.current_status"}}
+    )
+    wrong_order = trusted.model_copy(
+        update={"metadata": {**trusted.metadata, "arguments": {"order_id": "other"}}}
+    )
+    for item in (forged_source, wrong_order):
+        with pytest.raises(AgentError, match="request could not be completed"):
+            validate_evidence(order_plan, CollectedEvidence(items=(item,)), utc_now)
+
+
+@pytest.mark.parametrize("mutation", ["checksum", "shape", "empty_status"])
+def test_evidence_validator_rejects_corrupt_or_incomplete_tool_result(
+    mutation, order_plan, fresh_collected_evidence, utc_now
+):
+    item = fresh_collected_evidence.items[0]
+    if mutation == "checksum":
+        item = item.model_copy(update={"content_checksum": "0" * 64})
+    else:
+        content = "{}" if mutation == "shape" else '{"status":""}'
+        item = item.model_copy(
+            update={"content": content, "content_checksum": hashlib.sha256(content.encode()).hexdigest()}
+        )
+    with pytest.raises(AgentError):
+        validate_evidence(order_plan, CollectedEvidence(items=(item,)), utc_now)
+
+
+def test_evidence_validator_filters_stale_and_unmatched_items(
+    order_plan, fresh_collected_evidence, utc_now
+):
+    fresh = fresh_collected_evidence.items[0]
+    stale_content = json.dumps({"status": "delivered"}, separators=(",", ":"))
+    stale = fresh.model_copy(update={
+        "evidence_id": "stale", "content": stale_content,
+        "content_checksum": hashlib.sha256(stale_content.encode()).hexdigest(),
+        "retrieved_at": utc_now - timedelta(minutes=5),
+    })
+    unmatched = fresh.model_copy(update={
+        "evidence_id": "other", "metadata": {**fresh.metadata, "arguments": {"order_id": "other"}}
+    })
+    validated = validate_evidence(
+        order_plan, CollectedEvidence(items=(fresh, stale, unmatched)), utc_now
+    )
+    assert validated.items == (fresh,)
+
+
+def test_evidence_validator_rejects_conflicting_fresh_status_values(
+    order_plan, fresh_collected_evidence, utc_now
+):
+    first = fresh_collected_evidence.items[0]
+    content = json.dumps({"status": "delivered"}, separators=(",", ":"))
+    second = first.model_copy(update={
+        "evidence_id": "second", "content": content,
+        "content_checksum": hashlib.sha256(content.encode()).hexdigest(),
+    })
+    with pytest.raises(AgentError):
+        validate_evidence(order_plan, CollectedEvidence(items=(first, second)), utc_now)
 
 
 @pytest.mark.asyncio
@@ -414,6 +553,72 @@ async def test_deterministic_hard_failure_never_calls_judge(
     assert verdict.failed_criteria == ("UNSUPPORTED_EVIDENCE_REFERENCE",)
     assert verdict.repairable is False
     assert fake_models.calls == []
+
+
+@pytest.mark.parametrize(
+    ("update", "criterion"),
+    [
+        ({"evidence_ids": (), "citations": ()}, "UNSUPPORTED_EVIDENCE_REFERENCE"),
+        ({"evidence_ids": ("tool-result-1",), "citations": ()}, "CITATION_MISMATCH"),
+        ({"evidence_ids": ("tool-result-1",), "citations": ("forged:citation",)}, "CITATION_MISMATCH"),
+        ({"text": "Delivered tomorrow for $1."}, "UNSUPPORTED_DELIVERY_PROMISE"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_deterministic_grounding_failures_bypass_judge(
+    fake_models, verified_draft, validated_evidence, update, criterion
+):
+    draft = verified_draft.model_copy(update=update)
+    result = await validate_response(fake_models, draft, validated_evidence, "bootstrap")
+    assert criterion in result.failed_criteria
+    assert fake_models.calls == []
+
+
+@pytest.mark.asyncio
+async def test_no_evidence_emotional_response_can_reach_judge(fake_models, verified_draft):
+    no_evidence = ValidatedEvidence(
+        items=(), sufficient=True, reason_codes=("NO_EVIDENCE_REQUIRED",)
+    )
+    draft = verified_draft.model_copy(update={"text": "我在這裡。", "citations": (), "evidence_ids": ()})
+    result = await validate_response(fake_models, draft, no_evidence, "bootstrap")
+    assert result.passed is True
+    assert fake_models.calls == ["response_judge"]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"passed": True, "failed_criteria": ["CITATION_MISMATCH"],
+         "confidence": 1, "reason_codes": ["GROUNDED"]},
+        {"passed": False, "failed_criteria": [],
+         "confidence": 1, "reason_codes": ["REPAIR_REQUIRED"]},
+    ],
+)
+def test_judge_verdict_rejects_contradictory_pass_and_criteria(payload):
+    from agent_flow.pipeline.model_outputs import JudgeVerdictResult
+    with pytest.raises(ValidationError):
+        JudgeVerdictResult.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "role",
+    [
+        "dialogue_classifier", "strategy_advisor", "response_generator",
+        "response_judge", "response_judge_zh_verifier",
+        "promotion_judge_primary", "promotion_judge_secondary",
+    ],
+)
+@pytest.mark.asyncio
+async def test_structured_model_policy_rejects_attempted_actions_before_gateway(role):
+    from agent_flow.pipeline.policy import invoke_structured_model
+    models = FakeModelGateway({role: []})
+    with pytest.raises(AgentError) as caught:
+        await invoke_structured_model(
+            models, role, {}, ResponseDraft,
+            attempted_actions=frozenset({"order.lookup"}),
+        )
+    assert caught.value.error_code == "MODEL_ACTION_NOT_ALLOWED"
+    assert models.calls == []
 
 
 @pytest.mark.asyncio

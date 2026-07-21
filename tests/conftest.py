@@ -39,7 +39,7 @@ def fake_models():
             "response_generator": [
                 {
                     "text": "訂單仍在運送中，目前沒有可驗證的送達日期。",
-                    "citations": ["tool:order.lookup:o1"],
+                    "citations": ["tool:order.lookup:order-1"],
                     "evidence_ids": ["tool-result-1"],
                 }
             ],
@@ -59,6 +59,6 @@ def fake_models():
 def verified_draft():
     return ResponseDraft(
         text="訂單仍在運送中，目前沒有可驗證的送達日期。",
-        citations=("tool:order.lookup:o1",),
+        citations=("tool:order.lookup:order-1",),
         evidence_ids=("tool-result-1",),
     )

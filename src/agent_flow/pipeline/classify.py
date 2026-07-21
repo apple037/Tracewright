@@ -3,6 +3,7 @@ from pydantic import Field
 from agent_flow.adapters.models import ModelGateway
 from agent_flow.contracts import DialogueClassification, StrictModel
 from agent_flow.pipeline.model_outputs import DialogueClassificationResult
+from agent_flow.pipeline.policy import invoke_structured_model
 
 
 class ClassificationRequest(StrictModel):
@@ -13,7 +14,8 @@ async def classify_dialogue(
     models: ModelGateway, messages: list[str] | tuple[str, ...]
 ) -> DialogueClassification:
     request = ClassificationRequest(messages=tuple(messages))
-    result = await models.structured(
+    result = await invoke_structured_model(
+        models,
         "dialogue_classifier", request, DialogueClassificationResult
     )
     return DialogueClassification.model_validate(result.model_dump())
