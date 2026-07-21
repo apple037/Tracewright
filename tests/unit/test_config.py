@@ -17,7 +17,7 @@ def test_settings_default_to_bootstrap(monkeypatch):
 
 def test_bootstrap_model_roles_are_exact():
     config = load_model_config(Path("config/models.bootstrap.example.yaml"))
-    assert config.profiles[config.roles["response_generator"]].model == "Qwen/Qwen3-8B"
+    assert config.profiles[config.roles["response_generator"]].model == "Qwen/Qwen3-8B-AWQ"
     assert "structured_json" in config.profiles[config.roles["response_generator"]].capabilities
     assert config.profiles[config.roles["dialogue_classifier"]].model == "qwen3.5:9b"
     assert config.profiles[config.roles["embedding"]].model == "qwen3:embedding:0.6b"

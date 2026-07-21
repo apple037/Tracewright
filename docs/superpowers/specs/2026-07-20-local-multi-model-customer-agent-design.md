@@ -20,10 +20,10 @@ The service must be diagnosable at node level. Every request must expose a trace
   - host/`uv` development default: `LOCAL_VLLM_BASE_URL=http://localhost:8000/v1`;
   - Docker Compose default for host-run vLLM: `LOCAL_VLLM_BASE_URL=http://host.docker.internal:8000/v1`, with Linux `host-gateway` mapping documented; a container must not use its own `localhost` to reach the host service.
 - Operator-provided runtime model names—vLLM/OpenAI-compatible model IDs or Ollama-style tags—used as opaque replaceable endpoint identifiers rather than code-level requirements. They are authoritative only for their configured server and are not considered verified until the Model Inventory Gate succeeds:
-  - local vLLM `Qwen/Qwen3-8B`: bootstrap strategy and customer-facing generation.
+  - local vLLM `Qwen/Qwen3-8B-AWQ`: bootstrap strategy and customer-facing generation.
   - remote `qwen3.5:9b`: bootstrap intent/emotion classification, structured extraction, and semantic response judging.
   - remote `qwen3:embedding:0.6b`: embeddings.
-- Design-time inventory check on 2026-07-20: `GET http://localhost:8000/v1/models` returned the exact local ID `Qwen/Qwen3-8B`. Chat/thinking/structured-output capability probes remain implementation gates; remote names remain unverified until remote `.env` is supplied.
+- The exact configured local runtime ID is `Qwen/Qwen3-8B-AWQ`; `GET http://localhost:8000/v1/models` must return that ID before readiness can pass. The current server reports `max_model_len: 6144`; inventory exposes that server metadata without treating it as a hard-coded minimum, while client output remains bounded separately by profile `max_tokens`. Chat/thinking/structured-output capability probes remain implementation gates; remote names remain unverified until remote `.env` is supplied.
 - Multiple model calls are allowed. Gemma and larger Qwen profiles are deferred target profiles, not bootstrap requirements.
 - Business data is not copied into local customer, product, order, or CRM master tables.
 - Business facts come only from RAG or read-only tool APIs. MVP integrations use typed mock adapters.
@@ -59,7 +59,7 @@ Each node has one responsibility, consumes and produces Pydantic models, and rec
 6. `evidence_collector`: call independent RAG/tool sources concurrently with bounded timeouts and retries.
 7. `evidence_validator`: verify source, freshness, required fields, conflicts, and sufficiency. The system does not guess when evidence is insufficient.
 8. `strategy_selector`: combine policy, intent, conversation mode, emotion, risk, and evidence into a versioned `StrategyDecision` with reason codes.
-9. `response_generator`: use the configured `response_generator` role (local vLLM `Qwen/Qwen3-8B` in bootstrap) with thinking disabled to generate a response from verified evidence and the selected strategy.
+9. `response_generator`: use the configured `response_generator` role (local vLLM `Qwen/Qwen3-8B-AWQ` in bootstrap) with thinking disabled to generate a response from verified evidence and the selected strategy.
 10. `response_validator`: run deterministic format/policy checks and the configured `response_judge` for grounding, citations, tone, route, and risk. Bootstrap uses one remote Qwen judge with `reduced_assurance`; target `dual_judge` mode additionally requires the independent Traditional Chinese verifier.
 11. `response_repair`: if the draft is repairable, request one constrained rewrite that addresses only listed failures, then validate once more.
 12. `finalizer`: return a validated response, a conservative factual fallback, or a safe handoff message.
@@ -169,7 +169,7 @@ endpoints:
 profiles:
   local_generator:
     endpoint: local_vllm
-    model: Qwen/Qwen3-8B
+    model: Qwen/Qwen3-8B-AWQ
     family: qwen
     capabilities: [chat, structured_json, reasoning_toggle]
     request_options:
@@ -225,11 +225,11 @@ Before any live-model integration is accepted, a **Model Inventory Gate** querie
 
 An optional `source_model`/license metadata field may document the upstream checkpoint, but it is informational and never used for routing or availability decisions. Different servers may legitimately expose custom, quantized, or locally renamed builds under their runtime model names.
 
-The OpenAI-compatible adapter normalizes a single `/v1` suffix and rejects ambiguous double-suffixed URLs. For `structured_json`, it sends an OpenAI-compatible `response_format` with a strict JSON schema and validates the returned object again with Pydantic. The local vLLM inventory probe calls `GET /v1/models`, requires the exact returned ID `Qwen/Qwen3-8B`, and completes the `ResponseDraft` schema probe before its profile becomes ready.
+The OpenAI-compatible adapter normalizes a single `/v1` suffix and rejects ambiguous double-suffixed URLs. For `structured_json`, it sends an OpenAI-compatible `response_format` with a strict JSON schema and validates the returned object again with Pydantic. The local vLLM inventory probe calls `GET /v1/models`, requires the exact returned ID `Qwen/Qwen3-8B-AWQ`, and completes the `ResponseDraft` schema probe before its profile becomes ready.
 
 The same capability probes run at startup to verify configured model availability, structured JSON behavior where required, reasoning/thinking disable behavior where declared, and embedding dimension. A capability failure either activates an explicitly configured compatible fallback or makes readiness fail. The service embeds a sentinel string and validates its vector dimension against the migration setting before allowing vector writes. The resolved alias, reported upstream identifier/digest, capability result, and configuration checksum are visible in readiness and the Demo Console without credentials.
 
-The initial test routing uses local vLLM `Qwen/Qwen3-8B` for strategy/generation, remote `qwen3.5:9b` for classification and single semantic judging, and remote `qwen3:embedding:0.6b` for embeddings. Model size, endpoint, and vendor names are not embedded in application logic. Deterministic rules remain authoritative for high-risk and executable-action boundaries.
+The initial test routing uses local vLLM `Qwen/Qwen3-8B-AWQ` for strategy/generation, remote `qwen3.5:9b` for classification and single semantic judging, and remote `qwen3:embedding:0.6b` for embeddings. Model size, endpoint, and vendor names are not embedded in application logic. Deterministic rules remain authoritative for high-risk and executable-action boundaries.
 
 In `bootstrap` mode, runtime validation requires deterministic gates plus the remote Qwen verdict and exposes `reduced_assurance` in the response metadata and Console. This mode is for development/testing and is not eligible for unattended production promotion. In target `dual_judge` mode, non-`zh-TW` responses require deterministic gates plus the Gemma verdict, while every `zh-TW` response requires deterministic gates, an independent Gemma verdict, and an independent Qwen verdict over the same frozen draft and evidence. Neither judge sees the other's output. Both model verdicts must pass before publication. A disagreement on a repairable tone, completeness, or language issue enters the single allowed repair cycle; a disagreement involving risk, unsupported facts, unsupported commitments, citation validity, or tool/evidence grounding causes human handoff. A second disagreement after repair also causes handoff.
 

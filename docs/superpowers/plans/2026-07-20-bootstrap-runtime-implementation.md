@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build a testable FastAPI bootstrap runtime that runs the fixed customer-service turn pipeline with local vLLM `Qwen/Qwen3-8B`, remote `qwen3.5:9b`, remote `qwen3:embedding:0.6b`, mock business adapters, PostgreSQL/pgvector persistence, exact failure tracing, handoff outbox, and full-turn manual retry.
+**Goal:** Build a testable FastAPI bootstrap runtime that runs the fixed customer-service turn pipeline with local vLLM `Qwen/Qwen3-8B-AWQ`, remote `qwen3.5:9b`, remote `qwen3:embedding:0.6b`, mock business adapters, PostgreSQL/pgvector persistence, exact failure tracing, handoff outbox, and full-turn manual retry.
 
 **Architecture:** A fixed `TurnPipeline` calls small typed nodes through explicit Python control flow. Model, RAG, tool, trace, and outbox boundaries are protocols with mock and PostgreSQL/HTTP implementations; versioned prompt/persona artifacts are controller-selected and checksum-traced; bootstrap mode uses one remote Qwen semantic judge and exposes `reduced_assurance`. This plan delivers the runtime and trace APIs needed by the later Incident-first Console; the polished frontend and offline improvement/promotion lifecycle remain separate implementation plans.
 
@@ -13,8 +13,8 @@
 - Package and virtual-environment management uses `uv`; commit `uv.lock`.
 - Application code addresses model roles, never model names.
 - Host development vLLM base URL is `http://localhost:8000/v1`; Compose uses `http://host.docker.internal:8000/v1`.
-- The local inventory must resolve the exact ID `Qwen/Qwen3-8B`.
-- Bootstrap roles are local `Qwen/Qwen3-8B` for strategy/generation, remote `qwen3.5:9b` for classification/judging, and remote `qwen3:embedding:0.6b` for embeddings.
+- The local inventory must resolve the exact ID `Qwen/Qwen3-8B-AWQ`.
+- Bootstrap roles are local `Qwen/Qwen3-8B-AWQ` for strategy/generation, remote `qwen3.5:9b` for classification/judging, and remote `qwen3:embedding:0.6b` for embeddings.
 - Bootstrap mode is always marked `reduced_assurance`; the same Qwen profile is never invoked twice as fake independent judges.
 - Business integrations are read-only and begin with typed mock adapters.
 - High-risk outcomes create a signed Webhook outbox event and return a safe response.
@@ -175,7 +175,7 @@ def test_settings_default_to_bootstrap(monkeypatch):
 
 def test_bootstrap_model_roles_are_exact():
     config = load_model_config(Path("config/models.bootstrap.example.yaml"))
-    assert config.profiles[config.roles["response_generator"]].model == "Qwen/Qwen3-8B"
+    assert config.profiles[config.roles["response_generator"]].model == "Qwen/Qwen3-8B-AWQ"
     assert "structured_json" in config.profiles[config.roles["response_generator"]].capabilities
     assert config.profiles[config.roles["dialogue_classifier"]].model == "qwen3.5:9b"
     assert config.profiles[config.roles["embedding"]].model == "qwen3:embedding:0.6b"
@@ -373,7 +373,7 @@ endpoints:
 profiles:
   local_generator:
     endpoint: local_vllm
-    model: Qwen/Qwen3-8B
+    model: Qwen/Qwen3-8B-AWQ
     family: qwen
     capabilities: [chat, structured_json, reasoning_toggle]
     request_options: {enable_thinking: false}
@@ -840,7 +840,9 @@ def bootstrap_registry():
 @respx.mock
 async def test_vllm_inventory_requires_exact_model_id(bootstrap_registry):
     respx.get("http://localhost:8000/v1/models").mock(
-        return_value=httpx.Response(200, json={"data": [{"id": "Qwen/Qwen3-8B"}]})
+        return_value=httpx.Response(200, json={"data": [{
+            "id": "Qwen/Qwen3-8B-AWQ", "max_model_len": 6144
+        }]})
     )
     respx.post("http://localhost:8000/v1/chat/completions").mock(
         return_value=httpx.Response(200, json={
@@ -850,7 +852,8 @@ async def test_vllm_inventory_requires_exact_model_id(bootstrap_registry):
         })
     )
     result = await ModelInventoryProbe(bootstrap_registry).probe_role("response_generator")
-    assert result.model == "Qwen/Qwen3-8B"
+    assert result.model == "Qwen/Qwen3-8B-AWQ"
+    assert result.max_model_len == 6144
     assert result.available is True
     assert "structured_json" in result.verified_capabilities
 
@@ -900,6 +903,7 @@ class InventoryResult:
     model: str
     available: bool
     digest: str | None
+    max_model_len: int | None
     capabilities: frozenset[str]
     verified_capabilities: frozenset[str]
     capability_failures: tuple[str, ...]
@@ -951,7 +955,7 @@ Expected: all tests pass.
 
 Run: `Invoke-RestMethod http://localhost:8000/v1/models | ConvertTo-Json -Depth 5`
 
-Expected: output contains exact ID `Qwen/Qwen3-8B`.
+Expected: output contains exact ID `Qwen/Qwen3-8B-AWQ` and reports the server-owned `max_model_len` (currently `6144`). The inventory result records this metadata but does not impose a hard-coded minimum; profile `max_tokens` remains a separate client output bound.
 
 - [ ] **Step 5: Commit**
 
@@ -2183,13 +2187,14 @@ def live_inventory_probe():
 async def test_live_local_generator_inventory_and_schema(live_inventory_probe):
     result = await live_inventory_probe.probe_role("response_generator")
     assert result.available is True
-    assert result.model == "Qwen/Qwen3-8B"
+    assert result.model == "Qwen/Qwen3-8B-AWQ"
+    assert result.max_model_len == 6144
     assert {"chat", "structured_json", "reasoning_toggle"} <= result.verified_capabilities
 ```
 
 Run: `uv run pytest tests/live/test_local_inventory.py -v --run-live-local-model`
 
-Expected: exact model inventory passes for `Qwen/Qwen3-8B`, and one bounded `ResponseDraft` schema generation with thinking disabled verifies the live capabilities required by generation and repair.
+Expected: exact model inventory passes for `Qwen/Qwen3-8B-AWQ`, and one bounded `ResponseDraft` schema generation with thinking disabled verifies the live capabilities required by generation and repair.
 
 - [ ] **Step 6: Commit**
 
@@ -2381,7 +2386,7 @@ git commit -m "docs: containerize and document bootstrap runtime"
 - [ ] Run `uv run pytest -v` and confirm zero failures/skips except explicitly marked live-remote tests.
 - [ ] Run `uv run alembic upgrade head` against a clean pgvector database.
 - [ ] Run `docker compose config --quiet`.
-- [ ] Run the local inventory probe and confirm exact `Qwen/Qwen3-8B`.
+- [ ] Run the local inventory probe and confirm exact `Qwen/Qwen3-8B-AWQ`.
 - [ ] With remote `.env` populated, run opt-in inventory/capability probes for `qwen3.5:9b` and `qwen3:embedding:0.6b`.
 - [ ] Send one mock successful turn, one tool-timeout turn, one high-risk handoff, and one manual retry; confirm each Trace API response identifies the exact stage/operation and immutable retry lineage.
 - [ ] Confirm the bootstrap response and trace expose `reduced_assurance` and only one semantic judge call.

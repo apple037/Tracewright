@@ -1,0 +1,242 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Literal
+
+import httpx
+from pydantic import BaseModel
+
+from agent_flow.config import ModelConfig, Settings, model_config_checksum
+from agent_flow.contracts import ResponseDraft
+
+
+class ChatMessage(BaseModel):
+    role: Literal["system", "user", "assistant"]
+    content: str
+
+
+class ModelResponse(BaseModel):
+    text: str
+    finish_reason: str
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+
+
+@dataclass(frozen=True)
+class InventoryResult:
+    role: str
+    model: str
+    available: bool
+    digest: str | None
+    max_model_len: int | None
+    capabilities: frozenset[str]
+    verified_capabilities: frozenset[str]
+    capability_failures: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ResolvedModel:
+    role: str
+    profile_name: str
+    endpoint_name: str
+    adapter: str
+    model: str
+    family: str
+    capabilities: frozenset[str]
+    configuration_checksum: str
+    base_url: str
+    temperature: float
+    max_tokens: int
+    request_options: dict[str, object]
+    _api_key: str = field(repr=False, compare=False)
+
+
+def _normalize_openai_base_url(value: str) -> str:
+    base = value.rstrip("/")
+    if base.endswith("/v1/v1"):
+        raise RuntimeError("OpenAI-compatible endpoint has multiple /v1 suffixes")
+    if base.endswith("/v1"):
+        base = base[:-3].rstrip("/")
+    return f"{base}/v1"
+
+
+class ModelRegistry:
+    def __init__(self, config: ModelConfig, settings: Settings):
+        self.config = config
+        self.settings = settings
+        self.checksum = model_config_checksum(config)
+
+    def resolve(self, role: str) -> ResolvedModel:
+        if role in self.config.disabled_roles:
+            raise RuntimeError(f"role disabled in {self.config.mode}: {role}")
+        if role not in self.config.roles:
+            raise RuntimeError(f"unknown role: {role}")
+        profile_name = self.config.roles[role]
+        profile = self.config.profiles[profile_name]
+        endpoint = self.config.endpoints[profile.endpoint]
+        try:
+            base_url = str(getattr(self.settings, endpoint.base_url_env.lower()))
+        except AttributeError as exc:
+            raise RuntimeError(
+                f"setting not defined for endpoint {profile.endpoint}: {endpoint.base_url_env}"
+            ) from exc
+        if endpoint.adapter == "openai_compatible":
+            base_url = _normalize_openai_base_url(base_url)
+        else:
+            base_url = base_url.rstrip("/")
+        api_key = ""
+        if endpoint.api_key_env:
+            api_key = str(getattr(self.settings, endpoint.api_key_env.lower(), ""))
+        return ResolvedModel(
+            role=role,
+            profile_name=profile_name,
+            endpoint_name=profile.endpoint,
+            adapter=endpoint.adapter,
+            model=profile.model,
+            family=profile.family,
+            capabilities=frozenset(profile.capabilities),
+            configuration_checksum=self.checksum,
+            base_url=base_url,
+            temperature=profile.temperature,
+            max_tokens=profile.max_tokens,
+            request_options=dict(profile.request_options),
+            _api_key=api_key,
+        )
+
+
+class ModelInventoryProbe:
+    def __init__(self, registry: ModelRegistry, *, timeout: float = 10.0):
+        self.registry = registry
+        self.timeout = timeout
+
+    async def probe_all(self) -> dict[str, InventoryResult]:
+        results: dict[str, InventoryResult] = {}
+        for role in self.registry.config.roles:
+            if role not in self.registry.config.disabled_roles:
+                results[role] = await self.probe_role(role)
+        return results
+
+    async def probe_role(self, role: str) -> InventoryResult:
+        resolved = self.registry.resolve(role)
+        if resolved.adapter == "openai_compatible":
+            digest, max_model_len = await self._require_openai_model(resolved)
+        elif resolved.adapter == "ollama_compatible":
+            digest, max_model_len = await self._require_ollama_model(resolved)
+        else:  # ModelConfig currently prevents this, but keep the boundary explicit.
+            raise RuntimeError(f"unsupported model adapter: {resolved.adapter}")
+
+        verified: set[str] = set()
+        try:
+            if "embedding" in resolved.capabilities:
+                from agent_flow.adapters.models import EmbeddingModel
+
+                vectors = await EmbeddingModel(
+                    self.registry, timeout=self.timeout
+                ).embed(role, ["capability probe"])
+                if not vectors or not vectors[0]:
+                    raise RuntimeError("embedding probe returned an empty vector")
+                verified.add("embedding")
+            elif "structured_json" in resolved.capabilities:
+                from agent_flow.adapters.models import ModelGateway
+
+                await ModelGateway(self.registry, timeout=self.timeout).structured(
+                    role,
+                    {"messages": [{"role": "user", "content": "Return a minimal valid response."}]},
+                    ResponseDraft,
+                )
+                verified.update({"chat", "structured_json"})
+                if "reasoning_toggle" in resolved.capabilities:
+                    if resolved.request_options.get("enable_thinking") is not False:
+                        raise RuntimeError(
+                            "reasoning_toggle requires enable_thinking=false for the probe"
+                        )
+                    verified.add("reasoning_toggle")
+            elif "chat" in resolved.capabilities:
+                from agent_flow.adapters.models import ModelGateway
+
+                await ModelGateway(self.registry, timeout=self.timeout).complete(
+                    role,
+                    {"messages": [{"role": "user", "content": "Reply with ok."}]},
+                )
+                verified.add("chat")
+        except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+            raise RuntimeError(f"capability probe failed for role {role}: {exc}") from exc
+
+        missing = resolved.capabilities - verified
+        if missing:
+            raise RuntimeError(
+                f"capability probe failed for role {role}: unverified {sorted(missing)}"
+            )
+        return InventoryResult(
+            role=role,
+            model=resolved.model,
+            available=True,
+            digest=digest,
+            max_model_len=max_model_len,
+            capabilities=resolved.capabilities,
+            verified_capabilities=frozenset(verified),
+            capability_failures=(),
+        )
+
+    async def _require_openai_model(
+        self, resolved: ResolvedModel
+    ) -> tuple[str | None, int | None]:
+        headers = _authorization_header(resolved)
+        async with httpx.AsyncClient(
+            base_url=resolved.base_url, headers=headers, timeout=self.timeout
+        ) as client:
+            response = await client.get("/models")
+            response.raise_for_status()
+        entries = response.json().get("data", [])
+        match = next((entry for entry in entries if entry.get("id") == resolved.model), None)
+        if match is None:
+            raise RuntimeError(f"exact model not found: {resolved.model}")
+        return match.get("digest"), _positive_int_or_none(match.get("max_model_len"))
+
+    async def _require_ollama_model(
+        self, resolved: ResolvedModel
+    ) -> tuple[str | None, int | None]:
+        headers = _authorization_header(resolved)
+        async with httpx.AsyncClient(
+            base_url=resolved.base_url, headers=headers, timeout=self.timeout
+        ) as client:
+            response = await client.get("/api/tags")
+            response.raise_for_status()
+            entries = response.json().get("models", [])
+            match = next(
+                (
+                    entry
+                    for entry in entries
+                    if entry.get("name", entry.get("model")) == resolved.model
+                ),
+                None,
+            )
+            if match is None:
+                raise RuntimeError(f"exact model not found: {resolved.model}")
+            show = await client.post("/api/show", json={"model": resolved.model})
+            show.raise_for_status()
+            show_body = show.json()
+        model_info = show_body.get("model_info", {})
+        context_value = next(
+            (
+                value
+                for key, value in model_info.items()
+                if key == "context_length" or key.endswith(".context_length")
+            ),
+            None,
+        )
+        return match.get("digest"), _positive_int_or_none(context_value)
+
+
+def _authorization_header(resolved: ResolvedModel) -> dict[str, str]:
+    if not resolved._api_key:
+        return {}
+    return {"Authorization": f"Bearer {resolved._api_key}"}
+
+
+def _positive_int_or_none(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and value > 0:
+        return value
+    return None

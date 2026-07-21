@@ -17,7 +17,7 @@ endpoints:
 profiles:
   local_generator:
     endpoint: local_vllm
-    model: Qwen/Qwen3-8B
+    model: Qwen/Qwen3-8B-AWQ
     family: qwen
     capabilities: [chat, structured_json, reasoning_toggle]
     request_options: {enable_thinking: false}
