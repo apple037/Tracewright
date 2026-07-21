@@ -4,7 +4,7 @@
 
 **Goal:** Build a testable FastAPI bootstrap runtime that runs the fixed customer-service turn pipeline with local vLLM `Qwen/Qwen3-8B`, remote `qwen3.5:9b`, remote `qwen3:embedding:0.6b`, mock business adapters, PostgreSQL/pgvector persistence, exact failure tracing, handoff outbox, and full-turn manual retry.
 
-**Architecture:** A fixed `TurnPipeline` calls small typed nodes through explicit Python control flow. Model, RAG, tool, trace, and outbox boundaries are protocols with mock and PostgreSQL/HTTP implementations; bootstrap mode uses one remote Qwen semantic judge and exposes `reduced_assurance`. This plan delivers the runtime and trace APIs needed by the later Incident-first Console; the polished frontend and offline improvement/promotion lifecycle remain separate implementation plans.
+**Architecture:** A fixed `TurnPipeline` calls small typed nodes through explicit Python control flow. Model, RAG, tool, trace, and outbox boundaries are protocols with mock and PostgreSQL/HTTP implementations; versioned prompt/persona artifacts are controller-selected and checksum-traced; bootstrap mode uses one remote Qwen semantic judge and exposes `reduced_assurance`. This plan delivers the runtime and trace APIs needed by the later Incident-first Console; the polished frontend and offline improvement/promotion lifecycle remain separate implementation plans.
 
 **Tech Stack:** Python 3.12, `uv`, FastAPI, Pydantic v2, pydantic-settings, HTTPX, psycopg 3, Alembic, PostgreSQL 16 + pgvector, pytest, pytest-asyncio, respx, Docker Compose.
 
@@ -21,6 +21,8 @@
 - Every customer/session access is bound to an authenticated principal and tenant before downstream calls.
 - Raw conversation text is retained unmasked for 30 days; structured traces are retained for 180 days; secrets are never logged.
 - Hidden chain-of-thought is never stored; logs contain structured decision summaries and reason codes.
+- Prompt and persona artifacts are path-safe, schema-validated, canonically checksummed, and selected only by deterministic controller policy; model output cannot select an artifact.
+- The familiar-companion persona applies only to `emotional_support` and `casual`; business modes remain evidence- and policy-first.
 - Automatic retries cover only declared transient errors; manual retry creates an immutable full-turn replay trace.
 - The MVP is a fixed pipeline, not a reusable orchestrator, graph runtime, or plugin system.
 
@@ -38,7 +40,12 @@ agent-flow/
 ├── .dockerignore
 ├── .env.example
 ├── config/
-│   └── models.bootstrap.example.yaml
+│   ├── models.bootstrap.example.yaml
+│   ├── prompts/
+│   │   ├── strategy_selector.v1.yaml
+│   │   └── response_generator.v1.yaml
+│   └── personas/
+│       └── familiar_companion.zh-TW.v1.yaml
 ├── migrations/
 │   ├── env.py
 │   └── versions/0001_bootstrap_runtime.py
@@ -46,6 +53,7 @@ agent-flow/
 │   ├── __init__.py
 │   ├── main.py
 │   ├── config.py
+│   ├── artifacts.py
 │   ├── auth.py
 │   ├── contracts.py
 │   ├── errors.py
@@ -93,8 +101,9 @@ The later Console plan owns `frontend/` and typed visual presenters. The later I
 
 - `tests/integration/conftest.py` owns `postgres_pool: PostgresPool`, `trace_repository: PostgresTraceRepository`, `conversation_repository: ConversationRepository`, `rag_repository: RagRepository`, and `outbox: OutboxRepository`, all using `TEST_DATABASE_URL` and clearing only test-schema rows before/after a test.
 - `tests/conftest.py` owns cross-suite fixtures `fake_models: FakeModelGateway`, `verified_draft: ResponseDraft`, and the opt-in `live_inventory_probe`. The fake response queues are deterministic and reset for every test.
-- `tests/unit/pipeline/conftest.py` owns typed node inputs: `classification`, `order_plan`, `utc_now`, `fresh_collected_evidence`, `expired_collected_evidence`, `validated_evidence`, `repair_models`, and `repairable_validation`. Task 8 extends it with `trace_spy`, `trace_state`, and `pipeline_for_run_node`.
-- `tests/e2e/conftest.py` owns `context: AuthorizedCustomerContext`, `clock: FrozenClock`, `mock_rag: MockRagClient`, `mock_tool: MockToolClient`, `memory_handoffs: MemoryHandoffSink`, `pipeline: TurnPipeline`, named failure-injection pipeline variants, `client: TestClient`, and token fixtures. It reuses root fixtures and uses tenant `t1`, customer `c1`, and deterministic committed evidence.
+- `tests/unit/pipeline/conftest.py` owns typed node inputs: `classification`, `order_plan`, `utc_now`, `fresh_collected_evidence`, `expired_collected_evidence`, `validated_evidence`, `transactional_strategy`, `strategy_prompt`, `response_prompt`, `companion_persona`, `repair_models`, and `repairable_validation`. Task 8 extends it with `trace_spy`, `trace_state`, and `pipeline_for_run_node`.
+- `tests/e2e/conftest.py` owns `context: AuthorizedCustomerContext`, `clock: FrozenClock`, `runtime_artifacts: RuntimeArtifacts`, `mock_rag: MockRagClient`, `mock_tool: MockToolClient`, `memory_handoffs: MemoryHandoffSink`, `pipeline: TurnPipeline`, named failure-injection pipeline variants, `client: TestClient`, and token fixtures. It reuses root fixtures and uses tenant `t1`, customer `c1`, and deterministic committed evidence.
+- Task 9 extends `tests/e2e/conftest.py` with `app_factory` and `invalid_artifact_root`; the factory catches startup artifact errors into a readiness check while leaving liveness available.
 - A task that first introduces a fixture also creates or extends the owning `conftest.py` in the same commit. Test modules must not depend on an undeclared global fixture.
 
 ---
@@ -151,8 +160,6 @@ testpaths = ["tests"]
 ```python
 import os
 from pathlib import Path
-import subprocess
-import sys
 
 import pytest
 
@@ -414,27 +421,39 @@ git commit -m "build: scaffold bootstrap runtime configuration"
 
 ---
 
-### Task 2: Domain Contracts, Errors, and Authorization Context
+### Task 2: Domain Contracts, Versioned Persona Artifacts, Errors, and Authorization
 
 **Files:**
 - Create: `src/agent_flow/contracts.py`
+- Create: `src/agent_flow/artifacts.py`
 - Create: `src/agent_flow/errors.py`
 - Create: `src/agent_flow/auth.py`
+- Create: `config/personas/familiar_companion.zh-TW.v1.yaml`
 - Create: `tests/fakes.py`
 - Create: `tests/conftest.py`
+- Test: `tests/unit/test_artifacts.py`
 - Test: `tests/unit/test_auth.py`
 - Test: `tests/unit/test_contracts.py`
 
 **Interfaces:**
-- Consumes: bearer-token claims and API request identifiers.
-- Produces: `AuthenticatedPrincipal`, `AuthorizedCustomerContext`, `TurnRequest`, `TurnResult`, `AgentError`, and `bind_customer_context(principal: AuthenticatedPrincipal, requested_customer_id: str | None, session_customer_id: str | None) -> AuthorizedCustomerContext`.
+- Consumes: bearer-token claims, API request identifiers, and committed persona YAML.
+- Produces: `AuthenticatedPrincipal`, `AuthorizedCustomerContext`, `TurnRequest`, `TurnResult`, `AgentError`, `ArtifactRef`, `PersonaArtifact`, `PromptArtifact`, `RuntimeArtifacts`, `ArtifactRegistry.load_persona(filename: str) -> PersonaArtifact`, `ArtifactRegistry.load_prompt(filename: str) -> PromptArtifact`, `load_runtime_artifacts(config_root: Path) -> RuntimeArtifacts`, `resolve_persona(conversation_mode: ConversationMode, personas: Sequence[PersonaArtifact]) -> PersonaArtifact | None`, and `bind_customer_context(principal: AuthenticatedPrincipal, requested_customer_id: str | None, session_customer_id: str | None) -> AuthorizedCustomerContext`.
+- Persona selection is deterministic. Model output never supplies a filename or artifact ID. Only `emotional_support` and `casual` may resolve `familiar_companion.zh-TW`; business modes resolve `None`.
+- Artifact models use `ConfigDict(extra="forbid")`, validate semantic versions, and represent checksum-bearing collections as ordered tuples/lists. The canonical serializer sorts object keys; it never hashes a Python `set`.
 
 - [ ] **Step 1: Write failing IDOR and serialization tests**
 
 ```python
+import os
+from pathlib import Path
+import subprocess
+import sys
+
 import pytest
 
+from agent_flow.artifacts import ArtifactRegistry, resolve_persona
 from agent_flow.auth import AuthenticatedPrincipal, bind_customer_context
+from agent_flow.contracts import ArtifactRef, ConversationMode
 from agent_flow.errors import AgentError
 
 
@@ -449,13 +468,73 @@ def test_agent_requires_act_as_scope():
     principal = AuthenticatedPrincipal(subject_id="a1", tenant_id="t1", customer_id=None, scopes={"agent"})
     with pytest.raises(AgentError):
         bind_customer_context(principal, requested_customer_id="c2", session_customer_id=None)
+
+
+def test_persona_artifact_is_versioned_and_checksum_is_stable():
+    registry = ArtifactRegistry(Path("config/personas"))
+    first = registry.load_persona("familiar_companion.zh-TW.v1.yaml")
+    second = registry.load_persona("familiar_companion.zh-TW.v1.yaml")
+    assert first.ref == ArtifactRef(
+        artifact_id="familiar_companion.zh-TW",
+        version="1.0.0",
+        checksum=first.ref.checksum,
+    )
+    assert first.ref.checksum == second.ref.checksum
+    assert len(first.ref.checksum) == 64
+
+
+def test_persona_applies_only_to_companion_modes():
+    persona = ArtifactRegistry(Path("config/personas")).load_persona(
+        "familiar_companion.zh-TW.v1.yaml"
+    )
+    assert resolve_persona(ConversationMode.EMOTIONAL_SUPPORT, [persona]) == persona
+    assert resolve_persona(ConversationMode.CASUAL, [persona]) == persona
+    assert resolve_persona(ConversationMode.TRANSACTIONAL_READ, [persona]) is None
+    assert resolve_persona(ConversationMode.INFORMATIONAL, [persona]) is None
+
+
+def test_artifact_registry_rejects_path_traversal():
+    registry = ArtifactRegistry(Path("config/personas"))
+    with pytest.raises(ValueError, match="artifact path"):
+        registry.load_persona("../models.bootstrap.example.yaml")
+
+
+def test_artifact_contract_rejects_unknown_fields(tmp_path):
+    source = Path("config/personas/familiar_companion.zh-TW.v1.yaml").read_text(encoding="utf-8")
+    artifact = tmp_path / "persona.yaml"
+    artifact.write_text(source + "\nunexpected_field: true\n", encoding="utf-8")
+    with pytest.raises(ValueError):
+        ArtifactRegistry(tmp_path).load_persona(artifact.name)
+
+
+def test_artifact_contract_rejects_non_semantic_version(tmp_path):
+    source = Path("config/personas/familiar_companion.zh-TW.v1.yaml").read_text(encoding="utf-8")
+    artifact = tmp_path / "persona.yaml"
+    artifact.write_text(source.replace("version: 1.0.0", "version: latest"), encoding="utf-8")
+    with pytest.raises(ValueError):
+        ArtifactRegistry(tmp_path).load_persona(artifact.name)
+
+
+def test_artifact_checksum_is_cross_process_stable():
+    program = (
+        "from pathlib import Path; "
+        "from agent_flow.artifacts import ArtifactRegistry; "
+        "print(ArtifactRegistry(Path('config/personas'))."
+        "load_persona('familiar_companion.zh-TW.v1.yaml').ref.checksum)"
+    )
+    checksums = []
+    for seed in ("1", "98765"):
+        env = os.environ.copy()
+        env["PYTHONHASHSEED"] = seed
+        checksums.append(subprocess.check_output([sys.executable, "-c", program], env=env, text=True).strip())
+    assert checksums[0] == checksums[1]
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `uv run pytest tests/unit/test_auth.py tests/unit/test_contracts.py -v`
+Run: `uv run pytest tests/unit/test_auth.py tests/unit/test_contracts.py tests/unit/test_artifacts.py -v`
 
-Expected: collection FAIL because domain modules do not exist.
+Expected: collection FAIL because domain/artifact modules do not exist.
 
 - [ ] **Step 3: Implement immutable authorization and error contracts**
 
@@ -503,7 +582,127 @@ def bind_customer_context(
     )
 ```
 
-Implement `AgentError` as a dataclass/exception with `error_code`, `category`, `retryable`, `failure_stage`, `component`, `operation`, `field_path`, and safe public message. Implement Pydantic contracts for trace IDs, emotion assessment, strategy decision, evidence, model verdict, handoff, turn request/result, and assurance metadata using finite enums from the design spec. The bootstrap `StrategyDecision` contract contains `strategy_version`, `response_mode`, ordered `answer_order`, and bounded `reason_codes`; `ResponseDraft` contains `text`, `citations`, and `evidence_ids`.
+Create a path-safe artifact loader. `PersonaArtifact.checksum` is runtime metadata excluded from YAML serialization, and its `ref` property returns `ArtifactRef(artifact_id, version, checksum)`. Loading all required artifacts is part of application startup; a missing file or strict schema/version validation failure marks readiness unhealthy. MVP computes checksums as trace identities and does not compare them against a second manifest:
+
+```python
+# src/agent_flow/artifacts.py
+import hashlib
+import json
+from collections.abc import Sequence
+from dataclasses import dataclass
+from pathlib import Path
+
+import yaml
+
+from agent_flow.contracts import ConversationMode, PersonaArtifact, PromptArtifact
+
+
+class ArtifactRegistry:
+    def __init__(self, root: Path):
+        self.root = root.resolve()
+
+    def _load(
+        self,
+        filename: str,
+        artifact_type: type[PersonaArtifact] | type[PromptArtifact],
+    ) -> PersonaArtifact | PromptArtifact:
+        relative = Path(filename)
+        if relative.name != filename or relative.suffix not in {".yaml", ".yml"}:
+            raise ValueError("invalid artifact path")
+        path = (self.root / relative).resolve()
+        if not path.is_relative_to(self.root):
+            raise ValueError("invalid artifact path")
+        payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+        artifact = artifact_type.model_validate(payload)
+        canonical = json.dumps(
+            artifact.model_dump(mode="json", exclude={"checksum"}),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return artifact.model_copy(update={"checksum": hashlib.sha256(canonical).hexdigest()})
+
+    def load_persona(self, filename: str) -> PersonaArtifact:
+        artifact = self._load(filename, PersonaArtifact)
+        if not isinstance(artifact, PersonaArtifact):
+            raise TypeError("expected persona artifact")
+        return artifact
+
+    def load_prompt(self, filename: str) -> PromptArtifact:
+        artifact = self._load(filename, PromptArtifact)
+        if not isinstance(artifact, PromptArtifact):
+            raise TypeError("expected prompt artifact")
+        return artifact
+
+
+def resolve_persona(
+    conversation_mode: ConversationMode,
+    personas: Sequence[PersonaArtifact],
+) -> PersonaArtifact | None:
+    matches = [persona for persona in personas if conversation_mode in persona.applies_to]
+    if len(matches) > 1:
+        raise ValueError(f"multiple personas apply to {conversation_mode.value}")
+    return matches[0] if matches else None
+
+
+@dataclass(frozen=True)
+class RuntimeArtifacts:
+    strategy_prompt: PromptArtifact
+    response_prompt: PromptArtifact
+    personas: tuple[PersonaArtifact, ...]
+
+
+def load_runtime_artifacts(config_root: Path) -> RuntimeArtifacts:
+    prompt_registry = ArtifactRegistry(config_root / "prompts")
+    persona_registry = ArtifactRegistry(config_root / "personas")
+    return RuntimeArtifacts(
+        strategy_prompt=prompt_registry.load_prompt("strategy_selector.v1.yaml"),
+        response_prompt=prompt_registry.load_prompt("response_generator.v1.yaml"),
+        personas=(
+            persona_registry.load_persona("familiar_companion.zh-TW.v1.yaml"),
+        ),
+    )
+```
+
+Create the initial persona artifact exactly as follows. The identifiers are finite backend directives rather than prose copied into customer replies:
+
+```yaml
+# config/personas/familiar_companion.zh-TW.v1.yaml
+schema_version: 1
+artifact_id: familiar_companion.zh-TW
+version: 1.0.0
+locale: zh-TW
+source_reference: skill-tuning/skills/v29/SKILL.md
+applies_to:
+  - emotional_support
+  - casual
+expression_principles:
+  - ground_each_sentence_in_current_user_content
+  - do_not_steal_or_overinterpret
+  - brief_but_specific
+  - vary_adjacent_openings_and_endings
+  - respect_denial_boundary_and_positive_close
+override_order:
+  - denial
+  - boundary
+  - positive_close
+  - humor_or_challenge
+  - no_emotional_content
+  - explicit_positive
+  - light_topic
+guardrails:
+  business_modes:
+    - informational
+    - transactional_read
+    - complaint
+  never_override_business_request: true
+  never_suppress_verified_facts: true
+  never_change_risk_or_tool_route: true
+  global_two_sentence_limit: false
+  global_do_not_solve_objective: false
+```
+
+Implement `AgentError` as a dataclass/exception with `error_code`, `category`, `retryable`, `failure_stage`, `component`, `operation`, `field_path`, and safe public message. Implement strict Pydantic contracts for trace IDs, emotion assessment, strategy proposal/decision, evidence, model verdict, handoff, turn request/result, assurance metadata, `ArtifactRef`, `PersonaGuardrails`, `PersonaArtifact`, and `PromptArtifact` using finite enums from the design spec. The model-facing `StrategyProposal` contains only `strategy_version`, `response_mode`, ordered `answer_order`, and bounded `reason_codes`; it has no artifact fields. The controller-owned `StrategyDecision` adds `persona_ref: ArtifactRef | None`. `ResponseDraft` contains `text`, `citations`, and `evidence_ids`. Persona applicability uses ordered tuples of `ConversationMode` enum values, never free-form strings or sets. `PromptArtifact` contains `schema_version`, `artifact_id`, validated semantic `version`, `node`, ordered `system_rules`, ordered `required_inputs`, `output_contract`, runtime-only `checksum`, and `ref`; all artifact models reject unknown fields.
 
 Create the shared model fake with an explicit role-call ledger:
 
@@ -588,15 +787,15 @@ def verified_draft():
 
 - [ ] **Step 4: Verify contracts and authorization**
 
-Run: `uv run pytest tests/unit/test_auth.py tests/unit/test_contracts.py -v`
+Run: `uv run pytest tests/unit/test_auth.py tests/unit/test_contracts.py tests/unit/test_artifacts.py -v`
 
 Expected: all tests pass.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/agent_flow/auth.py src/agent_flow/contracts.py src/agent_flow/errors.py tests/conftest.py tests/fakes.py tests/unit/test_auth.py tests/unit/test_contracts.py
-git commit -m "feat: add typed turn and authorization contracts"
+git add config/personas src/agent_flow/artifacts.py src/agent_flow/auth.py src/agent_flow/contracts.py src/agent_flow/errors.py tests/conftest.py tests/fakes.py tests/unit/test_artifacts.py tests/unit/test_auth.py tests/unit/test_contracts.py
+git commit -m "feat: add typed contracts authorization and persona artifacts"
 ```
 
 ---
@@ -1074,33 +1273,122 @@ git commit -m "feat: add authorized RAG and tool evidence adapters"
 ### Task 7: Classification, Risk, Evidence, Response, and Validation Nodes
 
 **Files:**
+- Create: `config/prompts/strategy_selector.v1.yaml`
+- Create: `config/prompts/response_generator.v1.yaml`
 - Create: `src/agent_flow/pipeline/classify.py`
 - Create: `src/agent_flow/pipeline/risk.py`
 - Create: `src/agent_flow/pipeline/evidence.py`
 - Create: `src/agent_flow/pipeline/respond.py`
 - Create: `src/agent_flow/pipeline/validate.py`
 - Create: `tests/unit/pipeline/conftest.py`
+- Modify: `tests/unit/test_artifacts.py`
 - Test: `tests/unit/pipeline/test_nodes.py`
 
 **Interfaces:**
-- Consumes: authorized context, conversation snapshot, model gateway, evidence clients.
+- Consumes: authorized context, conversation snapshot, model gateway, evidence clients, versioned prompt artifacts, and the deterministically resolved persona artifact.
 - Produces: `classify_dialogue`, `risk_precheck`, `plan_evidence`, `collect_evidence`, `validate_evidence`, `select_strategy`, `generate_response`, `repair_response`, and `validate_response`.
 - `risk_precheck(classification: DialogueClassification, message: str) -> RiskDecision` is deterministic and returns bounded handoff reason codes.
 - `plan_evidence(classification: DialogueClassification) -> EvidencePlan`, `collect_evidence(context: AuthorizedCustomerContext, plan: EvidencePlan, rag: RagClient, tools: ToolClient) -> CollectedEvidence`, and `validate_evidence(plan: EvidencePlan, evidence: CollectedEvidence, now: datetime) -> ValidatedEvidence` are distinct traceable nodes.
-- `select_strategy(models: ModelGateway, classification: DialogueClassification, risk: RiskDecision, evidence: ValidatedEvidence) -> StrategyDecision` calls `strategy_advisor` once.
-- `generate_response(models: ModelGateway, snapshot: ConversationSnapshot, strategy: StrategyDecision, evidence: ValidatedEvidence) -> ResponseDraft` calls `ModelGateway.structured("response_generator", ..., ResponseDraft)` once.
-- `repair_response(models: ModelGateway, draft: ResponseDraft, validation: ValidationResult, evidence: ValidatedEvidence) -> ResponseDraft` uses the same structured response-generator role with only the failed criteria and grounded evidence, never the judge role.
+- `select_strategy(models: ModelGateway, classification: DialogueClassification, risk: RiskDecision, evidence: ValidatedEvidence, prompt: PromptArtifact, persona: PersonaArtifact | None) -> StrategyDecision` calls `strategy_advisor` once and attaches the controller-resolved `persona_ref`; the model cannot select or change it.
+- `generate_response(models: ModelGateway, snapshot: ConversationSnapshot, strategy: StrategyDecision, evidence: ValidatedEvidence, prompt: PromptArtifact, persona: PersonaArtifact | None) -> ResponseDraft` calls `ModelGateway.structured("response_generator", ..., ResponseDraft)` once.
+- `repair_response(models: ModelGateway, draft: ResponseDraft, validation: ValidationResult, strategy: StrategyDecision, evidence: ValidatedEvidence, prompt: PromptArtifact, persona: PersonaArtifact | None) -> ResponseDraft` applies the same `strategy.persona_ref == persona.ref` check as generation, then uses the structured response-generator role with only the failed criteria and grounded evidence, never the judge role.
 - `validate_response(models: ModelGateway, draft: ResponseDraft, evidence: ValidatedEvidence, assurance_mode: str) -> ValidationResult` gives the judge the frozen draft and verified evidence.
 
 - [ ] **Step 1: Write failing node tests using fakes**
 
 ```python
+from pathlib import Path
+
+import pytest
+from pydantic import ValidationError
+
+from agent_flow.artifacts import ArtifactRegistry
+from agent_flow.contracts import ConversationMode, RiskDecision
+from tests.fakes import FakeModelGateway
+
+
 @pytest.mark.asyncio
 async def test_classifier_returns_intent_and_emotion_in_one_call(fake_models):
     result = await classify_dialogue(fake_models, ["我很累，訂單也還沒到"])
     assert result.intent == "order_status"
     assert result.emotion.category == "stress_exhaustion"
     assert fake_models.calls == ["dialogue_classifier"]
+
+
+def test_prompt_artifacts_are_versioned_and_node_scoped():
+    registry = ArtifactRegistry(Path("config/prompts"))
+    strategy = registry.load_prompt("strategy_selector.v1.yaml")
+    response = registry.load_prompt("response_generator.v1.yaml")
+    assert strategy.artifact_id == "strategy_selector"
+    assert strategy.node == "strategy_selector"
+    assert response.artifact_id == "response_generator"
+    assert response.node == "response_generator"
+    assert strategy.ref.checksum != response.ref.checksum
+
+
+@pytest.mark.asyncio
+async def test_business_strategy_cannot_attach_companion_persona(
+    fake_models,
+    classification,
+    validated_evidence,
+    strategy_prompt,
+    companion_persona,
+):
+    result = await select_strategy(
+        fake_models,
+        classification,
+        RiskDecision.safe(),
+        validated_evidence,
+        strategy_prompt,
+        companion_persona,
+    )
+    assert classification.conversation_mode == "transactional_read"
+    assert result.persona_ref is None
+
+
+@pytest.mark.asyncio
+async def test_emotional_strategy_records_companion_persona_ref(
+    fake_models,
+    classification,
+    validated_evidence,
+    strategy_prompt,
+    companion_persona,
+):
+    emotional = classification.model_copy(update={"conversation_mode": ConversationMode.EMOTIONAL_SUPPORT})
+    result = await select_strategy(
+        fake_models,
+        emotional,
+        RiskDecision.safe(),
+        validated_evidence,
+        strategy_prompt,
+        companion_persona,
+    )
+    assert result.persona_ref == companion_persona.ref
+
+
+@pytest.mark.asyncio
+async def test_strategy_model_cannot_supply_persona_ref(
+    classification,
+    validated_evidence,
+    strategy_prompt,
+    companion_persona,
+):
+    models = FakeModelGateway({"strategy_advisor": [{
+        "strategy_version": "bootstrap-v1",
+        "response_mode": "supportive",
+        "answer_order": ["acknowledgment"],
+        "reason_codes": ["EMOTIONAL_SUPPORT"],
+        "persona_ref": companion_persona.ref.model_dump(mode="json"),
+    }]})
+    with pytest.raises(ValidationError):
+        await select_strategy(
+            models,
+            classification.model_copy(update={"conversation_mode": ConversationMode.EMOTIONAL_SUPPORT}),
+            RiskDecision.safe(),
+            validated_evidence,
+            strategy_prompt,
+            companion_persona,
+        )
 
 
 @pytest.mark.asyncio
@@ -1155,30 +1443,121 @@ async def test_repair_uses_generator_with_failed_criteria(
     repair_models,
     verified_draft,
     repairable_validation,
+    transactional_strategy,
     validated_evidence,
+    response_prompt,
 ):
     repaired = await repair_response(
         repair_models,
         verified_draft,
         repairable_validation,
+        transactional_strategy,
         validated_evidence,
+        response_prompt,
+        None,
     )
     assert repaired.text != verified_draft.text
     assert repair_models.calls == ["response_generator"]
     assert repair_models.requests[0].failed_criteria == ["UNSUPPORTED_DELIVERY_PROMISE"]
+    assert repair_models.requests[0].persona is None
 ```
 
 - [ ] **Step 2: Verify failure**
 
-Run: `uv run pytest tests/unit/pipeline/test_nodes.py -v`
+Run: `uv run pytest tests/unit/test_artifacts.py tests/unit/pipeline/test_nodes.py -v`
 
 Expected: FAIL because node functions do not exist.
 
 - [ ] **Step 3: Implement one-purpose typed nodes**
 
-Each model node sends a finite JSON schema, validates with Pydantic, records bounded reason codes, and never stores native reasoning output. `classify_dialogue` returns intent and emotion in one call. `risk_precheck` performs the high-risk rules before any evidence calls. `plan_evidence` declares required facts and freshness constraints; `collect_evidence` uses `asyncio.TaskGroup` and reports each source independently; `validate_evidence` rejects missing, expired, conflicting, or incomplete required facts with non-retryable `EVIDENCE_INSUFFICIENT` at `failure_stage="evidence_validator"`. `validate_response` runs deterministic checks before the semantic judge and returns failed criteria plus repairability.
+Each model node sends a finite JSON schema, validates with Pydantic, records bounded reason codes, and never stores native reasoning output. `classify_dialogue` returns intent and emotion in one call. `risk_precheck` performs the high-risk rules before any evidence calls. `plan_evidence` declares required facts and freshness constraints; `collect_evidence` uses `asyncio.TaskGroup` and reports each source independently; `validate_evidence` rejects missing, expired, conflicting, or incomplete required facts with non-retryable `EVIDENCE_INSUFFICIENT` at `failure_stage="evidence_validator"`. `validate_response` runs deterministic checks before the semantic judge and returns failed criteria plus repairability. Strategy and generation requests include the loaded prompt `ArtifactRef`; persona directives are included only when the deterministic applicability check passes. Model output cannot override `persona_ref`.
+
+Create the strategy prompt artifact exactly as:
+
+```yaml
+# config/prompts/strategy_selector.v1.yaml
+schema_version: 1
+artifact_id: strategy_selector
+version: 1.0.0
+node: strategy_selector
+system_rules:
+  - business_request_and_verified_evidence_have_priority
+  - high_risk_and_boundary_rules_are_not_overridable
+  - choose_one_finite_response_mode
+  - reason_codes_are_bounded_and_never_chain_of_thought
+  - persona_is_controller_supplied_and_cannot_be_changed
+required_inputs:
+  - dialogue_classification
+  - risk_decision
+  - validated_evidence
+  - prompt_ref
+  - resolved_persona_ref
+output_contract: StrategyProposal
+```
+
+Create the response prompt artifact exactly as:
+
+```yaml
+# config/prompts/response_generator.v1.yaml
+schema_version: 1
+artifact_id: response_generator
+version: 1.0.0
+node: response_generator
+system_rules:
+  - answer_only_from_validated_evidence
+  - preserve_citations_and_evidence_ids
+  - never_claim_an_unverified_action_commitment_price_or_date
+  - business_modes_answer_verified_facts_first
+  - companion_persona_is_expression_only_and_never_changes_business_policy
+  - do_not_emit_classification_reasoning_or_hidden_thinking
+required_inputs:
+  - conversation_snapshot
+  - strategy_decision
+  - validated_evidence
+  - prompt_ref
+  - resolved_persona
+output_contract: ResponseDraft
+```
 
 ```python
+async def select_strategy(
+    models: ModelGateway,
+    classification: DialogueClassification,
+    risk: RiskDecision,
+    evidence: ValidatedEvidence,
+    prompt: PromptArtifact,
+    persona: PersonaArtifact | None,
+) -> StrategyDecision:
+    effective_persona = (
+        persona if persona is not None and classification.conversation_mode in persona.applies_to else None
+    )
+    request = build_strategy_request(
+        classification=classification,
+        risk=risk,
+        evidence=evidence,
+        prompt=prompt,
+        persona=effective_persona,
+    )
+    proposed = await models.structured("strategy_advisor", request, StrategyProposal)
+    return StrategyDecision(
+        **proposed.model_dump(),
+        persona_ref=effective_persona.ref if effective_persona else None,
+    )
+
+
+async def generate_response(
+    models: ModelGateway,
+    snapshot: ConversationSnapshot,
+    strategy: StrategyDecision,
+    evidence: ValidatedEvidence,
+    prompt: PromptArtifact,
+    persona: PersonaArtifact | None,
+) -> ResponseDraft:
+    effective_persona = persona if persona is not None and strategy.persona_ref == persona.ref else None
+    request = build_generation_request(snapshot, strategy, evidence, prompt, effective_persona)
+    return await models.structured("response_generator", request, ResponseDraft)
+
+
 def validate_evidence(
     plan: EvidencePlan,
     evidence: CollectedEvidence,
@@ -1198,12 +1577,18 @@ async def repair_response(
     models: ModelGateway,
     draft: ResponseDraft,
     validation: ValidationResult,
+    strategy: StrategyDecision,
     evidence: ValidatedEvidence,
+    prompt: PromptArtifact,
+    persona: PersonaArtifact | None,
 ) -> ResponseDraft:
+    effective_persona = persona if persona is not None and strategy.persona_ref == persona.ref else None
     request = build_repair_request(
         draft=draft,
         failed_criteria=validation.failed_criteria,
         evidence=evidence,
+        prompt=prompt,
+        persona=effective_persona,
     )
     return await models.structured("response_generator", request, ResponseDraft)
 
@@ -1226,14 +1611,14 @@ async def validate_response(
 
 - [ ] **Step 4: Run node tests**
 
-Run: `uv run pytest tests/unit/pipeline/test_nodes.py -v`
+Run: `uv run pytest tests/unit/test_artifacts.py tests/unit/pipeline/test_nodes.py -v`
 
 Expected: all tests pass; fake call lists prove no duplicate bootstrap judge, evidence sufficiency is enforced without a model guess, and repair never asks the judge to generate customer text.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/agent_flow/pipeline tests/unit/pipeline/conftest.py tests/unit/pipeline/test_nodes.py
+git add config/prompts src/agent_flow/pipeline tests/unit/test_artifacts.py tests/unit/pipeline/conftest.py tests/unit/pipeline/test_nodes.py
 git commit -m "feat: add typed customer turn nodes"
 ```
 
@@ -1252,8 +1637,8 @@ git commit -m "feat: add typed customer turn nodes"
 
 **Interfaces:**
 - Consumes: node functions, repositories, authorized context, `TurnRequest`.
-- Produces: `TurnPipeline(traces, conversations, handoffs, models, rag, tools, clock, assurance_mode)` and `TurnPipeline.run(context, request, retry_of=None) -> TurnResult`.
-- Produces: `run_node(state: TurnState, name: str, operation: Callable[[], T | Awaitable[T]], attempt: int = 1) -> T`. The operation is a zero-argument closure with all node-specific arguments bound explicitly at the call site; `run_node` never dispatches or resolves arguments by node-name strings.
+- Produces: `TurnPipeline(traces, conversations, handoffs, models, rag, tools, artifacts, clock, assurance_mode)` and `TurnPipeline.run(context, request, retry_of=None) -> TurnResult`.
+- Produces: `run_node(state: TurnState, name: str, operation: Callable[[], T | Awaitable[T]], attempt: int = 1, trace_metadata: Mapping[str, JSONValue] | None = None) -> T`. The operation is a zero-argument closure with all node-specific arguments bound explicitly at the call site; `run_node` never dispatches or resolves arguments by node-name strings. `trace_metadata` is controller-owned, schema-limited metadata used for immutable artifact refs and never contains full prompt/persona text.
 - The API performs `input_gate` before calling this service. The pipeline records `context_loader` as its first runtime node and binds the immutable conversation/artifact snapshot to the trace before any model, RAG, or tool call.
 
 - [ ] **Step 1: Write a failing happy-path and failure-location test**
@@ -1276,9 +1661,15 @@ async def test_run_node_wraps_explicit_sync_and_async_closures(
         return "model-result"
 
     assert await pipeline_for_run_node.run_node(trace_state, "risk_precheck", sync_operation) == "risk-result"
-    assert await pipeline_for_run_node.run_node(trace_state, "dialogue_classifier", async_operation) == "model-result"
+    assert await pipeline_for_run_node.run_node(
+        trace_state,
+        "dialogue_classifier",
+        async_operation,
+        trace_metadata={"prompt_ref": {"artifact_id": "classifier", "version": "1.0.0", "checksum": "a" * 64}},
+    ) == "model-result"
     assert seen == ["sync", "async"]
     assert trace_spy.completed_nodes == ["risk_precheck", "dialogue_classifier"]
+    assert trace_spy.events[-1].metadata["prompt_ref"]["checksum"] == "a" * 64
 
 
 @pytest.fixture
@@ -1287,7 +1678,7 @@ def context():
 
 
 @pytest_asyncio.fixture
-async def pipeline(trace_repository, conversation_repository, fake_models, mock_rag, mock_tool, memory_handoffs, clock):
+async def pipeline(trace_repository, conversation_repository, fake_models, mock_rag, mock_tool, memory_handoffs, runtime_artifacts, clock):
     return TurnPipeline(
         traces=trace_repository,
         conversations=conversation_repository,
@@ -1295,6 +1686,7 @@ async def pipeline(trace_repository, conversation_repository, fake_models, mock_
         models=fake_models,
         rag=mock_rag,
         tools=mock_tool,
+        artifacts=runtime_artifacts,
         clock=clock,
         assurance_mode="bootstrap",
     )
@@ -1312,6 +1704,12 @@ async def test_pipeline_returns_reduced_assurance_reply(pipeline, context, fake_
         "response_generator",
         "response_judge",
     ]
+    trace = await pipeline.traces.get_trace(result.trace_id, tenant_id="t1")
+    strategy_event = next(event for event in trace.events if event.node == "strategy_selector" and event.kind == "completed")
+    generation_event = next(event for event in trace.events if event.node == "response_generator" and event.kind == "completed")
+    assert strategy_event.metadata["prompt_ref"] == pipeline.artifacts.strategy_prompt.ref.model_dump(mode="json")
+    assert strategy_event.metadata["persona_ref"] is None
+    assert generation_event.metadata["prompt_ref"] == pipeline.artifacts.response_prompt.ref.model_dump(mode="json")
 
 
 @pytest.mark.asyncio
@@ -1349,6 +1747,8 @@ async def test_second_validation_failure_handoffs(pipeline_with_double_validatio
     assert trace.issue_summary.error_code == "VALIDATION_EXHAUSTED"
     assert trace.issue_summary.failed_node == "response_validator"
     assert [span.attempt for span in validator_spans] == [1, 2]
+    repair_event = next(event for event in trace.events if event.node == "response_repair" and event.kind == "completed")
+    assert repair_event.metadata["prompt_ref"] == pipeline_with_double_validation_failure.artifacts.response_prompt.ref.model_dump(mode="json")
 ```
 
 - [ ] **Step 2: Verify failure**
@@ -1377,9 +1777,13 @@ class TurnPipeline:
         name: str,
         operation: NodeOperation[T],
         attempt: int = 1,
+        trace_metadata: Mapping[str, JSONValue] | None = None,
     ) -> T:
+        metadata = trace_metadata or {}
         span_id = await self.traces.start_span(state.trace_id, node=name, attempt=attempt)
-        await self.traces.append_node_started(state.trace_id, span_id, node=name, attempt=attempt)
+        await self.traces.append_node_started(
+            state.trace_id, span_id, node=name, attempt=attempt, metadata=metadata
+        )
         try:
             pending_or_value = operation()
             value = await pending_or_value if isawaitable(pending_or_value) else pending_or_value
@@ -1389,7 +1793,7 @@ class TurnPipeline:
         except Exception as error:
             await self.traces.finish_node_failed(state.trace_id, span_id, error)
             raise
-        await self.traces.finish_node_completed(state.trace_id, span_id)
+        await self.traces.finish_node_completed(state.trace_id, span_id, metadata=metadata)
         return value
 
     async def run(self, context: AuthorizedCustomerContext, request: TurnRequest, retry_of: UUID | None = None) -> TurnResult:
@@ -1425,6 +1829,10 @@ class TurnPipeline:
             )
             if state.risk.requires_handoff:
                 return await self.finish_handoff(state, reason_code=state.risk.reason_code)
+            state.persona = resolve_persona(
+                state.classification.conversation_mode,
+                self.artifacts.personas,
+            )
             state.evidence_plan = await self.run_node(
                 state,
                 "evidence_planner",
@@ -1443,12 +1851,34 @@ class TurnPipeline:
             state.strategy = await self.run_node(
                 state,
                 "strategy_selector",
-                lambda: select_strategy(self.models, state.classification, state.risk, state.evidence),
+                lambda: select_strategy(
+                    self.models,
+                    state.classification,
+                    state.risk,
+                    state.evidence,
+                    self.artifacts.strategy_prompt,
+                    state.persona,
+                ),
+                trace_metadata={
+                    "prompt_ref": self.artifacts.strategy_prompt.ref.model_dump(mode="json"),
+                    "persona_ref": state.persona.ref.model_dump(mode="json") if state.persona else None,
+                },
             )
             state.draft = await self.run_node(
                 state,
                 "response_generator",
-                lambda: generate_response(self.models, state.snapshot, state.strategy, state.evidence),
+                lambda: generate_response(
+                    self.models,
+                    state.snapshot,
+                    state.strategy,
+                    state.evidence,
+                    self.artifacts.response_prompt,
+                    state.persona,
+                ),
+                trace_metadata={
+                    "prompt_ref": self.artifacts.response_prompt.ref.model_dump(mode="json"),
+                    "persona_ref": state.strategy.persona_ref.model_dump(mode="json") if state.strategy.persona_ref else None,
+                },
             )
             state.validation = await self.run_node(
                 state,
@@ -1460,7 +1890,19 @@ class TurnPipeline:
                     state.draft = await self.run_node(
                         state,
                         "response_repair",
-                        lambda: repair_response(self.models, state.draft, state.validation, state.evidence),
+                        lambda: repair_response(
+                            self.models,
+                            state.draft,
+                            state.validation,
+                            state.strategy,
+                            state.evidence,
+                            self.artifacts.response_prompt,
+                            state.persona,
+                        ),
+                        trace_metadata={
+                            "prompt_ref": self.artifacts.response_prompt.ref.model_dump(mode="json"),
+                            "persona_ref": state.strategy.persona_ref.model_dump(mode="json") if state.strategy.persona_ref else None,
+                        },
                     )
                     state.validation = await self.run_node(
                         state,
@@ -1479,7 +1921,7 @@ class TurnPipeline:
             return await self.fail_or_handoff(state, error)
 ```
 
-`run_node` must always start/finish a span, append typed events for attempts and decisions, and set `primary_failure_event_id` only for the causal error. Downstream cancellations are separate events. `finish_handoff` records `VALIDATION_EXHAUSTED` against the second `response_validator` span when repair was attempted; it must never finalize or persist a still-failing draft as an assistant reply.
+`run_node` must always start/finish a span, append typed `started`, `completed`, `failed`, or `cancelled` events, and set `primary_failure_event_id` only for the causal error. `finish_node_completed(..., metadata=...)` persists a `completed` event with the supplied controller metadata. Separate bounded decision-summary events remain node-owned. Strategy/generation/repair completed events record the prompt and persona `ArtifactRef` values (ID, version, checksum), never the entire prompt or native reasoning. Downstream cancellations are separate events. `finish_handoff` records `VALIDATION_EXHAUSTED` against the second `response_validator` span when repair was attempted; it must never finalize or persist a still-failing draft as an assistant reply.
 
 - [ ] **Step 4: Run E2E and failure-injection tests**
 
@@ -1504,11 +1946,12 @@ git commit -m "feat: add fixed traced turn pipeline"
 - Create: `src/agent_flow/api/turns.py`
 - Create: `src/agent_flow/api/traces.py`
 - Create: `src/agent_flow/api/health.py`
+- Modify: `tests/e2e/conftest.py`
 - Test: `tests/e2e/test_api.py`
 - Test: `tests/e2e/test_manual_retry.py`
 
 **Interfaces:**
-- Consumes: `TurnPipeline`, auth claims, trace/conversation repositories.
+- Consumes: `TurnPipeline`, auth claims, trace/conversation repositories, and startup-loaded `RuntimeArtifacts`.
 - Produces: `POST /api/v1/turns`, `GET /api/v1/traces/{id}`, incremental events, `POST /retry`, liveness/readiness.
 
 - [ ] **Step 1: Write failing API authorization and retry tests**
@@ -1534,6 +1977,22 @@ def test_manual_retry_creates_linked_review_only_trace(client, admin_token, fail
     body = response.json()
     assert body["retry_of_trace_id"] == str(failed_trace)
     assert body["delivery_disposition"] == "review_required"
+
+
+def test_readiness_is_unhealthy_when_required_artifact_is_missing(app_factory, tmp_path):
+    app = app_factory(config_root=tmp_path)
+    with TestClient(app) as client:
+        response = client.get("/health/ready")
+    assert response.status_code == 503
+    assert response.json()["checks"]["runtime_artifacts"] == "missing"
+
+
+def test_readiness_is_unhealthy_when_artifact_schema_is_invalid(app_factory, invalid_artifact_root):
+    app = app_factory(config_root=invalid_artifact_root)
+    with TestClient(app) as client:
+        response = client.get("/health/ready")
+    assert response.status_code == 503
+    assert response.json()["checks"]["runtime_artifacts"] == "invalid"
 ```
 
 - [ ] **Step 2: Verify failure**
@@ -1542,7 +2001,7 @@ Run: `uv run pytest tests/e2e/test_api.py tests/e2e/test_manual_retry.py -v`
 
 Expected: FAIL because the FastAPI application is missing.
 
-- [ ] **Step 3: Implement dependency wiring and tenant-safe routes**
+- [ ] **Step 3: Implement dependency wiring, artifact readiness, and tenant-safe routes**
 
 ```python
 @router.post("/api/v1/traces/{trace_id}/retry", status_code=202)
@@ -1890,6 +2349,7 @@ Use these README headings and runnable command blocks:
 ### `docker compose up --build`
 ### `docker compose --profile demo run --rm demo-seed`
 ## Model Registry and Inventory Gate
+## Versioned Prompts, Persona Scope, and Artifact Checksums
 ## Turn, Trace, Event, Health, and Manual Retry APIs
 ## Authorization and Tenant Binding
 ## Retry and Handoff Outbox
@@ -1899,7 +2359,7 @@ Use these README headings and runnable command blocks:
 ## Deferred: Incident-first Console, Dual Judge, Improvement Lifecycle
 ```
 
-Under the Model Registry heading document that `response_generator` requires `chat`, `structured_json`, and `reasoning_toggle`; show the opt-in live probe command and explain that a model name match without a passing `ResponseDraft` schema probe is not ready. Under the API heading include executable PowerShell `Invoke-RestMethod` examples for a successful turn, trace retrieval, incremental events, and admin manual retry. Under troubleshooting include exact checks for vLLM `/v1/models`, structured-output `response_format` rejection or invalid JSON, Compose host routing, remote Ollama tags/show, pgvector extension, migration state, semaphore saturation, and failed outbox rows.
+Under the Model Registry heading document that `response_generator` requires `chat`, `structured_json`, and `reasoning_toggle`; show the opt-in live probe command and explain that a model name match without a passing `ResponseDraft` schema probe is not ready. Under the artifact heading document the exact files in `config/prompts/` and `config/personas/`, explain that `familiar_companion.zh-TW` applies only to emotional-support/casual modes, and show how IDs, semantic versions, and checksums appear in traces and are rolled back through committed configuration. Under the API heading include executable PowerShell `Invoke-RestMethod` examples for a successful turn, trace retrieval, incremental events, and admin manual retry. Under troubleshooting include exact checks for vLLM `/v1/models`, structured-output `response_format` rejection or invalid JSON, invalid/missing artifact readiness, Compose host routing, remote Ollama tags/show, pgvector extension, migration state, semaphore saturation, and failed outbox rows.
 
 - [ ] **Step 5: Validate tests and Compose rendering**
 

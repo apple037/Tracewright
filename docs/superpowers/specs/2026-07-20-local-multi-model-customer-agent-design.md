@@ -117,6 +117,14 @@ Low confidence, conflicting signals, or absent evidence produce `unknown`; the s
 - Boundary states stop the current probing direction; an explicit boundary is remembered for the following two turns.
 - High-risk states bypass open-ended generation decisions and create a handoff event.
 
+### 4.4 Versioned Prompt and Persona Artifacts
+
+Conversation strategy and persona text are versioned configuration artifacts, not Python literals embedded in pipeline nodes. The repository stores strategy/generation prompts under `config/prompts/` and persona profiles under `config/personas/`. Each YAML artifact has a stable `artifact_id`, validated semantic `version`, `schema_version`, finite ordered applicability rules, and content validated by strict Pydantic contracts that reject unknown fields. `ArtifactRegistry` computes a canonical SHA-256 checksum at load time; traces record the artifact ID, version, and checksum used by each strategy or generation call.
+
+The initial `familiar_companion.zh-TW` persona adapts the observable expression layer from `skill-tuning` v29: responses stay tied to concrete user wording, avoid generic reassurance and unsolicited diagnosis, do not steal the conversation, vary adjacent phrasing, and respect denial/boundary/positive-close overrides. It applies only to `emotional_support` and `casual` modes. Informational, transactional-read, and complaint turns remain business-first; the persona cannot impose v29's global two-sentence limit or “do not solve” objective on business replies, suppress verified facts, change risk decisions, or select tools.
+
+Persona selection is deterministic from the classified conversation mode and committed artifact configuration. Models may select a finite response mode in a model-facing `StrategyProposal`, but they cannot name an arbitrary artifact or load files. The controller builds the final `StrategyDecision` and attaches the resolved immutable `ArtifactRef` to the request and trace. Missing or schema-invalid required artifacts make startup/readiness fail rather than silently falling back to hard-coded prompt text. The computed checksum is the trace and rollback identity; MVP does not add a separate checksum manifest.
+
 ## 5. Flexible Model Registry and Routing
 
 Application code addresses model roles, never vendor or model names. The stable roles are:
@@ -604,24 +612,25 @@ The root `README.md` must document:
 3. quick start, configuration copy steps, migration, demo seed, and shutdown;
 4. every `.env.example` system, admission/concurrency, database, Webhook, authentication, retention, and observability setting;
 5. Model Registry roles, profiles, capabilities, fallback chains, adapter options, and environment override precedence;
-6. Ollama/OpenAI-compatible runtime model names as opaque endpoint identifiers, the optional upstream `source_model` metadata, Model Inventory Gate behavior, and replacing classifier, judge, generator, strategy, and embedding models without code changes;
-7. Compose services, profiles, ports, networks, volumes, health checks, and external model connectivity;
-8. pgvector schema, migrations, embedding-dimension probe, ingestion, re-embedding, and backup/restore;
-9. mock data and demo frontend workflows;
-10. REST contracts, authentication, citations, trace lookup, and signed Webhook validation;
-11. async fan-out, admission/semaphore limits, HTTP 429, PostgreSQL jobs, and worker recovery;
-12. structured thinking/decision summaries, model/tool logs, precise failure locations, retention, and stdout log collection;
-13. the 60-item human-labeling workflow, dataset split, metrics, and locked-test rule;
-14. improvement candidates, append-only ledger, promotion tests, human approval, activation, and rollback;
-15. unit, integration, E2E, failure-injection, promotion, and opt-in live-model commands;
-16. troubleshooting for model connectivity, structured JSON, vector dimension, migrations, admission saturation, stuck PostgreSQL jobs, RAG freshness, tool timeout, and Webhook failure;
-17. a production-readiness checklist.
+6. versioned strategy/generation prompt and persona artifact locations, applicability, checksums, trace references, and rollback procedure;
+7. Ollama/OpenAI-compatible runtime model names as opaque endpoint identifiers, the optional upstream `source_model` metadata, Model Inventory Gate behavior, and replacing classifier, judge, generator, strategy, and embedding models without code changes;
+8. Compose services, profiles, ports, networks, volumes, health checks, and external model connectivity;
+9. pgvector schema, migrations, embedding-dimension probe, ingestion, re-embedding, and backup/restore;
+10. mock data and demo frontend workflows;
+11. REST contracts, authentication, citations, trace lookup, and signed Webhook validation;
+12. async fan-out, admission/semaphore limits, HTTP 429, PostgreSQL jobs, and worker recovery;
+13. structured thinking/decision summaries, model/tool logs, precise failure locations, retention, and stdout log collection;
+14. the 60-item human-labeling workflow, dataset split, metrics, and locked-test rule;
+15. improvement candidates, append-only ledger, promotion tests, human approval, activation, and rollback;
+16. unit, integration, E2E, failure-injection, promotion, and opt-in live-model commands;
+17. troubleshooting for model connectivity, structured JSON, vector dimension, migrations, admission saturation, stuck PostgreSQL jobs, RAG freshness, tool timeout, and Webhook failure;
+18. a production-readiness checklist.
 
 ## 15. Testing and Acceptance
 
 ### 15.1 Test Layers
 
-- Unit tests for every node, Pydantic contract, strategy rule, risk rule, and error mapping.
+- Unit tests for every node, Pydantic contract, strategy rule, risk rule, and error mapping, including path-safe artifact loading, canonical checksum stability, deterministic persona applicability, and rejection of model-supplied artifact selection.
 - Contract tests shared by mock and remote RAG/tool/model/Webhook adapters.
 - Model Inventory Gate tests for exact alias resolution, missing/duplicate alias, reported model digest, per-profile required capabilities, local `ResponseDraft` structured JSON for generation/repair, thinking-disable behavior, and embedding dimension; live execution is opt-in until private `.env` exists.
 - Assurance-mode tests verify bootstrap exposes `reduced_assurance`, never invokes one profile twice as two judges, requires criterion-level human semantic approval for promotion, and rejects dual-judge profiles that share a family or resolved digest.
@@ -641,6 +650,7 @@ The root `README.md` must document:
 - Intent and tool-route accuracy is at least 95%.
 - RAG citation precision is at least 95%.
 - Every injected failure is visible at the correct trace node and precise error point.
+- Every strategy/generation trace identifies the exact prompt and applicable persona artifact ID, semantic version, and checksum without storing the full artifact body.
 - Webhook signature, idempotency, retry, and outbox recovery tests pass.
 - Manual retry creates an immutable linked trace, enforces authorization/limits, refreshes only live read-only tools, never delivers a second customer reply automatically, and never duplicates a queued/delivered handoff.
 - Ordinary tests make no production model, RAG, tool, or Webhook calls.
