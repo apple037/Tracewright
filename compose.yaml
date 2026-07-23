@@ -1,0 +1,92 @@
+services:
+  postgres:
+    image: pgvector/pgvector:0.8.5-pg16-bookworm
+    environment:
+      POSTGRES_DB: agent
+      POSTGRES_USER: agent
+      POSTGRES_PASSWORD: agent
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks: [agent-net]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agent -d agent"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    build: .
+    command: ["uv", "run", "--frozen", "--no-dev", "--no-sync", "alembic", "upgrade", "head"]
+    environment:
+      DATABASE_URL: postgresql://agent:agent@postgres:5432/agent
+    networks: [agent-net]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  app:
+    build: .
+    command: ["uv", "run", "--frozen", "--no-dev", "--no-sync", "uvicorn", "agent_flow.main:app", "--host", "0.0.0.0", "--port", "8080"]
+    environment:
+      DATABASE_URL: postgresql://agent:agent@postgres:5432/agent
+      MODEL_CONFIG_PATH: ${MODEL_CONFIG_PATH:-config/models.bootstrap.example.yaml}
+      ASSURANCE_MODE: ${ASSURANCE_MODE:-bootstrap}
+      LOCAL_VLLM_BASE_URL: http://host.docker.internal:8000/v1
+      LOCAL_VLLM_API_KEY: ${LOCAL_VLLM_API_KEY:-EMPTY}
+      REMOTE_MODEL_BASE_URL: ${REMOTE_MODEL_BASE_URL:-http://remote-model-server:11434}
+      REMOTE_MODEL_API_KEY: ${REMOTE_MODEL_API_KEY:-}
+      WEBHOOK_URL: ${WEBHOOK_URL:-http://mock-handoff-server:9999/mock-handoff}
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-replace-for-local-demo-only}
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    ports:
+      - "8080:8080"
+    networks: [agent-net]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health/live')"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  worker:
+    build: .
+    command: ["uv", "run", "--frozen", "--no-dev", "--no-sync", "python", "-m", "agent_flow.worker", "--run"]
+    environment:
+      DATABASE_URL: postgresql://agent:agent@postgres:5432/agent
+      MODEL_CONFIG_PATH: ${MODEL_CONFIG_PATH:-config/models.bootstrap.example.yaml}
+      ASSURANCE_MODE: ${ASSURANCE_MODE:-bootstrap}
+      LOCAL_VLLM_BASE_URL: http://host.docker.internal:8000/v1
+      LOCAL_VLLM_API_KEY: ${LOCAL_VLLM_API_KEY:-EMPTY}
+      REMOTE_MODEL_BASE_URL: ${REMOTE_MODEL_BASE_URL:-http://remote-model-server:11434}
+      REMOTE_MODEL_API_KEY: ${REMOTE_MODEL_API_KEY:-}
+      WEBHOOK_URL: ${WEBHOOK_URL:-http://mock-handoff-server:9999/mock-handoff}
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-replace-for-local-demo-only}
+      WORKER_OWNER: ${WORKER_OWNER:-agent-flow-bootstrap}
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    networks: [agent-net]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  demo-seed:
+    build: .
+    profiles: [demo]
+    command: ["uv", "run", "--frozen", "--no-dev", "--no-sync", "python", "-m", "agent_flow.seed_demo"]
+    environment:
+      DATABASE_URL: postgresql://agent:agent@postgres:5432/agent
+      DEMO_TENANT_ID: ${DEMO_TENANT_ID:-t1}
+    networks: [agent-net]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  postgres-data:
+
+networks:
+  agent-net:
+    driver: bridge

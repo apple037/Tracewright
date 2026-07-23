@@ -1,9 +1,17 @@
 from __future__ import annotations
 
+import argparse
 import asyncio
+import logging
+import os
+import signal
+import socket
 
 from agent_flow.adapters.webhook import HandoffWebhook, WebhookDeliveryError
+from agent_flow.config import Settings
+from agent_flow.logging import configure_json_stdout
 from agent_flow.repositories.outbox import OutboxRepository
+from agent_flow.repositories.postgres import PostgresPool
 from agent_flow.repositories.retention import (
     PostgresRetentionRepository,
     RetentionResult,
@@ -106,3 +114,84 @@ class RetentionWorker:
         return await self.repository.cleanup_batch(
             limit=self.batch_size, tenant_id=self.tenant_id
         )
+
+
+async def _run_retention_loop(
+    worker: RetentionWorker,
+    stop: asyncio.Event,
+    *,
+    interval_seconds: float = 60.0,
+) -> None:
+    while not stop.is_set():
+        await worker.run_once()
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval_seconds)
+        except TimeoutError:
+            pass
+
+
+async def run_worker_runtime(
+    *,
+    settings: Settings,
+    stop: asyncio.Event,
+    pool: PostgresPool | None = None,
+    webhook: HandoffWebhook | None = None,
+) -> None:
+    runtime_pool = pool or PostgresPool(settings.database_url)
+    runtime_webhook = webhook or HandoffWebhook(
+        url=settings.webhook_url,
+        secret=settings.webhook_secret,
+    )
+    opened = False
+    try:
+        await runtime_pool.open()
+        opened = True
+        outbox_worker = HandoffOutboxWorker(
+            repository=OutboxRepository(runtime_pool),
+            webhook=runtime_webhook,
+            owner=os.getenv(
+                "WORKER_OWNER",
+                f"{socket.gethostname()}-{os.getpid()}",
+            ),
+        )
+        retention_worker = RetentionWorker(PostgresRetentionRepository(runtime_pool))
+        async with asyncio.TaskGroup() as tasks:
+            tasks.create_task(outbox_worker.run(stop))
+            tasks.create_task(_run_retention_loop(retention_worker, stop))
+    finally:
+        await runtime_webhook.close()
+        if opened:
+            await runtime_pool.close()
+
+
+def build_argument_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Run Agent Flow background workers")
+    parser.add_argument(
+        "--run",
+        action="store_true",
+        help="run the handoff outbox and retention worker loops",
+    )
+    return parser
+
+
+async def _run_cli() -> None:
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for signal_name in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(signal_name, stop.set)
+        except (NotImplementedError, RuntimeError):
+            pass
+    await run_worker_runtime(settings=Settings(), stop=stop)
+
+
+def main(argv: list[str] | None = None) -> None:
+    arguments = build_argument_parser().parse_args(argv)
+    if not arguments.run:
+        build_argument_parser().error("the worker requires explicit --run")
+    configure_json_stdout(logging.getLogger())
+    asyncio.run(_run_cli())
+
+
+if __name__ == "__main__":
+    main()

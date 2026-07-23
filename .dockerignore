@@ -1,0 +1,9 @@
+.git
+.env
+.venv
+.pytest_cache
+.superpowers
+.agents
+.claude
+__pycache__
+*.pyc
