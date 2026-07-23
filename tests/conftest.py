@@ -4,6 +4,30 @@ from agent_flow.contracts import ResponseDraft
 from tests.fakes import FakeModelGateway
 
 
+def pytest_addoption(parser):
+    parser.addoption(
+        "--run-live-model",
+        action="store_true",
+        default=False,
+        help="run tests that require the configured local model endpoint",
+    )
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers", "live_model: requires an explicitly enabled live model endpoint"
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    if config.getoption("--run-live-model"):
+        return
+    skip = pytest.mark.skip(reason="requires --run-live-model")
+    for item in items:
+        if "live_model" in item.keywords:
+            item.add_marker(skip)
+
+
 @pytest.fixture
 def fake_models():
     return FakeModelGateway(

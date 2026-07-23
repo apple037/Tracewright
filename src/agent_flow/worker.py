@@ -4,6 +4,10 @@ import asyncio
 
 from agent_flow.adapters.webhook import HandoffWebhook, WebhookDeliveryError
 from agent_flow.repositories.outbox import OutboxRepository
+from agent_flow.repositories.retention import (
+    PostgresRetentionRepository,
+    RetentionResult,
+)
 
 
 class HandoffOutboxWorker:
@@ -82,3 +86,23 @@ class HandoffOutboxWorker:
                     await asyncio.wait_for(stop.wait(), timeout=self.poll_seconds)
                 except TimeoutError:
                     pass
+
+
+class RetentionWorker:
+    def __init__(
+        self,
+        repository: PostgresRetentionRepository,
+        *,
+        batch_size: int = 100,
+        tenant_id: str | None = None,
+    ) -> None:
+        if batch_size < 1:
+            raise ValueError("retention batch size must be positive")
+        self.repository = repository
+        self.batch_size = batch_size
+        self.tenant_id = tenant_id
+
+    async def run_once(self) -> RetentionResult:
+        return await self.repository.cleanup_batch(
+            limit=self.batch_size, tenant_id=self.tenant_id
+        )

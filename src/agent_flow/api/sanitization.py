@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import heapq
 import re
 from typing import Any
 
@@ -10,14 +11,22 @@ _SENSITIVE_ALIASES = frozenset({
     "accesstoken", "refreshtoken", "cookie", "setcookie", "credential",
     "privatekey", "clientsecret", "thinking", "chainofthought", "rawprompt",
     "reasoning", "nativereasoning", "hiddenreasoning", "reasoningcontent",
+    "databaseurl", "connectionurl", "webhooksecret", "webhooksignature",
+    "signature", "exception", "excinfo",
+    "message", "messages", "customertext", "assistanttext",
+    "conversationtext", "conversationhistory",
+    "apikeys", "passwords", "secrets", "tokens", "cookies", "credentials",
+    "privatekeys", "databaseurls", "connectionurls", "webhooksecrets",
+    "webhooksignatures",
 })
 _SENSITIVE_SEGMENTS = frozenset({
     "authorization", "password", "secret", "token", "cookie", "credential",
-    "thinking", "reasoning",
+    "thinking", "reasoning", "signature", "exception",
 })
 _SENSITIVE_PAIRS = frozenset({
     ("api", "key"), ("client", "secret"), ("private", "key"),
     ("raw", "prompt"), ("chain", "thought"),
+    ("database", "url"), ("connection", "url"), ("webhook", "signature"),
 })
 
 
@@ -44,14 +53,69 @@ def _is_sensitive_key(value: object) -> bool:
     return any(pair in _SENSITIVE_PAIRS for pair in zip(segments, segments[1:]))
 
 
-def sanitize_trace_value(value: Any) -> Any:
-    """Return a recursively filtered copy without mutating stored trace payloads."""
+def is_sensitive_key(value: object) -> bool:
+    """Return whether a structured field name is prohibited from public output."""
+    return _is_sensitive_key(value)
+
+
+def sanitize_trace_value(
+    value: Any,
+    *,
+    max_depth: int = 12,
+    max_items: int = 100,
+    max_string_length: int = 20_000,
+    _depth: int = 0,
+) -> Any:
+    """Return one bounded, recursively filtered copy without mutating the input."""
+    if min(max_depth, max_items, max_string_length) < 1:
+        raise ValueError("sanitization bounds must be positive")
+    if isinstance(value, BaseException):
+        return "[exception-redacted]"
     if isinstance(value, dict):
-        return {
-            key: sanitize_trace_value(item)
-            for key, item in value.items()
+        if _depth >= max_depth - 1:
+            return "[max-depth]"
+        safe_keys = (
+            key for key in value
             if not _is_sensitive_key(key)
+        )
+        selected = heapq.nsmallest(max_items, safe_keys, key=lambda key: str(key))
+        return {
+            key: sanitize_trace_value(
+                value[key],
+                max_depth=max_depth,
+                max_items=max_items,
+                max_string_length=max_string_length,
+                _depth=_depth + 1,
+            )
+            for key in selected
         }
     if isinstance(value, (list, tuple)):
-        return [sanitize_trace_value(item) for item in value]
+        if _depth >= max_depth - 1:
+            return "[max-depth]"
+        return [
+            sanitize_trace_value(
+                item,
+                max_depth=max_depth,
+                max_items=max_items,
+                max_string_length=max_string_length,
+                _depth=_depth + 1,
+            )
+            for item in value[:max_items]
+        ]
+    if isinstance(value, set):
+        if _depth >= max_depth - 1:
+            return "[max-depth]"
+        selected = heapq.nsmallest(max_items, value, key=lambda item: str(item))
+        return [
+            sanitize_trace_value(
+                item,
+                max_depth=max_depth,
+                max_items=max_items,
+                max_string_length=max_string_length,
+                _depth=_depth + 1,
+            )
+            for item in selected
+        ]
+    if isinstance(value, str):
+        return value[:max_string_length]
     return value
