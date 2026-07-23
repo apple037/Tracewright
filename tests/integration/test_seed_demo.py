@@ -33,6 +33,9 @@ def _vector() -> str:
 
 
 async def _delete_test_source(postgres_pool) -> None:
+    from tests.integration.conftest import require_unambiguous_test_database
+
+    await require_unambiguous_test_database(postgres_pool)
     async with postgres_pool.connection() as connection:
         await connection.execute(
             "DELETE FROM rag.documents "
@@ -69,6 +72,57 @@ async def _snapshot(postgres_pool) -> dict:
             (TENANT_ID, DEMO_SOURCE_ID),
         )
         return await cursor.fetchone()
+
+
+class _FakeCursor:
+    def __init__(self, row=None):
+        self._row = row
+
+    async def fetchone(self):
+        return self._row
+
+
+class _FakeConnection:
+    def __init__(self, database_name: str):
+        self.database_name = database_name
+        self.statements: list[str] = []
+
+    async def execute(self, statement, parameters=None):
+        self.statements.append(statement)
+        if "current_database" in statement:
+            return _FakeCursor({"name": self.database_name})
+        return _FakeCursor()
+
+
+class _FakeConnectionContext:
+    def __init__(self, connection):
+        self.connection = connection
+
+    async def __aenter__(self):
+        return self.connection
+
+    async def __aexit__(self, *_):
+        return None
+
+
+class _FakePool:
+    def __init__(self, database_name: str):
+        self.connection_value = _FakeConnection(database_name)
+
+    def connection(self):
+        return _FakeConnectionContext(self.connection_value)
+
+
+@pytest.mark.asyncio
+async def test_seed_cleanup_rejects_ambiguous_database_before_delete():
+    pool = _FakePool("agent_staging")
+
+    with pytest.raises(RuntimeError, match="test databases"):
+        await _delete_test_source(pool)
+
+    assert len(pool.connection_value.statements) == 1
+    assert "current_database" in pool.connection_value.statements[0]
+    assert "DELETE" not in pool.connection_value.statements[0]
 
 
 @pytest.mark.asyncio
