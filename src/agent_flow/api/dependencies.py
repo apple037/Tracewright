@@ -3,13 +3,22 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from fastapi import Header, HTTPException, Request
+from pydantic import BaseModel
 
 from agent_flow.auth import AuthenticatedPrincipal
 
 
 Authenticator = Callable[[str], Awaitable[AuthenticatedPrincipal | None]]
+
+
+class ReadinessCheck(BaseModel):
+    status: Literal["ok", "missing", "invalid", "unavailable"]
+    role: str | None = None
+    stage: str | None = None
+    error_code: str | None = None
 
 
 @dataclass(frozen=True)
@@ -20,7 +29,7 @@ class AppServices:
     authenticate: Authenticator | None
     artifact_root: Path
     artifact_status: str
-    dependency_checks: dict[str, str]
+    dependency_checks: dict[str, ReadinessCheck]
     submissions: object | None = None
     inbound: object | None = None
     legacy_turn_timeout_seconds: float = 60.0

@@ -32,10 +32,10 @@ def test_bootstrap_components_load_offline_without_external_calls(monkeypatch):
     assert registry.resolve("response_generator").model == "Qwen/Qwen3-8B-AWQ"
     assert artifacts.strategy_prompt.ref.version
     assert app.state.services.artifact_status == "ok"
-    assert app.state.services.dependency_checks == {
-        "database": "unavailable",
-        "models": "unavailable",
-    }
+    assert {
+        name: check.status
+        for name, check in app.state.services.dependency_checks.items()
+    } == {"database": "unavailable", "models": "unavailable"}
 
 
 @pytest.mark.asyncio

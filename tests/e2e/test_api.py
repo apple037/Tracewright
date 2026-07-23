@@ -203,7 +203,7 @@ async def test_health_distinguishes_live_missing_invalid_and_ready(app_factory, 
         assert live.status_code == 200
         assert ready.status_code == expected_status
         payload = ready.json()
-        assert payload["checks"]["runtime_artifacts"] == artifact_check
+        assert payload["checks"]["runtime_artifacts"]["status"] == artifact_check
         assert "secret" not in str(payload).lower()
 
 
@@ -283,11 +283,11 @@ async def test_readiness_allowlists_names_and_normalizes_diagnostics(app_factory
         response = await client.get("/health/ready")
     assert response.status_code == 503
     assert response.json()["checks"] == {
-        "runtime_artifacts": "ok",
-        "pipeline": "ok",
-        "trace_repository": "ok",
-        "database": "unavailable",
-        "models": "ok",
+        "runtime_artifacts": {"status": "ok"},
+        "pipeline": {"status": "ok"},
+        "trace_repository": {"status": "ok"},
+        "database": {"status": "unavailable"},
+        "models": {"status": "ok"},
     }
 
 
@@ -303,5 +303,5 @@ async def test_readiness_requires_every_bootstrap_dependency(
     async with client_for(app) as client:
         response = await client.get("/health/ready")
     assert response.status_code == 503
-    assert response.json()["checks"]["database"] == expected_database
-    assert response.json()["checks"]["models"] == expected_models
+    assert response.json()["checks"]["database"]["status"] == expected_database
+    assert response.json()["checks"]["models"]["status"] == expected_models

@@ -4,7 +4,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 
-from agent_flow.api.dependencies import AppServices
+from agent_flow.api.dependencies import AppServices, ReadinessCheck
 from agent_flow.api.health import router as health_router
 from agent_flow.api.submissions import router as submissions_router
 from agent_flow.api.traces import router as traces_router
@@ -16,22 +16,28 @@ _READINESS_CHECKS = ("database", "models")
 _READINESS_STATUSES = frozenset({"ok", "missing", "invalid", "unavailable"})
 
 
-def _safe_dependency_checks(values: dict[str, str] | None) -> dict[str, str]:
-    checks = {key: "unavailable" for key in _READINESS_CHECKS}
+def _normalize_check(value: object) -> ReadinessCheck:
+    if isinstance(value, ReadinessCheck):
+        return value
+    if isinstance(value, str) and value in _READINESS_STATUSES:
+        return ReadinessCheck(status=value)
+    return ReadinessCheck(status="unavailable")
+
+
+def _safe_dependency_checks(
+    values: dict[str, object] | None,
+) -> dict[str, ReadinessCheck]:
+    checks = {key: ReadinessCheck(status="unavailable") for key in _READINESS_CHECKS}
     for key, value in (values or {}).items():
         if key in checks:
-            checks[key] = (
-                value
-                if isinstance(value, str) and value in _READINESS_STATUSES
-                else "unavailable"
-            )
+            checks[key] = _normalize_check(value)
     return checks
 
 
 def create_app(
     *, pipeline=None, traces=None, conversations=None, authenticate=None,
     artifact_root: Path = Path("config"),
-    dependency_checks: dict[str, str] | None = None,
+    dependency_checks: dict[str, object] | None = None,
     submissions=None, inbound=None,
     legacy_turn_timeout_seconds: float = 60.0,
 ) -> FastAPI:

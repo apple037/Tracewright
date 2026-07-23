@@ -4,7 +4,7 @@ from typing import Literal
 import hashlib
 import json
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -19,6 +19,14 @@ class Settings(BaseSettings):
     remote_model_api_key: str = ""
     webhook_url: str = "http://127.0.0.1:9999/mock-handoff"
     webhook_secret: str = "development-only"
+    app_runtime_mode: Literal["demo", "production"] = "demo"
+    demo_customer_token: SecretStr = SecretStr("demo-customer-token-change-me")
+    demo_admin_token: SecretStr = SecretStr("demo-admin-token-change-me")
+    demo_tenant_id: str = "t1"
+    demo_customer_id: str = "c1"
+    demo_rag_fixture: Path = Path("config/demo/rag.json")
+    demo_tool_fixture: Path = Path("config/demo/tools.json")
+    legacy_turn_timeout_seconds: float = Field(default=60.0, gt=0, le=300)
 
 
 class EndpointConfig(BaseModel):

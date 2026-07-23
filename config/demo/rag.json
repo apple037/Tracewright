@@ -1,0 +1,9 @@
+[
+  {
+    "tenant_id": "t1",
+    "source_id": "policy:refund",
+    "version": "v1",
+    "content": "Refunds are processed within 7 business days of an approved return.",
+    "score": 1.0
+  }
+]

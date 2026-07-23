@@ -179,6 +179,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
 
 
 async def _run_cli() -> None:
+    from agent_flow.runtime import build_demo_components
+
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for signal_name in (signal.SIGINT, signal.SIGTERM):
@@ -186,7 +188,17 @@ async def _run_cli() -> None:
             loop.add_signal_handler(signal_name, stop.set)
         except (NotImplementedError, RuntimeError):
             pass
-    await run_worker_runtime(settings=Settings(), stop=stop)
+    settings = Settings()
+    pool = PostgresPool(settings.database_url)
+    components = await build_demo_components(settings, pool)
+    turn_worker = TurnJobWorker(
+        repository=components.submissions,
+        pipeline=components.pipeline,
+        owner=os.getenv("WORKER_OWNER", f"{socket.gethostname()}-{os.getpid()}"),
+    )
+    await run_worker_runtime(
+        settings=settings, stop=stop, pool=pool, turn_worker=turn_worker
+    )
 
 
 def main(argv: list[str] | None = None) -> None:
