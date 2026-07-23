@@ -48,7 +48,14 @@ async def test_trace_and_incremental_events_are_customer_scoped(app_factory, pip
         "native_reasoning": "native", "hidden-reasoning": "hidden",
         "reasoningContent": "content",
         "decision_summary": {"reason_codes": ["SAFE_STRUCTURED_SUMMARY"]},
-        "nested": [{"authorization": "Bearer secret", "password": "pw"}],
+        "reason_codes": ["SAFE_TOP_LEVEL_REASON_CODE"],
+        "nested": [{
+            "authorization": "Bearer secret", "password": "pw",
+            "db_password": "db-pw", "order-api-token": "order-token",
+            "xApiKey": "api-key", "session_cookie": "session-cookie",
+            "proxyAuthorization": "proxy-auth",
+            "deeper": [{"model_reasoning": "hidden model reasoning"}],
+        }],
     }
     pipeline.traces.records[result.trace_id].events[0].payload["adversarial"] = sensitive
     stored_before = copy.deepcopy(
@@ -80,7 +87,8 @@ async def test_trace_and_incremental_events_are_customer_scoped(app_factory, pip
     assert "SAFE_STRUCTURED_SUMMARY" in events.text
     expected_filtered = {
         "decision_summary": {"reason_codes": ["SAFE_STRUCTURED_SUMMARY"]},
-        "nested": [{}],
+        "reason_codes": ["SAFE_TOP_LEVEL_REASON_CODE"],
+        "nested": [{"deeper": [{}]}],
     }
     assert visible.json()["events"][0]["payload"]["adversarial"] == expected_filtered
     assert events.json()["events"][0]["payload"]["adversarial"] == expected_filtered
@@ -192,3 +200,19 @@ async def test_readiness_allowlists_names_and_normalizes_diagnostics(app_factory
         "database": "unavailable",
         "models": "ok",
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("dependency_checks", "expected_database", "expected_models"),
+    (({}, "unavailable", "unavailable"), ({"database": "ok"}, "ok", "unavailable")),
+)
+async def test_readiness_requires_every_bootstrap_dependency(
+    app_factory, dependency_checks, expected_database, expected_models
+):
+    app = app_factory(dependency_checks=dependency_checks)
+    async with client_for(app) as client:
+        response = await client.get("/health/ready")
+    assert response.status_code == 503
+    assert response.json()["checks"]["database"] == expected_database
+    assert response.json()["checks"]["models"] == expected_models

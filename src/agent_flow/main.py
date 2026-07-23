@@ -11,18 +11,20 @@ from agent_flow.api.turns import router as turns_router
 from agent_flow.artifacts import load_runtime_artifacts
 
 
-_READINESS_CHECKS = frozenset({"database", "models"})
+_READINESS_CHECKS = ("database", "models")
 _READINESS_STATUSES = frozenset({"ok", "missing", "invalid", "unavailable"})
 
 
 def _safe_dependency_checks(values: dict[str, str] | None) -> dict[str, str]:
-    return {
-        key: value
-        if isinstance(value, str) and value in _READINESS_STATUSES
-        else "unavailable"
-        for key, value in (values or {}).items()
-        if key in _READINESS_CHECKS
-    }
+    checks = {key: "unavailable" for key in _READINESS_CHECKS}
+    for key, value in (values or {}).items():
+        if key in checks:
+            checks[key] = (
+                value
+                if isinstance(value, str) and value in _READINESS_STATUSES
+                else "unavailable"
+            )
+    return checks
 
 
 def create_app(
