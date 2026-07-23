@@ -9,6 +9,7 @@
 <body>
   <header id="app-header">
     <h1>Agent Flow · Trace Console</h1>
+    <button id="retry-button" type="button" hidden>Retry trace</button>
     <button id="simulator-toggle" type="button" aria-controls="simulator-panel" aria-expanded="false">
       Open message simulator
     </button>
@@ -24,12 +25,32 @@
     </form>
   </dialog>
 
+  <dialog id="retry-dialog" aria-labelledby="retry-title">
+    <form id="retry-form" method="dialog">
+      <h2 id="retry-title">Retry trace</h2>
+      <label for="retry-reason">Retry reason</label>
+      <textarea id="retry-reason" name="reason" required></textarea>
+      <menu>
+        <button value="cancel" type="submit">Cancel</button>
+        <button id="retry-confirm" value="confirm" type="submit">Confirm retry</button>
+      </menu>
+    </form>
+  </dialog>
+
   <main>
     <aside id="trace-list" aria-label="Trace records"></aside>
     <section id="trace-workspace" aria-live="polite"></section>
   </main>
 
-  <aside id="simulator-panel" hidden aria-label="Inbound message simulator"></aside>
+  <aside id="simulator-panel" hidden aria-label="Inbound message simulator">
+    <form id="simulator-form">
+      <label for="sim-message">Message</label>
+      <textarea id="sim-message" name="message" required></textarea>
+      <button type="submit">Send message</button>
+    </form>
+    <div id="simulator-transcript" aria-live="polite"></div>
+  </aside>
+
   <div id="alert-region" role="alert" aria-live="assertive"></div>
 
   <script type="module" src="app.js"></script>
