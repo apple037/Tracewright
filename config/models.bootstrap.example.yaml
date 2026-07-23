@@ -10,7 +10,7 @@ endpoints:
     api_key_env: LOCAL_VLLM_API_KEY
     max_concurrency: 1
   remote_models:
-    adapter: ollama_compatible
+    adapter: openai_compatible
     base_url_env: REMOTE_MODEL_BASE_URL
     api_key_env: REMOTE_MODEL_API_KEY
     max_concurrency: 6
@@ -23,6 +23,7 @@ profiles:
     request_options: {enable_thinking: false}
     temperature: 0.2
     max_tokens: 1024
+    min_context_length: 6144
     max_concurrency: 1
   remote_structured:
     endpoint: remote_models
@@ -31,11 +32,11 @@ profiles:
     capabilities: [chat, structured_json, reasoning_toggle]
     request_options: {enable_thinking: false}
     temperature: 0
-    max_tokens: 512
+    max_tokens: 2048
     max_concurrency: 2
   remote_embedding:
     endpoint: remote_models
-    model: qwen3:embedding:0.6b
+    model: qwen3-embedding-0.6b
     family: qwen
     capabilities: [embedding]
     max_concurrency: 4

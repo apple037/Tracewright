@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import httpx
@@ -8,6 +9,7 @@ from agent_flow.config import ModelConfig, Settings, load_model_config
 from agent_flow.contracts import ResponseDraft
 from agent_flow.model_registry import ModelInventoryProbe, ModelRegistry
 from agent_flow.adapters.models import EmbeddingModel, ModelGateway
+from agent_flow.pipeline.model_outputs import DialogueClassificationResult
 
 
 @pytest.fixture
@@ -22,6 +24,29 @@ def bootstrap_registry():
     return ModelRegistry(
         load_model_config(Path("config/models.bootstrap.example.yaml")), settings
     )
+
+
+def stub_openai_inventory(respx_mock, model, *, max_model_len=None):
+    entry = {"id": model}
+    if max_model_len is not None:
+        entry["max_model_len"] = max_model_len
+    return respx_mock.get("/v1/models").mock(
+        return_value=httpx.Response(200, json={"data": [entry]})
+    )
+
+
+def test_bootstrap_routes_initial_demo_models(bootstrap_registry):
+    assert bootstrap_registry.resolve("dialogue_classifier").model == "qwen3.5:9b"
+    assert (
+        bootstrap_registry.resolve("dialogue_classifier").adapter
+        == "openai_compatible"
+    )
+    assert (
+        bootstrap_registry.resolve("response_generator").model
+        == "Qwen/Qwen3-8B-AWQ"
+    )
+    assert bootstrap_registry.resolve("response_generator").min_context_length == 6144
+    assert bootstrap_registry.resolve("embedding").model == "qwen3-embedding-0.6b"
 
 
 @pytest.mark.asyncio
@@ -91,32 +116,29 @@ async def test_inventory_does_not_fuzzy_match(bootstrap_registry):
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_ollama_inventory_uses_tags_show_and_verifies_structured_json(
+async def test_remote_openai_inventory_verifies_role_specific_structured_json(
     bootstrap_registry,
 ):
-    tags = respx.get("http://remote-models:11434/api/tags").mock(
+    models = respx.get("http://remote-models:11434/v1/models").mock(
+        return_value=httpx.Response(
+            200, json={"data": [{"id": "qwen3.5:9b", "digest": "sha256:structured"}]}
+        ),
+    )
+    chat = respx.post("http://remote-models:11434/v1/chat/completions").mock(
         return_value=httpx.Response(
             200,
             json={
-                "models": [
-                    {"name": "qwen3.5:9b", "digest": "sha256:structured"},
-                    {"name": "qwen3:embedding:0.6b", "digest": "sha256:embedding"},
-                ]
-            },
-        )
-    )
-    show = respx.post("http://remote-models:11434/api/show").mock(
-        return_value=httpx.Response(
-            200, json={"capabilities": ["completion"], "details": {"family": "qwen"}}
-        )
-    )
-    chat = respx.post("http://remote-models:11434/api/chat").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "message": {
-                    "content": '{"text":"ok","citations":[],"evidence_ids":[]}'
-                }
+                "choices": [{
+                    "finish_reason": "stop",
+                    "message": {"content": (
+                        '{"intent":"answer","conversation_mode":"informational",'
+                        '"urgency":"normal","language":"en","emotion":{'
+                        '"category":"neutral","dialogue_stage":"not_applicable",'
+                        '"override":"no_emotional_content",'
+                        '"response_mode":"business_first","confidence":1,'
+                        '"evidence_spans":[],"reason_codes":["NO_EMOTIONAL_CONTENT"]}}'
+                    )},
+                }]
             },
         )
     )
@@ -125,47 +147,116 @@ async def test_ollama_inventory_uses_tags_show_and_verifies_structured_json(
         "dialogue_classifier"
     )
 
-    assert tags.called and show.called and chat.called
+    assert models.called and chat.called
     assert result.digest == "sha256:structured"
     assert result.verified_capabilities == frozenset(
         {"chat", "structured_json", "reasoning_toggle"}
     )
-    show_payload = __import__("json").loads(show.calls.last.request.content)
-    assert show_payload == {"model": "qwen3.5:9b"}
     chat_payload = __import__("json").loads(chat.calls.last.request.content)
-    assert chat_payload["format"] == ResponseDraft.model_json_schema()
-    assert chat_payload["think"] is False
+    assert (
+        chat_payload["response_format"]["json_schema"]["schema"]
+        == DialogueClassificationResult.model_json_schema()
+    )
+    assert chat_payload["chat_template_kwargs"]["enable_thinking"] is False
+    assert chat_payload["max_tokens"] == 2048
 
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_ollama_embedding_inventory_and_gateway_verify_vectors(bootstrap_registry):
-    respx.get("http://remote-models:11434/api/tags").mock(
+async def test_openai_embedding_inventory_and_gateway_verify_vectors(bootstrap_registry):
+    respx.get("http://remote-models:11434/v1/models").mock(
         return_value=httpx.Response(
             200,
-            json={
-                "models": [
-                    {"name": "qwen3:embedding:0.6b", "digest": "sha256:embedding"}
-                ]
-            },
+            json={"data": [
+                {"id": "qwen3-embedding-0.6b", "digest": "sha256:embedding"}
+            ]},
         )
     )
-    respx.post("http://remote-models:11434/api/show").mock(
-        return_value=httpx.Response(200, json={"capabilities": ["embedding"]})
-    )
-    embed_route = respx.post("http://remote-models:11434/api/embed").mock(
-        return_value=httpx.Response(200, json={"embeddings": [[0.1, 0.2, 0.3]]})
+    vector = [0.1] * 1024
+    embed_route = respx.post("http://remote-models:11434/v1/embeddings").mock(
+        return_value=httpx.Response(200, json={"data": [{"embedding": vector}]})
     )
 
     probe_result = await ModelInventoryProbe(bootstrap_registry).probe_role("embedding")
     vectors = await EmbeddingModel(bootstrap_registry).embed("embedding", ["hello"])
 
     assert probe_result.verified_capabilities == frozenset({"embedding"})
-    assert vectors == [[0.1, 0.2, 0.3]]
+    assert vectors == [vector]
     assert __import__("json").loads(embed_route.calls.last.request.content) == {
-        "model": "qwen3:embedding:0.6b",
+        "model": "qwen3-embedding-0.6b",
         "input": ["hello"],
     }
+
+
+@pytest.mark.asyncio
+@respx.mock
+@pytest.mark.parametrize("vector", [[0.0] * 1023, [float("nan")] * 1024])
+async def test_embedding_probe_rejects_invalid_shape_or_values(
+    bootstrap_registry, vector
+):
+    stub_openai_inventory(respx, "qwen3-embedding-0.6b")
+    respx.post("/v1/embeddings").mock(
+        return_value=httpx.Response(
+            200,
+            content=json.dumps({"data": [{"embedding": vector}]}).encode(),
+            headers={"content-type": "application/json"},
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="embedding.*1024 finite"):
+        await ModelInventoryProbe(bootstrap_registry).probe_role("embedding")
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_structured_probe_rejects_truncation_without_response_content(
+    bootstrap_registry,
+):
+    stub_openai_inventory(respx, "Qwen/Qwen3-8B-AWQ", max_model_len=6144)
+    secret_content = "do-not-include-model-content"
+    respx.post("/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "choices": [{
+                    "finish_reason": "length",
+                    "message": {"content": json.dumps({
+                        "text": secret_content,
+                        "citations": [],
+                        "evidence_ids": [],
+                    })},
+                }]
+            },
+        )
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            "capability probe failed for role response_generator "
+            "at capability: output truncated"
+        ),
+    ) as failure:
+        await ModelInventoryProbe(bootstrap_registry).probe_role("response_generator")
+
+    assert secret_content not in str(failure.value)
+
+
+@pytest.mark.asyncio
+@respx.mock
+@pytest.mark.parametrize("max_model_len", [None, 4096])
+async def test_local_inventory_requires_configured_minimum_context(
+    bootstrap_registry, max_model_len
+):
+    stub_openai_inventory(
+        respx, "Qwen/Qwen3-8B-AWQ", max_model_len=max_model_len
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="inventory probe failed for role response_generator at inventory",
+    ):
+        await ModelInventoryProbe(bootstrap_registry).probe_role("response_generator")
 
 
 @pytest.mark.asyncio
@@ -221,7 +312,7 @@ def test_resolution_is_flexible_and_does_not_expose_credentials(bootstrap_regist
     assert generator.endpoint_name == "local_vllm"
     assert generator.base_url == "http://localhost:8000/v1"
     assert classifier.profile_name == "remote_structured"
-    assert classifier.base_url == "http://remote-models:11434"
+    assert classifier.base_url == "http://remote-models:11434/v1"
     assert "secret" not in repr(generator)
     assert "local-secret" not in repr(generator)
     assert "remote-secret" not in repr(classifier)

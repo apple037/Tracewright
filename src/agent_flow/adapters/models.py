@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from typing import Any, TypeVar
 
 import httpx
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from agent_flow.config import ModelConfig
 from agent_flow.model_registry import (
@@ -113,13 +113,18 @@ class ModelGateway:
     async def structured(
         self, role: str, request: object, response_type: type[T]
     ) -> T:
+        parsed, _ = await self.structured_response(role, request, response_type)
+        return parsed
+
+    async def structured_response(
+        self, role: str, request: object, response_type: type[T]
+    ) -> tuple[T, ModelResponse]:
         resolved = self.registry.resolve(role)
-        if "structured_json" not in resolved.capabilities:
+        required = {"chat", "structured_json"}
+        if not required <= resolved.capabilities:
             raise RuntimeError(
-                f"role {role} lacks required capability: structured_json"
+                f"role {role} lacks required capabilities: chat, structured_json"
             )
-        if "chat" not in resolved.capabilities:
-            raise RuntimeError(f"role {role} lacks required capability: chat")
         schema = response_type.model_json_schema()
         if resolved.adapter == "openai_compatible":
             response = await self._openai_chat(
@@ -134,12 +139,18 @@ class ModelGateway:
                     },
                 },
             )
-            content = response.text
         elif resolved.adapter == "ollama_compatible":
             content = await self._ollama_chat(resolved, request, response_format=schema)
+            response = ModelResponse(text=content, finish_reason="stop")
         else:
             raise RuntimeError(f"unsupported model adapter: {resolved.adapter}")
-        return response_type.model_validate_json(content)
+        try:
+            parsed = response_type.model_validate_json(response.text)
+        except ValidationError:
+            raise RuntimeError(
+                f"structured response invalid for role {role}"
+            ) from None
+        return parsed, response
 
     async def _openai_chat(
         self,

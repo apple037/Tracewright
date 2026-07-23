@@ -61,6 +61,29 @@ def test_compose_uses_host_gateway_and_frozen_non_dev_uv_runtime():
     ]
 
 
+def test_bootstrap_examples_use_openai_compatible_remote_models():
+    model_config = yaml.safe_load(
+        (ROOT / "config" / "models.bootstrap.example.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
+
+    assert model_config["endpoints"]["remote_models"]["adapter"] == "openai_compatible"
+    assert model_config["endpoints"]["remote_models"]["max_concurrency"] == 6
+    assert model_config["profiles"]["remote_structured"]["max_tokens"] == 2048
+    assert (
+        model_config["profiles"]["remote_structured"]["request_options"][
+            "enable_thinking"
+        ]
+        is False
+    )
+    assert model_config["profiles"]["remote_embedding"]["model"] == (
+        "qwen3-embedding-0.6b"
+    )
+    assert "OpenAI-compatible remote endpoint" in env_example
+
+
 def test_container_policy_is_pinned_non_root_and_excludes_local_state():
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
     assert "ghcr.io/astral-sh/uv:0.9.30-python3.12-bookworm-slim" in dockerfile

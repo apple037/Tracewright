@@ -38,6 +38,7 @@ class ProfileConfig(BaseModel):
     max_concurrency: int = Field(ge=1)
     temperature: float = 0.0
     max_tokens: int = Field(default=512, ge=1)
+    min_context_length: int | None = Field(default=None, ge=1)
     request_options: dict[str, object] = Field(default_factory=dict)
 
 

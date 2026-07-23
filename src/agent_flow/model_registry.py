@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
 
@@ -51,6 +53,7 @@ class ResolvedModel:
     base_url: str
     temperature: float
     max_tokens: int
+    min_context_length: int | None
     request_options: dict[str, object]
     _api_key: str = field(repr=False, compare=False)
 
@@ -112,6 +115,7 @@ class ModelRegistry:
             base_url=base_url,
             temperature=profile.temperature,
             max_tokens=profile.max_tokens,
+            min_context_length=profile.min_context_length,
             request_options=dict(profile.request_options),
             _api_key=api_key,
         )
@@ -138,6 +142,14 @@ class ModelInventoryProbe:
                 digest, max_model_len = await self._require_ollama_model(resolved)
             else:  # ModelConfig prevents this, but keep the boundary explicit.
                 raise RuntimeError(f"unsupported model adapter: {resolved.adapter}")
+            if resolved.min_context_length is not None and (
+                max_model_len is None
+                or max_model_len < resolved.min_context_length
+            ):
+                raise RuntimeError(
+                    "model context length requires at least "
+                    f"{resolved.min_context_length}"
+                )
         except RuntimeError as exc:
             if str(exc).startswith("exact model not found:"):
                 raise
@@ -164,17 +176,29 @@ class ModelInventoryProbe:
                 vectors = await EmbeddingModel(
                     self.registry, timeout=self.timeout
                 ).embed(role, ["capability probe"])
-                if not vectors or not vectors[0]:
-                    raise RuntimeError("embedding probe returned an empty vector")
+                if not vectors:
+                    raise RuntimeError(
+                        "embedding capability requires exactly 1024 finite values"
+                    )
+                _validate_embedding_vector(vectors[0])
                 verified.add("embedding")
             elif "structured_json" in resolved.capabilities:
                 from agent_flow.adapters.models import ModelGateway
 
-                await ModelGateway(self.registry, timeout=self.timeout).structured(
+                response_type = ROLE_PROBE_SCHEMAS.get(role)
+                if response_type is None:
+                    raise RuntimeError(
+                        f"no structured capability schema configured for role {role}"
+                    )
+                _, response = await ModelGateway(
+                    self.registry, timeout=self.timeout
+                ).structured_response(
                     role,
                     {"messages": [{"role": "user", "content": "Return a minimal valid response."}]},
-                    ResponseDraft,
+                    response_type,
                 )
+                if response.finish_reason == "length":
+                    raise RuntimeError("output truncated")
                 verified.update({"chat", "structured_json"})
             elif "chat" in resolved.capabilities:
                 from agent_flow.adapters.models import ModelGateway
@@ -284,3 +308,38 @@ def _positive_int_or_none(value: object) -> int | None:
     if isinstance(value, int) and value > 0:
         return value
     return None
+
+
+class _RoleProbeSchemas(Mapping[str, type[BaseModel]]):
+    _schema_names = {
+        "dialogue_classifier": "DialogueClassificationResult",
+        "strategy_advisor": "StrategyProposalResult",
+        "response_generator": "ResponseDraft",
+        "response_judge": "JudgeVerdictResult",
+        "response_judge_zh_verifier": "JudgeVerdictResult",
+        "promotion_judge_primary": "JudgeVerdictResult",
+        "promotion_judge_secondary": "JudgeVerdictResult",
+    }
+
+    def __getitem__(self, role: str) -> type[BaseModel]:
+        if role == "response_generator":
+            return ResponseDraft
+        from agent_flow.pipeline import model_outputs
+
+        return getattr(model_outputs, self._schema_names[role])
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._schema_names)
+
+    def __len__(self) -> int:
+        return len(self._schema_names)
+
+
+ROLE_PROBE_SCHEMAS: Mapping[str, type[BaseModel]] = _RoleProbeSchemas()
+
+
+def _validate_embedding_vector(vector: list[float]) -> None:
+    if len(vector) != 1024 or not all(math.isfinite(value) for value in vector):
+        raise RuntimeError(
+            "embedding capability requires exactly 1024 finite values"
+        )

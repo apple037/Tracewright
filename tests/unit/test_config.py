@@ -20,7 +20,7 @@ def test_bootstrap_model_roles_are_exact():
     assert config.profiles[config.roles["response_generator"]].model == "Qwen/Qwen3-8B-AWQ"
     assert "structured_json" in config.profiles[config.roles["response_generator"]].capabilities
     assert config.profiles[config.roles["dialogue_classifier"]].model == "qwen3.5:9b"
-    assert config.profiles[config.roles["embedding"]].model == "qwen3:embedding:0.6b"
+    assert config.profiles[config.roles["embedding"]].model == "qwen3-embedding-0.6b"
     assert set(config.disabled_roles) == {"response_judge_zh_verifier", "promotion_judge_secondary"}
 
 
