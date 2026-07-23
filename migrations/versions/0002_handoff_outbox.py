@@ -1,4 +1,10 @@
-"""Add durable turn inputs and leased handoff outbox delivery."""
+"""Converge Task 9/10 storage across same-revision historical drift.
+
+Several development-era schemas were stamped ``0001_bootstrap_runtime``:
+the Task 9 schema, an older schema without ``runtime.turn_inputs``, and an
+f117-era schema with only the first lease columns.  This forward migration
+inspects the actual PostgreSQL schema and adds only what is absent.
+"""
 
 from alembic import op
 import sqlalchemy as sa
@@ -13,7 +19,30 @@ depends_on = None
 NOW = sa.text("CURRENT_TIMESTAMP")
 
 
-def upgrade() -> None:
+def _inspector():
+    return sa.inspect(op.get_bind())
+
+
+def _outbox_columns() -> dict[str, dict[str, object]]:
+    return {
+        column["name"]: column
+        for column in _inspector().get_columns("outbox", schema="notification")
+    }
+
+
+def _outbox_checks() -> set[str]:
+    return {
+        constraint["name"]
+        for constraint in _inspector().get_check_constraints(
+            "outbox", schema="notification"
+        )
+        if constraint["name"] is not None
+    }
+
+
+def _ensure_turn_inputs() -> None:
+    if "turn_inputs" in _inspector().get_table_names(schema="runtime"):
+        return
     op.create_table(
         "turn_inputs",
         sa.Column("trace_id", UUID, primary_key=True),
@@ -41,80 +70,74 @@ def upgrade() -> None:
         schema="runtime",
     )
 
-    op.alter_column(
-        "outbox", "next_attempt_at", schema="notification",
-        existing_type=sa.DateTime(timezone=True), nullable=True,
-        existing_server_default=NOW,
-    )
-    op.add_column(
-        "outbox", sa.Column("last_http_status", sa.Integer()),
-        schema="notification",
-    )
-    op.add_column(
-        "outbox", sa.Column("lock_owner", sa.Text()), schema="notification",
-    )
-    op.add_column(
-        "outbox", sa.Column("locked_at", sa.DateTime(timezone=True)),
-        schema="notification",
-    )
-    op.add_column(
-        "outbox", sa.Column("lease_expires_at", sa.DateTime(timezone=True)),
-        schema="notification",
-    )
-    op.add_column(
-        "outbox", sa.Column("claim_token", UUID), schema="notification",
-    )
-    op.add_column(
-        "outbox", sa.Column("settlement_retryable", sa.Boolean()),
-        schema="notification",
-    )
-    op.add_column(
-        "outbox", sa.Column("settlement_backoff_seconds", sa.Integer()),
-        schema="notification",
-    )
+
+def _ensure_outbox_columns() -> None:
+    columns = _outbox_columns()
+    if not columns["next_attempt_at"]["nullable"]:
+        op.alter_column(
+            "outbox", "next_attempt_at", schema="notification",
+            existing_type=sa.DateTime(timezone=True), nullable=True,
+            existing_server_default=NOW,
+        )
+    additions = {
+        "last_http_status": sa.Column("last_http_status", sa.Integer()),
+        "lock_owner": sa.Column("lock_owner", sa.Text()),
+        "locked_at": sa.Column("locked_at", sa.DateTime(timezone=True)),
+        "lease_expires_at": sa.Column(
+            "lease_expires_at", sa.DateTime(timezone=True)
+        ),
+        "claim_token": sa.Column("claim_token", UUID),
+        "settlement_retryable": sa.Column("settlement_retryable", sa.Boolean()),
+        "settlement_backoff_seconds": sa.Column(
+            "settlement_backoff_seconds", sa.Integer()
+        ),
+    }
+    for name, column in additions.items():
+        if name not in columns:
+            op.add_column("outbox", column, schema="notification")
+
+
+def _ensure_outbox_constraints() -> None:
+    checks = _outbox_checks()
+    if "ck_outbox_attempts" not in checks:
+        op.create_check_constraint(
+            "ck_outbox_attempts", "outbox", "attempts >= 0",
+            schema="notification",
+        )
+    if "ck_outbox_settlement_backoff" not in checks:
+        op.create_check_constraint(
+            "ck_outbox_settlement_backoff", "outbox",
+            "settlement_backoff_seconds IS NULL OR "
+            "settlement_backoff_seconds >= 0",
+            schema="notification",
+        )
+    if "ck_outbox_delivery_claim" not in checks:
+        op.create_check_constraint(
+            "ck_outbox_delivery_claim", "outbox",
+            "status <> 'delivering' OR (lock_owner IS NOT NULL "
+            "AND claim_token IS NOT NULL AND locked_at IS NOT NULL "
+            "AND lease_expires_at IS NOT NULL)",
+            schema="notification",
+        )
+
+
+def upgrade() -> None:
+    _ensure_turn_inputs()
+    _ensure_outbox_columns()
+    # Pre-token delivering rows cannot prove ownership. Make them safely due.
     op.execute(
         "UPDATE notification.outbox SET status = 'failed', "
-        "next_attempt_at = CURRENT_TIMESTAMP WHERE status = 'delivering'"
+        "next_attempt_at = CURRENT_TIMESTAMP, lock_owner = NULL, "
+        "locked_at = NULL, lease_expires_at = NULL, claim_token = NULL "
+        "WHERE status = 'delivering' AND claim_token IS NULL"
     )
-    op.create_check_constraint(
-        "ck_outbox_attempts", "outbox", "attempts >= 0", schema="notification"
-    )
-    op.create_check_constraint(
-        "ck_outbox_settlement_backoff", "outbox",
-        "settlement_backoff_seconds IS NULL OR settlement_backoff_seconds >= 0",
-        schema="notification",
-    )
-    op.create_check_constraint(
-        "ck_outbox_delivery_claim", "outbox",
-        "status <> 'delivering' OR (lock_owner IS NOT NULL AND claim_token IS NOT NULL "
-        "AND locked_at IS NOT NULL AND lease_expires_at IS NOT NULL)",
-        schema="notification",
-    )
+    _ensure_outbox_constraints()
 
 
 def downgrade() -> None:
-    op.drop_constraint(
-        "ck_outbox_delivery_claim", "outbox", schema="notification", type_="check"
-    )
-    op.drop_constraint(
-        "ck_outbox_settlement_backoff", "outbox",
-        schema="notification", type_="check",
-    )
-    op.drop_constraint(
-        "ck_outbox_attempts", "outbox", schema="notification", type_="check"
-    )
-    for column in (
-        "settlement_backoff_seconds", "settlement_retryable", "claim_token",
-        "lease_expires_at", "locked_at", "lock_owner", "last_http_status",
-    ):
-        op.drop_column("outbox", column, schema="notification")
-    op.execute(
-        "UPDATE notification.outbox SET next_attempt_at = CURRENT_TIMESTAMP "
-        "WHERE next_attempt_at IS NULL"
-    )
-    op.alter_column(
-        "outbox", "next_attempt_at", schema="notification",
-        existing_type=sa.DateTime(timezone=True), nullable=False,
-        existing_server_default=NOW,
-    )
-    op.drop_table("turn_inputs", schema="runtime")
+    """Preserve repaired data because 0001 has multiple historical schemas.
+
+    Dropping ``turn_inputs`` or lease/settlement columns could destroy data that
+    already belonged to a same-revision 0001 deployment.  Alembic may move the
+    version marker back, but the converged schema intentionally remains intact.
+    """

@@ -16,14 +16,15 @@ from psycopg.rows import dict_row
 VERSIONS = Path("migrations/versions")
 
 
-def test_bootstrap_revision_is_immutable_and_forward_revision_owns_new_storage():
+def test_task9_bootstrap_and_forward_compatibility_revision_are_explicit():
     bootstrap = (VERSIONS / "0001_bootstrap_runtime.py").read_text(encoding="utf-8")
     forward = (VERSIONS / "0002_handoff_outbox.py").read_text(encoding="utf-8")
-    assert '"turn_inputs"' not in bootstrap
+    assert '"turn_inputs"' in bootstrap
     assert '"claim_token"' not in bootstrap
     assert '"lease_expires_at"' not in bootstrap
     assert 'down_revision = "0001_bootstrap_runtime"' in forward
-    assert '"turn_inputs"' in forward
+    assert "same-revision historical drift" in forward
+    assert "inspect(" in forward
     assert '"claim_token"' in forward
     assert '"lease_expires_at"' in forward
 
@@ -50,18 +51,26 @@ async def _scratch_database(base_url: str, label: str):
         await connection.close()
 
 
-async def _upgrade(database_url: str, target: str) -> None:
+async def _migrate(database_url: str, action: str, target: str) -> None:
     environment = os.environ.copy()
     environment["DATABASE_URL"] = database_url
     result = await asyncio.to_thread(
         subprocess.run,
-        [sys.executable, "-m", "alembic", "upgrade", target],
+        [sys.executable, "-m", "alembic", action, target],
         cwd=Path.cwd(),
         env=environment,
         text=True,
         capture_output=True,
     )
     assert result.returncode == 0, result.stderr
+
+
+async def _upgrade(database_url: str, target: str) -> None:
+    await _migrate(database_url, "upgrade", target)
+
+
+async def _downgrade(database_url: str, target: str) -> None:
+    await _migrate(database_url, "downgrade", target)
 
 
 async def _schema_state(database_url: str) -> dict[str, object]:
@@ -78,6 +87,11 @@ async def _schema_state(database_url: str) -> dict[str, object]:
                 WHERE table_schema = 'notification' AND table_name = 'outbox'
                   AND column_name = 'claim_token'
               ) AS has_claim_token,
+              EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = 'notification' AND table_name = 'outbox'
+                  AND column_name = 'settlement_backoff_seconds'
+              ) AS has_settlement_backoff,
               (
                 SELECT is_nullable = 'YES' FROM information_schema.columns
                 WHERE table_schema = 'notification' AND table_name = 'outbox'
@@ -97,8 +111,9 @@ async def test_existing_0001_database_upgrades_to_head(test_database_url):
         await _upgrade(database_url, "0001_bootstrap_runtime")
         at_bootstrap = await _schema_state(database_url)
         assert at_bootstrap == {
-            "has_turn_inputs": False,
+            "has_turn_inputs": True,
             "has_claim_token": False,
+            "has_settlement_backoff": False,
             "next_attempt_nullable": False,
             "revision": "0001_bootstrap_runtime",
         }
@@ -106,6 +121,7 @@ async def test_existing_0001_database_upgrades_to_head(test_database_url):
         assert await _schema_state(database_url) == {
             "has_turn_inputs": True,
             "has_claim_token": True,
+            "has_settlement_backoff": True,
             "next_attempt_nullable": True,
             "revision": "0002_handoff_outbox",
         }
@@ -118,6 +134,70 @@ async def test_fresh_database_upgrades_directly_to_head(test_database_url):
         assert await _schema_state(database_url) == {
             "has_turn_inputs": True,
             "has_claim_token": True,
+            "has_settlement_backoff": True,
             "next_attempt_nullable": True,
             "revision": "0002_handoff_outbox",
         }
+
+
+@pytest.mark.asyncio
+async def test_older_0001_missing_turn_inputs_converges_to_head(test_database_url):
+    async with _scratch_database(test_database_url, "older_drift") as database_url:
+        await _upgrade(database_url, "0001_bootstrap_runtime")
+        connection = await psycopg.AsyncConnection.connect(database_url)
+        try:
+            await connection.execute("DROP TABLE runtime.turn_inputs")
+            await connection.commit()
+        finally:
+            await connection.close()
+        await _upgrade(database_url, "head")
+        assert await _schema_state(database_url) == {
+            "has_turn_inputs": True,
+            "has_claim_token": True,
+            "has_settlement_backoff": True,
+            "next_attempt_nullable": True,
+            "revision": "0002_handoff_outbox",
+        }
+
+
+@pytest.mark.asyncio
+async def test_f117_partial_outbox_0001_converges_to_head(test_database_url):
+    async with _scratch_database(test_database_url, "f117_drift") as database_url:
+        await _upgrade(database_url, "0001_bootstrap_runtime")
+        connection = await psycopg.AsyncConnection.connect(database_url)
+        try:
+            await connection.execute(
+                "ALTER TABLE notification.outbox "
+                "ALTER COLUMN next_attempt_at DROP NOT NULL, "
+                "ADD COLUMN last_http_status integer, "
+                "ADD COLUMN lock_owner text, "
+                "ADD COLUMN locked_at timestamptz, "
+                "ADD COLUMN lease_expires_at timestamptz, "
+                "ADD CONSTRAINT ck_outbox_attempts CHECK (attempts >= 0)"
+            )
+            await connection.commit()
+        finally:
+            await connection.close()
+        await _upgrade(database_url, "head")
+        assert await _schema_state(database_url) == {
+            "has_turn_inputs": True,
+            "has_claim_token": True,
+            "has_settlement_backoff": True,
+            "next_attempt_nullable": True,
+            "revision": "0002_handoff_outbox",
+        }
+
+
+@pytest.mark.asyncio
+async def test_downgrade_preserves_converged_data_bearing_schema(test_database_url):
+    async with _scratch_database(test_database_url, "downgrade") as database_url:
+        await _upgrade(database_url, "head")
+        await _downgrade(database_url, "0001_bootstrap_runtime")
+        assert await _schema_state(database_url) == {
+            "has_turn_inputs": True,
+            "has_claim_token": True,
+            "has_settlement_backoff": True,
+            "next_attempt_nullable": True,
+            "revision": "0001_bootstrap_runtime",
+        }
+        await _upgrade(database_url, "head")
