@@ -75,6 +75,8 @@ class TurnState:
     validation: Any = None
     handoff_enqueued: bool = False
     handoff_reason: str | None = None
+    delivery_disposition: str | None = None
+    suppress_handoff: bool = False
 
 
 def _causal_error(error: BaseException) -> BaseException:
@@ -466,11 +468,26 @@ class TurnPipeline:
         frozen_artifacts: Mapping[str, JSONValue],
     ):
         if retry_of is not None:
+            captured = await self.conversations.get_retry_turn_input(
+                retry_of, tenant_id=state.context.tenant_id,
+                customer_id=state.context.customer_id, bind_trace_id=state.trace_id,
+            )
+            if captured.request != state.request:
+                raise AgentError.validation(
+                    "RETRY_INPUT_MISMATCH", failure_stage="context_loader"
+                )
             snapshot = await self.conversations.get_retry_snapshot(
                 retry_of, tenant_id=state.context.tenant_id,
                 customer_id=state.context.customer_id, bind_trace_id=state.trace_id,
             )
         else:
+            await self.conversations.capture_turn_input(
+                tenant_id=state.context.tenant_id,
+                customer_id=state.context.customer_id,
+                session_id=state.request.session_id,
+                trace_id=state.trace_id,
+                request=state.request,
+            )
             snapshot = await self.conversations.get_snapshot(
                 tenant_id=state.context.tenant_id,
                 customer_id=state.context.customer_id,
@@ -483,15 +500,24 @@ class TurnPipeline:
         return snapshot
 
     async def run(
-        self, context: AuthorizedCustomerContext, request: TurnRequest, retry_of: UUID | None = None
+        self, context: AuthorizedCustomerContext, request: TurnRequest,
+        retry_of: UUID | None = None, *, retry_initiator: str | None = None,
+        retry_reason: str | None = None, delivery_disposition: str | None = None,
+        suppress_handoff: bool = False, max_retry_count: int | None = None,
     ) -> TurnResult:
         trace_id = await self.traces.start_trace(
             tenant_id=context.tenant_id, customer_id=context.customer_id,
             session_id=request.session_id, retry_of_trace_id=retry_of,
-            retry_initiator="api" if retry_of else None,
-            retry_reason="full_turn_retry" if retry_of else None,
+            retry_initiator=(retry_initiator or "api") if retry_of else None,
+            retry_reason=(retry_reason or "full_turn_retry") if retry_of else None,
+            delivery_disposition=delivery_disposition,
+            max_retry_count=max_retry_count,
         )
-        state = TurnState(trace_id=trace_id, context=context, request=request)
+        state = TurnState(
+            trace_id=trace_id, context=context, request=request,
+            delivery_disposition=delivery_disposition,
+            suppress_handoff=suppress_handoff,
+        )
         try:
             frozen_artifacts = (
                 await self._retry_artifact_metadata(state, retry_of)
@@ -622,7 +648,11 @@ class TurnPipeline:
             await self._mark_failure(state, reason, failed_node, attempt)
         safe_message = "A human specialist will review this request."
         state.handoff_reason = state.handoff_reason or reason
-        if self.handoffs is not None and not state.handoff_enqueued:
+        if (
+            self.handoffs is not None
+            and not state.handoff_enqueued
+            and not state.suppress_handoff
+        ):
             await self._retry_idempotent(
                 lambda: self.handoffs.enqueue(
                     trace_id=state.trace_id, tenant_id=state.context.tenant_id,
@@ -636,7 +666,8 @@ class TurnPipeline:
             lambda: self.traces.finish_trace(
                 state.trace_id, "failed", tenant_id=state.context.tenant_id,
                 primary_failure_event_id=state.primary_failure_event_id,
-                terminal_outcome="handoff", delivery_disposition="suppressed",
+                terminal_outcome="handoff",
+                delivery_disposition=state.delivery_disposition or "suppressed",
             )
         )
         return TurnResult(
@@ -655,22 +686,27 @@ class TurnPipeline:
         await self.run_node(
             state,
             "conversation_persistence",
-            lambda: self._retry_idempotent(
-                lambda: self.conversations.append_turn(
-                    tenant_id=state.context.tenant_id,
-                    customer_id=state.context.customer_id,
-                    session_id=state.request.session_id,
-                    trace_id=state.trace_id,
-                    customer_text=state.request.message,
-                    assistant_text=state.draft.text,
-                    citations=state.draft.citations,
+            lambda: (
+                None
+                if state.delivery_disposition == "review_required"
+                else self._retry_idempotent(
+                    lambda: self.conversations.append_turn(
+                        tenant_id=state.context.tenant_id,
+                        customer_id=state.context.customer_id,
+                        session_id=state.request.session_id,
+                        trace_id=state.trace_id,
+                        customer_text=state.request.message,
+                        assistant_text=state.draft.text,
+                        citations=state.draft.citations,
+                    )
                 )
             ),
         )
         await self._retry_idempotent(
             lambda: self.traces.finish_trace(
                 state.trace_id, "succeeded", tenant_id=state.context.tenant_id,
-                terminal_outcome="reply", delivery_disposition="deliver",
+                terminal_outcome="reply",
+                delivery_disposition=state.delivery_disposition or "deliver",
             )
         )
         return TurnResult(

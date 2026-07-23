@@ -156,6 +156,7 @@ class PostgresTraceRepository:
         retry_initiator: str | None = None,
         retry_reason: str | None = None,
         delivery_disposition: str | None = None,
+        max_retry_count: int | None = None,
     ) -> UUID:
         trace_id = uuid4()
         root_trace_id = trace_id
@@ -186,6 +187,8 @@ class PostgresTraceRepository:
                         (root_trace_id,),
                     )
                     retry_sequence = (await cursor.fetchone())["sequence"]
+                    if max_retry_count is not None and retry_sequence > max_retry_count:
+                        raise ValueError("retry lineage limit reached")
                 await connection.execute(
                     """
                     INSERT INTO observability.traces (
@@ -505,6 +508,18 @@ class PostgresTraceRepository:
             if await cursor.fetchone() is None:
                 return ()
             return await self._events(connection, trace_id, after_sequence)
+
+    async def count_retries(
+        self, root_trace_id: UUID, *, tenant_id: str, customer_id: str
+    ) -> int:
+        async with self._pool.connection() as connection:
+            cursor = await connection.execute(
+                "SELECT COUNT(*) AS count FROM observability.traces "
+                "WHERE root_trace_id = %s AND tenant_id = %s AND customer_id = %s "
+                "AND retry_sequence > 0",
+                (root_trace_id, tenant_id, customer_id),
+            )
+            return (await cursor.fetchone())["count"]
 
     async def _events(self, connection, trace_id: UUID, after_sequence: int):
         cursor = await connection.execute(

@@ -1,6 +1,6 @@
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -17,6 +17,7 @@ class MemoryTraces:
         self._event_id = 0
 
     async def start_trace(self, **scope):
+        max_retry_count = scope.pop("max_retry_count", None)
         retry_of = scope.get("retry_of_trace_id")
         if retry_of is not None:
             source = self.records.get(retry_of)
@@ -25,9 +26,22 @@ class MemoryTraces:
             ) != (scope["tenant_id"], scope["customer_id"], scope["session_id"]):
                 raise ValueError("retry source trace does not belong to this scope")
         trace_id = uuid4()
+        root_trace_id = source.root_trace_id if retry_of is not None else trace_id
+        retry_sequence = (
+            max(
+                (record.retry_sequence for record in self.records.values()
+                 if record.root_trace_id == root_trace_id),
+                default=0,
+            ) + 1
+            if retry_of is not None else 0
+        )
+        if max_retry_count is not None and retry_sequence > max_retry_count:
+            raise ValueError("retry lineage limit reached")
         self.records[trace_id] = SimpleNamespace(
             id=trace_id, spans=[], events=[], status="running", primary_failure_event_id=None,
-            terminal_outcome=None, issue_summary=None, **scope,
+            terminal_outcome=None, issue_summary=None, root_trace_id=root_trace_id,
+            retry_sequence=retry_sequence, created_at=datetime.now(timezone.utc),
+            finished_at=None, **scope,
         )
         return trace_id
 
@@ -64,6 +78,7 @@ class MemoryTraces:
             raise ValueError("event lifecycle replay conflicts")
         event = SimpleNamespace(
             id=self._event_id, node=payload.get("node"), kind=kwargs["status"],
+            sequence=len(record.events) + 1, created_at=datetime.now(timezone.utc),
             event_type=kwargs["event_type"],
             metadata=payload.get("metadata", {}), payload=payload,
             error_code=kwargs.get("error_code"), component=kwargs["component"],
@@ -89,6 +104,7 @@ class MemoryTraces:
                 return
             raise ValueError("trace is already finalized with conflicting values")
         record.status, record.primary_failure_event_id, record.terminal_outcome = status, primary_failure_event_id, terminal_outcome
+        record.finished_at = datetime.now(timezone.utc)
         record.delivery_disposition = delivery_disposition
         if primary_failure_event_id:
             event = next(e for e in record.events if e.id == primary_failure_event_id)
@@ -101,11 +117,61 @@ class MemoryTraces:
         record = self.records.get(trace_id)
         return record if record is not None and record.tenant_id == tenant_id else None
 
+    async def events_after(self, trace_id, *, tenant_id, after_sequence):
+        record = await self.get_trace(trace_id, tenant_id=tenant_id)
+        if record is None:
+            return ()
+        return tuple(event for event in record.events if event.sequence > after_sequence)
+
+    async def count_retries(self, root_trace_id, *, tenant_id, customer_id):
+        return sum(
+            record.retry_sequence > 0
+            for record in self.records.values()
+            if record.root_trace_id == root_trace_id
+            and record.tenant_id == tenant_id
+            and record.customer_id == customer_id
+        )
+
 
 class MemoryConversations:
     def __init__(self, now, traces):
         self.now, self.traces = now, traces
         self.persisted, self.turns_by_trace, self.snapshots, self.scopes = [], {}, {}, {}
+        self.inputs = {}
+
+    async def capture_turn_input(
+        self, *, tenant_id, customer_id, session_id, trace_id, request,
+        captured_at=None,
+    ):
+        from agent_flow.contracts import CapturedTurnInput
+        value = CapturedTurnInput(
+            request=request,
+            captured_at=captured_at or self.now,
+            expires_at=(captured_at or self.now) + timedelta(days=30),
+        )
+        existing = self.inputs.get(trace_id)
+        if existing is not None and existing != value:
+            raise ValueError("turn input binding conflicts")
+        self.inputs[trace_id] = value
+        self.scopes[trace_id] = (tenant_id, customer_id, session_id)
+        return value
+
+    async def get_retry_turn_input(
+        self, trace_id, *, tenant_id, customer_id, bind_trace_id=None,
+    ):
+        scope = self.scopes.get(trace_id)
+        if scope is None or scope[:2] != (tenant_id, customer_id):
+            raise ValueError("turn input does not exist in this scope")
+        value = self.inputs.get(trace_id)
+        if value is None:
+            raise ValueError("turn input does not exist in this scope")
+        if bind_trace_id is not None:
+            existing = self.inputs.get(bind_trace_id)
+            if existing is not None and existing != value:
+                raise ValueError("turn input binding conflicts")
+            self.inputs[bind_trace_id] = value
+            self.scopes[bind_trace_id] = scope
+        return value
 
     async def get_snapshot(self, *, tenant_id, customer_id, session_id, trace_id):
         messages = ["prior"]
@@ -190,3 +256,49 @@ def pipeline(fake_models):
         models=fake_models, rag=Rag(), tools=Tool(), artifacts=load_runtime_artifacts(__import__("pathlib").Path("config")),
         clock=clock, assurance_mode="bootstrap",
     )
+
+
+@pytest.fixture
+def invalid_artifact_root(tmp_path):
+    root = tmp_path / "invalid-artifacts"
+    (root / "prompts").mkdir(parents=True)
+    (root / "personas").mkdir()
+    (root / "prompts" / "strategy_selector.v1.yaml").write_text("schema_version: nope", encoding="utf-8")
+    return root
+
+
+@pytest.fixture
+def app_factory(pipeline):
+    from agent_flow.auth import AuthenticatedPrincipal
+    from agent_flow.main import create_app
+
+    principals = {
+        "customer": AuthenticatedPrincipal(
+            subject_id="customer-u1", tenant_id="t1", customer_id="c1",
+            scopes=frozenset({"turn:write", "trace:read"}),
+        ),
+        "admin": AuthenticatedPrincipal(
+            subject_id="admin-u1", tenant_id="t1", customer_id=None,
+            scopes=frozenset({"customer:act_as", "trace:read", "trace:retry"}),
+        ),
+        "other-tenant": AuthenticatedPrincipal(
+            subject_id="admin-u2", tenant_id="t2", customer_id=None,
+            scopes=frozenset({"customer:act_as", "trace:read", "trace:retry"}),
+        ),
+    }
+
+    async def authenticate(token):
+        return principals.get(token)
+
+    def factory(*, artifact_root=__import__("pathlib").Path("config"), pipeline_override=None):
+        selected = pipeline_override or pipeline
+        return create_app(
+            pipeline=selected,
+            traces=selected.traces,
+            conversations=selected.conversations,
+            authenticate=authenticate,
+            artifact_root=artifact_root,
+            dependency_checks={"database": "ok", "models": "ok"},
+        )
+
+    return factory

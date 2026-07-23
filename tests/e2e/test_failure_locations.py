@@ -5,6 +5,24 @@ from agent_flow.errors import AgentError
 
 
 @pytest.mark.asyncio
+async def test_turn_input_capture_failure_is_traced_at_first_context_node(
+    pipeline, context
+):
+    async def fail_capture(**kwargs):
+        raise OSError("turn input store unavailable")
+
+    pipeline.conversations.capture_turn_input = fail_capture
+    result = await pipeline.run(
+        context, TurnRequest(session_id="s1", message="where is my order")
+    )
+    trace = await pipeline.traces.get_trace(result.trace_id, tenant_id="t1")
+
+    assert result.handoff_status == "queued"
+    assert [span.node for span in trace.spans] == ["context_loader"]
+    assert trace.issue_summary.failed_node == "context_loader"
+
+
+@pytest.mark.asyncio
 async def test_high_risk_handoffs_before_evidence_and_names_risk_node(pipeline, context, fake_models):
     fake_models.responses["dialogue_classifier"].clear()
     fake_models.responses["dialogue_classifier"].append({

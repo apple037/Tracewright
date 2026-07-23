@@ -241,6 +241,12 @@ class TurnRequest(StrictModel):
     case_id: str | None = None
 
 
+class CapturedTurnInput(StrictModel):
+    request: TurnRequest
+    captured_at: datetime
+    expires_at: datetime
+
+
 class TurnResult(StrictModel):
     trace_id: UUID
     text: str | None

@@ -3,13 +3,112 @@ from uuid import UUID, uuid4
 
 from psycopg.types.json import Jsonb
 
-from agent_flow.contracts import ConversationSnapshot
+from agent_flow.contracts import CapturedTurnInput, ConversationSnapshot, TurnRequest
 from agent_flow.repositories.postgres import PostgresPool
 
 
 class PostgresConversationRepository:
     def __init__(self, pool: PostgresPool) -> None:
         self._pool = pool
+
+    async def capture_turn_input(
+        self, *, tenant_id: str, customer_id: str, session_id: str,
+        trace_id: UUID, request: TurnRequest, captured_at: datetime | None = None,
+    ) -> CapturedTurnInput:
+        if request.session_id != session_id:
+            raise ValueError("turn input session conflicts with trace scope")
+        async with self._pool.connection() as connection:
+            async with connection.transaction():
+                cursor = await connection.execute(
+                    "SELECT 1 FROM observability.traces WHERE id = %s AND tenant_id = %s "
+                    "AND customer_id = %s AND session_id = %s",
+                    (trace_id, tenant_id, customer_id, session_id),
+                )
+                if await cursor.fetchone() is None:
+                    raise ValueError("trace does not belong to turn input scope")
+                await connection.execute(
+                    """
+                    INSERT INTO runtime.turn_inputs (
+                        trace_id, tenant_id, customer_id, session_id, message,
+                        case_id, captured_at, expires_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, COALESCE(%s, now()),
+                              COALESCE(%s, now()) + interval '30 days')
+                    ON CONFLICT (trace_id) DO NOTHING
+                    """,
+                    (trace_id, tenant_id, customer_id, session_id, request.message,
+                     request.case_id, captured_at, captured_at),
+                )
+                cursor = await connection.execute(
+                    """
+                    SELECT session_id, message, case_id, captured_at, expires_at
+                    FROM runtime.turn_inputs
+                    WHERE trace_id = %s AND tenant_id = %s AND customer_id = %s
+                    """,
+                    (trace_id, tenant_id, customer_id),
+                )
+                row = await cursor.fetchone()
+                if row is None:
+                    raise ValueError("turn input does not exist in this scope")
+        stored = TurnRequest(
+            session_id=row["session_id"], message=row["message"], case_id=row["case_id"]
+        )
+        if stored != request:
+            raise ValueError("turn input binding conflicts")
+        return CapturedTurnInput(
+            request=stored, captured_at=row["captured_at"], expires_at=row["expires_at"]
+        )
+
+    async def get_retry_turn_input(
+        self, trace_id: UUID, *, tenant_id: str, customer_id: str,
+        bind_trace_id: UUID | None = None,
+    ) -> CapturedTurnInput:
+        async with self._pool.connection() as connection:
+            async with connection.transaction():
+                cursor = await connection.execute(
+                    """
+                    SELECT session_id, message, case_id, captured_at, expires_at
+                    FROM runtime.turn_inputs
+                    WHERE trace_id = %s AND tenant_id = %s AND customer_id = %s
+                    """,
+                    (trace_id, tenant_id, customer_id),
+                )
+                row = await cursor.fetchone()
+                if row is None:
+                    raise ValueError("turn input does not exist in this scope")
+                if row["expires_at"] <= datetime.now(row["expires_at"].tzinfo):
+                    raise ValueError("turn input has expired")
+                if bind_trace_id is not None:
+                    cursor = await connection.execute(
+                        "SELECT 1 FROM observability.traces WHERE id = %s AND tenant_id = %s "
+                        "AND customer_id = %s AND session_id = %s",
+                        (bind_trace_id, tenant_id, customer_id, row["session_id"]),
+                    )
+                    if await cursor.fetchone() is None:
+                        raise ValueError("retry trace does not belong to turn input scope")
+                    await connection.execute(
+                        """
+                        INSERT INTO runtime.turn_inputs (
+                            trace_id, tenant_id, customer_id, session_id, message,
+                            case_id, captured_at, expires_at
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (trace_id) DO NOTHING
+                        """,
+                        (bind_trace_id, tenant_id, customer_id, row["session_id"],
+                         row["message"], row["case_id"], row["captured_at"], row["expires_at"]),
+                    )
+                    cursor = await connection.execute(
+                        "SELECT session_id, message, case_id, captured_at, expires_at "
+                        "FROM runtime.turn_inputs WHERE trace_id = %s AND tenant_id = %s "
+                        "AND customer_id = %s",
+                        (bind_trace_id, tenant_id, customer_id),
+                    )
+                    bound = await cursor.fetchone()
+                    if bound is None or dict(bound) != dict(row):
+                        raise ValueError("turn input binding conflicts")
+        return CapturedTurnInput(
+            request=TurnRequest(session_id=row["session_id"], message=row["message"], case_id=row["case_id"]),
+            captured_at=row["captured_at"], expires_at=row["expires_at"],
+        )
 
     async def _ensure_conversation(
         self, connection, tenant_id: str, customer_id: str, session_id: str

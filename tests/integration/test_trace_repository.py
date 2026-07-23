@@ -182,6 +182,67 @@ async def test_manual_retry_reuses_original_context_snapshot(
 
 
 @pytest.mark.asyncio
+async def test_turn_input_is_scoped_immutable_and_can_bind_retry(
+    postgres_pool, trace_repository
+):
+    from agent_flow.contracts import TurnRequest
+
+    conversation_repository = PostgresConversationRepository(postgres_pool)
+
+    source = await trace_repository.start_trace(
+        tenant_id="t1", customer_id="c1", session_id="input-s"
+    )
+    request = TurnRequest(session_id="input-s", message="original", case_id="case-1")
+    captured = await conversation_repository.capture_turn_input(
+        tenant_id="t1", customer_id="c1", session_id="input-s",
+        trace_id=source, request=request,
+    )
+    replay = await trace_repository.start_trace(
+        tenant_id="t1", customer_id="c1", session_id="input-s",
+        retry_of_trace_id=source,
+    )
+    rebound = await conversation_repository.get_retry_turn_input(
+        source, tenant_id="t1", customer_id="c1", bind_trace_id=replay,
+    )
+
+    assert rebound == captured
+    assert rebound.request == request
+    assert await conversation_repository.get_retry_turn_input(
+        replay, tenant_id="t1", customer_id="c1"
+    ) == captured
+    with pytest.raises(ValueError, match="scope"):
+        await conversation_repository.get_retry_turn_input(
+            source, tenant_id="t2", customer_id="c1"
+        )
+    with pytest.raises(ValueError, match="conflicts"):
+        await conversation_repository.capture_turn_input(
+            tenant_id="t1", customer_id="c1", session_id="input-s",
+            trace_id=source,
+            request=TurnRequest(session_id="input-s", message="changed"),
+        )
+
+
+@pytest.mark.asyncio
+async def test_retry_limit_is_atomic_across_root_siblings(trace_repository):
+    root = await trace_repository.start_trace(
+        tenant_id="t1", customer_id="c1", session_id="limit-s"
+    )
+    for _ in range(3):
+        await trace_repository.start_trace(
+            tenant_id="t1", customer_id="c1", session_id="limit-s",
+            retry_of_trace_id=root, max_retry_count=3,
+        )
+    assert await trace_repository.count_retries(
+        root, tenant_id="t1", customer_id="c1"
+    ) == 3
+    with pytest.raises(ValueError, match="lineage limit"):
+        await trace_repository.start_trace(
+            tenant_id="t1", customer_id="c1", session_id="limit-s",
+            retry_of_trace_id=root, max_retry_count=3,
+        )
+
+
+@pytest.mark.asyncio
 async def test_turn_append_is_idempotent_by_trace_before_finalization(
     postgres_pool, trace_repository
 ):
