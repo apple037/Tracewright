@@ -1,3 +1,4 @@
+import asyncio
 import socket
 import threading
 import time
@@ -38,13 +39,16 @@ def console_url(server):
     return f"{server}/console/"
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture
 def _browser():
+    # The sync Playwright driver closes the main-thread event loop on exit; run it
+    # function-scoped and hand pytest-asyncio a fresh loop so later async tests work.
     playwright = pytest.importorskip("playwright.sync_api")
     with playwright.sync_playwright() as driver:
         browser = driver.chromium.launch()
         yield browser
         browser.close()
+    asyncio.set_event_loop(asyncio.new_event_loop())
 
 
 @pytest.fixture

@@ -182,8 +182,8 @@ async function onSimulatorSubmit(event) {
   const text = dom["sim-message"].value.trim();
   if (!text || submissionActive) return;
   const messageId = uuid();
-  state.simulator.messages = [{ role: "customer", text }];
-  renderTranscript("queued");
+  state.simulator.log = [text];
+  renderTranscript();
   const { status, body } = await requestJson("/api/v1/submissions", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -207,26 +207,31 @@ async function onSimulatorSubmit(event) {
   await pollSubmission(body.submission_id);
 }
 
-const TERMINAL_LABEL = { queued: "佇列中", running: "處理中" };
+const STATUS_LABEL = { queued: "佇列中", running: "處理中", failed: "處理失敗" };
 
-function renderTranscript(status, result) {
+// Accumulate a safe transcript: user text, status transitions, terminal reply.
+function pushTranscript(line) {
+  const log = state.simulator.log || (state.simulator.log = []);
+  if (log[log.length - 1] !== line) log.push(line);
+  renderTranscript();
+}
+
+function renderTranscript() {
   const panel = dom["simulator-transcript"];
   panel.textContent = "";
-  const message = state.simulator.messages[0];
-  if (message) {
-    const line = document.createElement("p");
-    line.textContent = message.text;
-    panel.appendChild(line);
+  for (const line of state.simulator.log || []) {
+    const paragraph = document.createElement("p");
+    paragraph.textContent = line;
+    panel.appendChild(paragraph);
   }
-  const line = document.createElement("p");
-  if (result && result.handoff && result.handoff.safe_message) {
-    line.textContent = result.handoff.safe_message;
-  } else if (result && result.text) {
-    line.textContent = result.text;
-  } else {
-    line.textContent = TERMINAL_LABEL[status] || status;
+}
+
+function transcriptLine(body) {
+  if (body.status === "completed") {
+    if (body.handoff && body.handoff.safe_message) return body.handoff.safe_message;
+    return body.text || "已完成";
   }
-  panel.appendChild(line);
+  return STATUS_LABEL[body.status] || body.status;
 }
 
 async function pollSubmission(submissionId) {
@@ -235,9 +240,9 @@ async function pollSubmission(submissionId) {
     for (let attempt = 0; attempt < 100; attempt += 1) {
       const { ok, body } = await requestJson(`/api/v1/submissions/${submissionId}`);
       if (!ok || !body) break;
-      renderTranscript(body.status, body);
+      pushTranscript(transcriptLine(body));
       if (body.status === "completed" || body.status === "failed") break;
-      await sleep(400);
+      await sleep(300);
     }
   } finally {
     submissionActive = false;
