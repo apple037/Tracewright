@@ -78,7 +78,10 @@ def client_for(app):
 async def test_manual_retry_is_admin_only_and_review_required(app_factory, pipeline):
     source = await seed_source(pipeline)
     app = app_factory()
-    body = {"reason": "  operator verified transient failure  "}
+    body = {
+        "reason": "  operator verified transient failure  ",
+        "idempotency_key": "retry-key-1",
+    }
     async with client_for(app) as client:
         forbidden = await client.post(
             f"/api/v1/traces/{source}/retry", headers={"Authorization": "Bearer customer"}, json=body
@@ -131,7 +134,7 @@ async def test_manual_retry_rejects_invalid_source(app_factory, pipeline, case, 
         response = await client.post(
             f"/api/v1/traces/{source}/retry",
             headers={"Authorization": "Bearer admin"},
-            json={"reason": reason},
+            json={"reason": reason, "idempotency_key": "retry-key-2"},
         )
     assert response.status_code == expected
     assert recording.calls == []
@@ -142,7 +145,7 @@ async def test_manual_retry_rejects_cross_tenant_and_unresolved_artifacts(app_fa
     source = await seed_source(pipeline)
     recording = RecordingRetryPipeline(pipeline)
     app = app_factory(pipeline_override=recording)
-    body = {"reason": "reviewed"}
+    body = {"reason": "reviewed", "idempotency_key": "retry-key-3"}
     async with client_for(app) as client:
         hidden = await client.post(
             f"/api/v1/traces/{source}/retry",
@@ -167,7 +170,7 @@ async def test_manual_retry_maps_atomic_lineage_limit_race_to_conflict(app_facto
         response = await client.post(
             f"/api/v1/traces/{source}/retry",
             headers={"Authorization": "Bearer admin"},
-            json={"reason": "reviewed"},
+            json={"reason": "reviewed", "idempotency_key": "retry-key-4"},
         )
     assert response.status_code == 409
 
@@ -196,7 +199,7 @@ async def test_manual_retry_rejects_each_missing_or_expired_capture_before_pipel
         response = await client.post(
             f"/api/v1/traces/{source}/retry",
             headers={"Authorization": "Bearer admin"},
-            json={"reason": "reviewed"},
+            json={"reason": "reviewed", "idempotency_key": "retry-key-5"},
         )
     assert response.status_code == expected
     assert recording.calls == []

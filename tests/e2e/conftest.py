@@ -181,6 +181,25 @@ class MemoryTraces:
             and record.customer_id == customer_id
         )
 
+    async def list_traces(
+        self, *, tenant_id, customer_id, status, before_created_at, before_id, limit,
+    ):
+        items = [
+            record
+            for record in self.records.values()
+            if record.tenant_id == tenant_id
+            and (customer_id is None or record.customer_id == customer_id)
+            and (status is None or record.status == status)
+        ]
+        items.sort(key=lambda record: (record.created_at, str(record.id)), reverse=True)
+        if before_created_at is not None:
+            items = [
+                record for record in items
+                if (record.created_at, str(record.id))
+                < (before_created_at, str(before_id))
+            ]
+        return tuple(items[:limit])
+
 
 class MemoryConversations:
     def __init__(self, now, traces):
@@ -258,6 +277,86 @@ class MemoryConversations:
         if turn["trace_id"] not in self.turns_by_trace:
             self.turns_by_trace[turn["trace_id"]] = turn
             self.persisted.append(turn)
+
+
+class MemorySubmissions:
+    """In-memory queue that executes the reserved turn inline, like the worker."""
+
+    def __init__(self, traces, pipeline):
+        self.traces = traces
+        self.pipeline = pipeline
+        self.records = {}
+        self.by_key = {}
+
+    async def enqueue(
+        self, context, message, *, retry_of_trace_id=None, retry_initiator=None,
+        retry_reason=None, delivery_disposition=None,
+    ):
+        from agent_flow.repositories.submissions import SubmissionRecord
+        from agent_flow.contracts import SubmissionResult
+
+        payload = {
+            "message": message.model_dump(mode="json"),
+            "retry": {
+                "retry_of_trace_id": (
+                    str(retry_of_trace_id) if retry_of_trace_id is not None else None
+                ),
+                "retry_initiator": retry_initiator,
+                "retry_reason": retry_reason,
+                "delivery_disposition": delivery_disposition,
+            },
+        }
+        key = (context.tenant_id, message.idempotency_key)
+        if key in self.by_key:
+            existing = self.records[self.by_key[key]]
+            if existing.customer_id != context.customer_id or existing.payload != payload:
+                raise ValueError("submission idempotency conflict")
+            return existing
+        trace_id = await self.traces.reserve_for_test(
+            tenant_id=context.tenant_id, customer_id=context.customer_id,
+            session_id=message.session_id, retry_of_trace_id=retry_of_trace_id,
+            retry_initiator=retry_initiator, retry_reason=retry_reason,
+            delivery_disposition=delivery_disposition,
+        )
+        record = self.traces.records[trace_id]
+        record.channel = message.channel
+        record.external_message_id = message.external_message_id
+        submission_id = uuid4()
+        worker_context = AuthorizedCustomerContext(
+            subject_id="turn-worker:test", tenant_id=context.tenant_id,
+            customer_id=context.customer_id,
+        )
+        result = await self.pipeline.run(
+            worker_context, message.to_turn_request(),
+            retry_of=retry_of_trace_id, trace_id=trace_id,
+            retry_initiator=retry_initiator, retry_reason=retry_reason,
+            delivery_disposition=delivery_disposition,
+            suppress_handoff=(delivery_disposition == "review_required"),
+            max_retry_count=3 if retry_of_trace_id is not None else None,
+        )
+        safe = SubmissionResult(
+            submission_id=submission_id, trace_id=result.trace_id,
+            status="completed", text=result.text, citations=result.citations,
+            handoff=result.handoff,
+        )
+        now = datetime.now(timezone.utc)
+        submission = SubmissionRecord(
+            id=submission_id, trace_id=result.trace_id, tenant_id=context.tenant_id,
+            customer_id=context.customer_id, status="completed", attempts=1,
+            payload=payload, result=safe.model_dump(mode="json"),
+            last_error_code=None, last_error_component=None, lease_expires_at=None,
+            claim_token=None, created_at=now, finished_at=now,
+            retry_of_trace_id=retry_of_trace_id,
+        )
+        self.records[submission_id] = submission
+        self.by_key[key] = submission_id
+        return submission
+
+    async def get(self, submission_id, *, tenant_id, customer_id):
+        record = self.records.get(submission_id)
+        if record is None or record.tenant_id != tenant_id or record.customer_id != customer_id:
+            return None
+        return record
 
 
 class MemoryHandoffs:
@@ -342,6 +441,10 @@ def app_factory(pipeline):
             subject_id="internal-u2", tenant_id="t1", customer_id="c2",
             scopes=frozenset({"trace:internal"}),
         ),
+        "trace-only": AuthenticatedPrincipal(
+            subject_id="trace-u1", tenant_id="t1", customer_id="c1",
+            scopes=frozenset({"trace:read"}),
+        ),
     }
 
     async def authenticate(token):
@@ -352,13 +455,20 @@ def app_factory(pipeline):
         pipeline_override=None, traces_override=None,
         dependency_checks=None,
     ):
+        from agent_flow.inbound import InboundMessageService
+
         selected = pipeline_override or pipeline
+        submissions = MemorySubmissions(selected.traces, selected)
+        inbound = InboundMessageService(submissions, poll_interval=0.001)
         return create_app(
             pipeline=selected,
             traces=traces_override or selected.traces,
             conversations=selected.conversations,
             authenticate=authenticate,
             artifact_root=artifact_root,
+            submissions=submissions,
+            inbound=inbound,
+            legacy_turn_timeout_seconds=5.0,
             dependency_checks=(
                 {"database": "ok", "models": "ok"}
                 if dependency_checks is None else dependency_checks

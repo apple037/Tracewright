@@ -9,6 +9,95 @@ def client_for(app):
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")
 
 
+def submission_payload(**overrides):
+    payload = {
+        "channel": "console",
+        "external_message_id": "m1",
+        "session_id": "s1",
+        "text": "你好",
+        "idempotency_key": "m1",
+        "metadata": {"source": "trace-console"},
+    }
+    payload.update(overrides)
+    return payload
+
+
+async def create_submission(client, *, token):
+    response = await client.post(
+        "/api/v1/submissions",
+        headers={"Authorization": f"Bearer {token}"},
+        json=submission_payload(),
+    )
+    assert response.status_code == 202
+    return response.json()
+
+
+@pytest.mark.asyncio
+async def test_submission_uses_customer_from_bearer_token(app_factory):
+    app = app_factory()
+    async with client_for(app) as client:
+        response = await client.post(
+            "/api/v1/submissions",
+            headers={"Authorization": "Bearer customer"},
+            json=submission_payload(),
+        )
+    assert response.status_code == 202
+    assert set(response.json()) == {"submission_id", "trace_id", "status"}
+
+
+@pytest.mark.asyncio
+async def test_submission_rejects_missing_scope(app_factory):
+    app = app_factory()
+    async with client_for(app) as client:
+        response = await client.post(
+            "/api/v1/submissions",
+            headers={"Authorization": "Bearer trace-only"},
+            json=submission_payload(),
+        )
+    assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_submission_replay_returns_same_receipt(app_factory):
+    app = app_factory()
+    payload = submission_payload(idempotency_key="same")
+    async with client_for(app) as client:
+        first = await client.post(
+            "/api/v1/submissions",
+            headers={"Authorization": "Bearer customer"}, json=payload,
+        )
+        second = await client.post(
+            "/api/v1/submissions",
+            headers={"Authorization": "Bearer customer"}, json=payload,
+        )
+    assert second.status_code == 202
+    assert second.json() == first.json()
+
+
+@pytest.mark.asyncio
+async def test_other_customer_cannot_read_submission(app_factory):
+    app = app_factory()
+    async with client_for(app) as client:
+        created = await create_submission(client, token="customer")
+        response = await client.get(
+            f"/api/v1/submissions/{created['submission_id']}",
+            headers={"Authorization": "Bearer internal-c2"},
+        )
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_trace_list_is_tenant_and_customer_scoped(app_factory):
+    app = app_factory()
+    async with client_for(app) as client:
+        await create_submission(client, token="customer")
+        response = await client.get(
+            "/api/v1/traces", headers={"Authorization": "Bearer internal-c2"},
+        )
+    assert response.status_code == 200
+    assert response.json()["items"] == []
+
+
 @pytest.mark.asyncio
 async def test_turn_customer_is_bound_before_pipeline(app_factory, pipeline):
     app = app_factory()

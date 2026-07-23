@@ -6,6 +6,7 @@ from fastapi import FastAPI
 
 from agent_flow.api.dependencies import AppServices
 from agent_flow.api.health import router as health_router
+from agent_flow.api.submissions import router as submissions_router
 from agent_flow.api.traces import router as traces_router
 from agent_flow.api.turns import router as turns_router
 from agent_flow.artifacts import load_runtime_artifacts
@@ -31,6 +32,8 @@ def create_app(
     *, pipeline=None, traces=None, conversations=None, authenticate=None,
     artifact_root: Path = Path("config"),
     dependency_checks: dict[str, str] | None = None,
+    submissions=None, inbound=None,
+    legacy_turn_timeout_seconds: float = 60.0,
 ) -> FastAPI:
     if not artifact_root.exists():
         artifact_status = "missing"
@@ -49,8 +52,11 @@ def create_app(
         authenticate=authenticate, artifact_root=artifact_root,
         artifact_status=artifact_status,
         dependency_checks=_safe_dependency_checks(dependency_checks),
+        submissions=submissions, inbound=inbound,
+        legacy_turn_timeout_seconds=legacy_turn_timeout_seconds,
     )
     app.include_router(turns_router)
+    app.include_router(submissions_router)
     app.include_router(traces_router)
     app.include_router(health_router)
     return app

@@ -570,6 +570,52 @@ class PostgresTraceRepository:
             )
             return (await cursor.fetchone())["count"]
 
+    async def list_traces(
+        self,
+        *,
+        tenant_id: str,
+        customer_id: str | None,
+        status: str | None,
+        before_created_at: datetime | None,
+        before_id: UUID | None,
+        limit: int,
+    ) -> tuple[TraceRecord, ...]:
+        if not 1 <= limit <= 100:
+            raise ValueError("trace list limit must be between 1 and 100")
+        if (before_created_at is None) != (before_id is None):
+            raise ValueError("trace cursor time and id must be provided together")
+        clauses = ["tenant_id = %s"]
+        values: list[object] = [tenant_id]
+        if customer_id is not None:
+            clauses.append("customer_id = %s")
+            values.append(customer_id)
+        if status is not None:
+            clauses.append("status = %s")
+            values.append(status)
+        if before_created_at is not None and before_id is not None:
+            clauses.append("(created_at, id) < (%s, %s)")
+            values.extend((before_created_at, before_id))
+        values.append(limit)
+        async with self._pool.connection() as connection:
+            cursor = await connection.execute(
+                f"""
+                SELECT id, tenant_id, customer_id, session_id, status,
+                       channel, external_message_id,
+                       terminal_outcome, primary_failure_event_id, root_trace_id,
+                       retry_of_trace_id, retry_sequence, retry_initiator,
+                       retry_reason, delivery_disposition, created_at, finished_at
+                FROM observability.traces
+                WHERE {" AND ".join(clauses)}
+                ORDER BY created_at DESC, id DESC
+                LIMIT %s
+                """,
+                tuple(values),
+            )
+            rows = await cursor.fetchall()
+        return tuple(
+            TraceRecord(**row, spans=(), events=()) for row in rows
+        )
+
     async def _events(self, connection, trace_id: UUID, after_sequence: int):
         cursor = await connection.execute(
             """

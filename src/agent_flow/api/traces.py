@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import json
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
 from uuid import UUID
@@ -11,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from agent_flow.api.dependencies import principal, require_scope, services
 from agent_flow.api.sanitization import sanitize_trace_value
 from agent_flow.auth import AuthenticatedPrincipal, bind_customer_context
+from agent_flow.contracts import InboundMessage
 from agent_flow.errors import AgentError
 
 
@@ -20,6 +23,7 @@ router = APIRouter(prefix="/api/v1")
 class ManualRetryRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     reason: str = Field(min_length=1, max_length=1000)
+    idempotency_key: str = Field(min_length=1, max_length=256)
 
     @field_validator("reason")
     @classmethod
@@ -62,6 +66,75 @@ def _public_values(value) -> dict[str, Any]:
     raw = vars(value).copy()
     raw.pop("issue_summary", None)
     return jsonable_encoder(sanitize_trace_value(raw))
+
+
+def _trace_list_scope(authenticated: AuthenticatedPrincipal) -> str | None:
+    require_scope(
+        authenticated, "trace:read", "trace:internal", "trace:admin", "trace:retry"
+    )
+    return authenticated.customer_id
+
+
+def _decode_cursor(cursor: str | None) -> tuple[datetime | None, UUID | None]:
+    if cursor is None:
+        return None, None
+    try:
+        decoded = json.loads(base64.urlsafe_b64decode(cursor.encode()).decode())
+        return datetime.fromisoformat(decoded["created_at"]), UUID(decoded["id"])
+    except (ValueError, KeyError, TypeError) as error:
+        raise HTTPException(status_code=422, detail="malformed cursor") from error
+
+
+def _encode_cursor(trace) -> str:
+    payload = json.dumps(
+        {"created_at": jsonable_encoder(trace.created_at), "id": str(trace.id)}
+    )
+    return base64.urlsafe_b64encode(payload.encode()).decode()
+
+
+def _trace_summary(trace) -> dict[str, Any]:
+    return {
+        "trace_id": str(trace.id),
+        "status": trace.status,
+        "channel": getattr(trace, "channel", None),
+        "external_message_id": getattr(trace, "external_message_id", None),
+        "terminal_outcome": getattr(trace, "terminal_outcome", None),
+        "retry_of_trace_id": (
+            str(trace.retry_of_trace_id)
+            if getattr(trace, "retry_of_trace_id", None) is not None
+            else None
+        ),
+        "delivery_disposition": getattr(trace, "delivery_disposition", None),
+        "created_at": jsonable_encoder(trace.created_at),
+    }
+
+
+@router.get("/traces")
+async def list_traces(
+    request: Request,
+    status_filter: Annotated[str | None, Query(alias="status")] = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    cursor: str | None = None,
+    authenticated: AuthenticatedPrincipal = Depends(principal),
+):
+    customer_id = _trace_list_scope(authenticated)
+    repository = services(request).traces
+    if repository is None:
+        raise HTTPException(status_code=503, detail="trace repository unavailable")
+    before_created_at, before_id = _decode_cursor(cursor)
+    records = await repository.list_traces(
+        tenant_id=authenticated.tenant_id,
+        customer_id=customer_id,
+        status=status_filter,
+        before_created_at=before_created_at,
+        before_id=before_id,
+        limit=limit,
+    )
+    next_cursor = _encode_cursor(records[-1]) if len(records) == limit else None
+    return {
+        "items": [_trace_summary(item) for item in records],
+        "next_cursor": next_cursor,
+    }
 
 
 @router.get("/traces/{trace_id}")
@@ -158,23 +231,32 @@ async def manual_retry(
     if _artifact_refs(trace) != current_refs:
         raise HTTPException(status_code=409, detail="artifact version is unresolved")
     context = _trace_access(authenticated, trace)
+    if app_services.inbound is None:
+        raise HTTPException(status_code=503, detail="submissions unavailable")
+    retry_message = InboundMessage(
+        channel="console",
+        external_message_id=f"retry:{trace.id}:{payload.idempotency_key}",
+        session_id=captured.request.session_id,
+        text=captured.request.message,
+        case_id=captured.request.case_id,
+        idempotency_key=payload.idempotency_key,
+        metadata={"source": "manual-retry"},
+    )
     try:
-        result = await app_services.pipeline.run(
+        receipt = await app_services.inbound.submit(
             context,
-            captured.request,
-            retry_of=trace.id,
+            retry_message,
+            retry_of_trace_id=trace.id,
             retry_initiator=authenticated.subject_id,
             retry_reason=payload.reason,
             delivery_disposition="review_required",
-            suppress_handoff=True,
-            max_retry_count=3,
         )
     except ValueError as error:
         if "retry lineage limit reached" not in str(error):
             raise
         raise HTTPException(status_code=409, detail="retry lineage limit reached") from error
     return {
-        "trace_id": result.trace_id,
+        "trace_id": receipt.trace_id,
         "retry_of_trace_id": trace.id,
         "delivery_disposition": "review_required",
     }

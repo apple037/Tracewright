@@ -21,6 +21,9 @@ class AppServices:
     artifact_root: Path
     artifact_status: str
     dependency_checks: dict[str, str]
+    submissions: object | None = None
+    inbound: object | None = None
+    legacy_turn_timeout_seconds: float = 60.0
 
 
 def services(request: Request) -> AppServices:
