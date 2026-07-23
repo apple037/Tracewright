@@ -18,6 +18,8 @@ class MemoryTraces:
 
     async def start_trace(self, **scope):
         max_retry_count = scope.pop("max_retry_count", None)
+        channel = scope.pop("channel", None)
+        external_message_id = scope.pop("external_message_id", None)
         retry_of = scope.get("retry_of_trace_id")
         if retry_of is not None:
             source = self.records.get(retry_of)
@@ -41,9 +43,24 @@ class MemoryTraces:
             id=trace_id, spans=[], events=[], status="running", primary_failure_event_id=None,
             terminal_outcome=None, issue_summary=None, root_trace_id=root_trace_id,
             retry_sequence=retry_sequence, created_at=datetime.now(timezone.utc),
-            finished_at=None, **scope,
+            finished_at=None, channel=channel,
+            external_message_id=external_message_id, **scope,
         )
         return trace_id
+
+    async def activate_trace(
+        self, trace_id, *, tenant_id, expected_retry_of
+    ):
+        record = self.records.get(trace_id)
+        if record is None or record.tenant_id != tenant_id:
+            raise ValueError("trace does not exist")
+        if record.retry_of_trace_id != expected_retry_of:
+            raise ValueError("trace retry lineage does not match")
+        if record.status == "running" and record.finished_at is None:
+            return
+        if record.status != "queued" or record.finished_at is not None:
+            raise ValueError("trace cannot be activated")
+        record.status = "running"
 
     async def start_span(self, trace_id, name, *, tenant_id, attempt=1, span_id=None):
         record = self.records[trace_id]
@@ -52,7 +69,8 @@ class MemoryTraces:
         span_id = span_id or uuid4()
         existing = next((s for s in record.spans if s.id == span_id), None)
         if existing is not None:
-            if (existing.name, existing.attempt) == (name, attempt): return span_id
+            if (existing.name, existing.attempt) == (name, attempt):
+                return span_id
             raise ValueError("span identity replay conflicts")
         span = SimpleNamespace(id=span_id, node=name, name=name, attempt=attempt, status="running", error_code=None)
         self.records[trace_id].spans.append(span)

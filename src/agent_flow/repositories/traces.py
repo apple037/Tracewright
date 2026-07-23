@@ -73,6 +73,8 @@ class TraceRecord:
     tenant_id: str
     customer_id: str
     session_id: str
+    channel: str | None
+    external_message_id: str | None
     status: str
     terminal_outcome: str | None
     primary_failure_event_id: int | None
@@ -145,6 +147,45 @@ class PostgresTraceRepository:
             await connection.execute(
                 "TRUNCATE observability.traces, runtime.conversations RESTART IDENTITY CASCADE"
             )
+
+    async def activate_trace(
+        self,
+        trace_id: UUID,
+        *,
+        tenant_id: str,
+        expected_retry_of: UUID | None,
+    ) -> None:
+        async with self._pool.connection() as connection:
+            async with connection.transaction():
+                cursor = await connection.execute(
+                    """
+                    UPDATE observability.traces
+                    SET status = 'running'
+                    WHERE id = %s AND tenant_id = %s AND status = 'queued'
+                      AND finished_at IS NULL
+                      AND retry_of_trace_id IS NOT DISTINCT FROM %s
+                    """,
+                    (trace_id, tenant_id, expected_retry_of),
+                )
+                if cursor.rowcount == 1:
+                    return
+                cursor = await connection.execute(
+                    """
+                    SELECT status, finished_at, retry_of_trace_id
+                    FROM observability.traces
+                    WHERE id = %s AND tenant_id = %s
+                    FOR UPDATE
+                    """,
+                    (trace_id, tenant_id),
+                )
+                trace = await cursor.fetchone()
+                if trace is None:
+                    raise ValueError("trace does not exist")
+                if trace["retry_of_trace_id"] != expected_retry_of:
+                    raise ValueError("trace retry lineage does not match")
+                if trace["status"] == "running" and trace["finished_at"] is None:
+                    return
+                raise ValueError("trace cannot be activated")
 
     async def start_trace(
         self,
@@ -475,6 +516,7 @@ class PostgresTraceRepository:
         async with self._pool.connection() as connection:
             query = """
                 SELECT id, tenant_id, customer_id, session_id, status,
+                       channel, external_message_id,
                        terminal_outcome, primary_failure_event_id, root_trace_id,
                        retry_of_trace_id, retry_sequence, retry_initiator,
                        retry_reason, delivery_disposition, created_at, finished_at
