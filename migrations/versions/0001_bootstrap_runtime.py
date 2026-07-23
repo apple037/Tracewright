@@ -271,8 +271,12 @@ def upgrade() -> None:
         sa.Column("payload", JSONB, nullable=False),
         sa.Column("status", sa.Text(), nullable=False, server_default="queued"),
         sa.Column("attempts", sa.Integer(), nullable=False, server_default="0"),
-        sa.Column("next_attempt_at", sa.DateTime(timezone=True), nullable=False, server_default=NOW),
+        sa.Column("next_attempt_at", sa.DateTime(timezone=True), server_default=NOW),
         sa.Column("last_error_code", sa.Text()),
+        sa.Column("last_http_status", sa.Integer()),
+        sa.Column("lock_owner", sa.Text()),
+        sa.Column("locked_at", sa.DateTime(timezone=True)),
+        sa.Column("lease_expires_at", sa.DateTime(timezone=True)),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=NOW),
         sa.Column("delivered_at", sa.DateTime(timezone=True)),
         sa.ForeignKeyConstraint(["trace_id"], ["observability.traces.id"]),
@@ -281,6 +285,7 @@ def upgrade() -> None:
             "status IN ('queued', 'delivering', 'delivered', 'failed')",
             name="ck_outbox_status",
         ),
+        sa.CheckConstraint("attempts >= 0", name="ck_outbox_attempts"),
         schema="notification",
     )
     op.create_index("ix_outbox_claim", "outbox", ["status", "next_attempt_at", "created_at"], schema="notification")

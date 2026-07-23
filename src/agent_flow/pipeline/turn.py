@@ -659,6 +659,8 @@ class TurnPipeline:
                     customer_id=state.context.customer_id, session_id=state.request.session_id,
                     reason_code=state.handoff_reason,
                     idempotency_key=str(state.trace_id),
+                    primary_failure_event_id=state.primary_failure_event_id,
+                    delivery_disposition=state.delivery_disposition or "suppressed",
                 )
             )
             state.handoff_enqueued = True
