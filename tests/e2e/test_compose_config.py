@@ -98,6 +98,10 @@ def test_demo_fixture_loader_is_tenant_scoped_and_deterministic():
     assert first.tool_fixtures
     assert {item.tenant_id for item in first.rag_documents} == {"t1"}
     assert {item.tenant_id for item in first.tool_fixtures} == {"t1"}
+    assert all(
+        item.source_id.startswith("agent-flow-demo:")
+        for item in first.rag_documents
+    )
     assert all(len(item.embedding) == 1024 for item in first.rag_documents)
 
 
@@ -162,6 +166,8 @@ def test_demo_seeder_upserts_database_rows_idempotently():
     assert "INSERT INTO rag.documents" in statements
     assert "INSERT INTO rag.chunks" in statements
     assert "ON CONFLICT" in statements
+    assert "WHERE rag.documents.id = EXCLUDED.id" in statements
+    assert "WHERE rag.chunks.id = EXCLUDED.id" in statements
     document_inserts = [
         parameters
         for statement, parameters in pool.connection_value.calls
@@ -171,6 +177,15 @@ def test_demo_seeder_upserts_database_rows_idempotently():
     assert len(document_inserts) == 1
     assert "mock-tool:" not in repr(document_inserts)
     assert result.tool_fixtures_loaded > 0
+
+
+def test_readme_remote_ollama_and_outbox_checks_are_endpoint_and_tenant_scoped():
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert "$remoteBase = $env:REMOTE_MODEL_BASE_URL.TrimEnd('/')" in readme
+    assert 'Invoke-RestMethod \"$remoteBase/api/tags\"' in readme
+    assert 'Invoke-RestMethod \"$remoteBase/api/show\"' in readme
+    assert "tenant_id = '<tenant-id>'" in readme
 
 
 def test_worker_module_exposes_explicit_runtime_cli():

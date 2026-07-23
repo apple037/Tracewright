@@ -121,10 +121,12 @@ docker compose --profile demo run --rm demo-seed
 ```
 
 The idempotent seed upserts only `tests/fixtures/rag.json` into tenant-scoped
-pgvector rows using deterministic offline embeddings. It validates and counts
-`tests/fixtures/tools.json`, which remains file-backed for the mock tool adapter;
-tool results are deliberately not indexed as RAG evidence. No model, remote
-RAG, tool, or webhook endpoint is called.
+pgvector rows using deterministic offline embeddings. Seeded sources use the
+`agent-flow-demo:` namespace and explicit ownership metadata; an existing
+non-demo document or chunk collision aborts and rolls back instead of being
+overwritten. It validates and counts `tests/fixtures/tools.json`, which remains
+file-backed for the mock tool adapter; tool results are deliberately not indexed
+as RAG evidence. No model, remote RAG, tool, or webhook endpoint is called.
 
 ## Model Registry and Inventory Gate
 
@@ -281,9 +283,21 @@ loop. Linux Compose does not require that Windows-only test/runtime adjustment.
 - **Compose host routing:** from the app container, verify
   `http://host.docker.internal:8000/v1/models`; never replace it with container
   localhost. Confirm `extra_hosts` is present in `docker compose config`.
-- **Remote Ollama:** run `ollama list` and
-  `ollama show qwen3.5:9b`; also verify `qwen3:embedding:0.6b`. Private/custom
-  tags must resolve on the configured remote endpoint.
+- **Remote Ollama:** query the configured endpoint rather than the CLI's
+  implicit localhost:
+
+  ```powershell
+  $remoteBase = $env:REMOTE_MODEL_BASE_URL.TrimEnd('/')
+  Invoke-RestMethod "$remoteBase/api/tags" | ConvertTo-Json -Depth 8
+  foreach ($model in @("qwen3.5:9b", "qwen3:embedding:0.6b")) {
+    $body = @{ model = $model } | ConvertTo-Json
+    Invoke-RestMethod "$remoteBase/api/show" `
+      -Method Post -ContentType application/json -Body $body |
+      ConvertTo-Json -Depth 8
+  }
+  ```
+
+  Private/custom tags must resolve on this same configured server.
 - **pgvector:** run
   `docker compose exec postgres psql -U agent -d agent -c "\dx vector"`.
 - **Migrations:** run
@@ -291,8 +305,8 @@ loop. Linux Compose does not require that Windows-only test/runtime adjustment.
   `docker compose exec postgres psql -U agent -d agent -c "select version_num from alembic_version;"`.
 - **Semaphore saturation:** compare endpoint `max_concurrency` with the sum of
   role/profile limits. The endpoint cap wins; queued calls are expected.
-- **Failed outbox:** inspect tenant-scoped rows:
-  `select id,status,attempts,last_error_code,last_http_status,next_attempt_at from notification.outbox where status='failed' order by created_at desc;`.
+- **Failed outbox:** inspect only the authorized tenant:
+  `select tenant_id,id,status,attempts,last_error_code,last_http_status,next_attempt_at from notification.outbox where tenant_id = '<tenant-id>' and status='failed' order by created_at desc;`.
 - **Native Windows psycopg loop:** use the Selector-compatible loop for explicit
   async database integration. This is not needed inside Linux containers.
 

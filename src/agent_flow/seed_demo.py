@@ -18,6 +18,13 @@ from agent_flow.repositories.postgres import PostgresPool
 
 
 EMBEDDING_DIMENSIONS = 1024
+DEMO_SOURCE_PREFIX = "agent-flow-demo:"
+DEMO_FIXTURE_OWNER = "agent_flow.seed_demo"
+DEMO_OWNERSHIP = {"demo": True, "fixture_owner": DEMO_FIXTURE_OWNER}
+
+
+class DemoSeedCollisionError(ValueError):
+    """Raised when a demo fixture key is already owned by non-demo data."""
 
 
 @dataclass(frozen=True)
@@ -89,7 +96,7 @@ def load_demo_fixtures(fixture_root: Path, *, tenant_id: str) -> DemoFixtures:
             DemoRagDocument(
                 tenant_id=tenant_id,
                 customer_id=item.get("customer_id"),
-                source_id=_required_text(item, "source_id"),
+                source_id=DEMO_SOURCE_PREFIX + _required_text(item, "source_id"),
                 version=_required_text(item, "version"),
                 content=content,
                 valid_until=(
@@ -159,6 +166,10 @@ class DemoSeeder:
     @staticmethod
     async def _upsert_document(connection, document: DemoRagDocument) -> None:
         checksum = hashlib.sha256(document.content.encode("utf-8")).hexdigest()
+        ownership = {
+            **DEMO_OWNERSHIP,
+            "fixture_type": document.fixture_type,
+        }
         requested_id = _stable_id(
             "document",
             document.tenant_id,
@@ -178,6 +189,8 @@ class DemoSeeder:
                 ingestion_status = 'ready',
                 effective_at = EXCLUDED.effective_at,
                 valid_until = EXCLUDED.valid_until
+            WHERE rag.documents.id = EXCLUDED.id
+              AND rag.documents.access_metadata @> %s
             RETURNING id
             """,
             (
@@ -187,13 +200,19 @@ class DemoSeeder:
                 document.source_id,
                 document.version,
                 checksum,
-                Jsonb({"fixture_type": document.fixture_type, "demo": True}),
+                Jsonb(ownership),
                 document.valid_until,
+                Jsonb(DEMO_OWNERSHIP),
             ),
         )
-        stored_id = (await cursor.fetchone())["id"]
+        stored = await cursor.fetchone()
+        if stored is None:
+            raise DemoSeedCollisionError(
+                "demo seed document collision: source key is not owned by this seeder"
+            )
+        stored_id = stored["id"]
         chunk_id = _stable_id("chunk", str(stored_id), "0")
-        await connection.execute(
+        cursor = await connection.execute(
             """
             INSERT INTO rag.chunks (
                 id, document_id, tenant_id, customer_id, ordinal,
@@ -205,6 +224,9 @@ class DemoSeeder:
                 content = EXCLUDED.content,
                 metadata = EXCLUDED.metadata,
                 embedding = EXCLUDED.embedding
+            WHERE rag.chunks.id = EXCLUDED.id
+              AND rag.chunks.metadata @> %s
+            RETURNING id
             """,
             (
                 chunk_id,
@@ -212,10 +234,15 @@ class DemoSeeder:
                 document.tenant_id,
                 document.customer_id,
                 document.content,
-                Jsonb({"fixture_type": document.fixture_type, "demo": True}),
+                Jsonb(ownership),
                 _vector_literal(document.embedding),
+                Jsonb(DEMO_OWNERSHIP),
             ),
         )
+        if await cursor.fetchone() is None:
+            raise DemoSeedCollisionError(
+                "demo seed chunk collision: ordinal is not owned by this seeder"
+            )
 
 
 async def _run_seed() -> DemoSeedResult:
