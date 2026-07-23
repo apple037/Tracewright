@@ -21,6 +21,8 @@ def test_secret_filter_is_recursive_copy_on_filter_and_preserves_safe_decisions(
             "webhookSecrets": ["secret"],
             "database-url": "postgresql://secret",
             "connectionURLs": ["postgresql://secret"],
+            "connection_string": "postgresql://secret",
+            "connectionStrings": ["postgresql://secret"],
             "decision_summary": "Use verified order state.",
             "reasonCodes": ["ORDER_VERIFIED"],
         },
@@ -180,6 +182,33 @@ def test_structured_log_drops_raw_conversation_fields():
     assert "assistant raw" not in output
     assert payload["decision_summary"] == "verified response"
     assert payload["reason_codes"] == ["VERIFIED"]
+
+
+def test_structured_log_normalizes_mixed_mapping_keys_and_string_key_wins_collision():
+    first_fields = {"data": {2: "integer value", "2": "string value", "a": 1}}
+    second_fields = {"data": {"a": 1, "2": "string value", 2: "integer value"}}
+
+    def render(fields):
+        record = logging.LogRecord(
+            name="agent_flow",
+            level=logging.INFO,
+            pathname=__file__,
+            lineno=1,
+            msg="mixed keys",
+            args=(),
+            exc_info=None,
+        )
+        record.created = 1_700_000_000.0
+        record.event = "tool.result"
+        record.fields = fields
+        return StructuredJsonFormatter().format(record)
+
+    first = render(first_fields)
+    second = render(second_fields)
+
+    assert first == second
+    assert json.loads(first)["data"] == {"2": "string value", "a": 1}
+    assert first_fields["data"][2] == "integer value"
 
 
 def test_json_logging_handler_writes_to_stdout():

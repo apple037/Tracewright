@@ -17,7 +17,7 @@ _SENSITIVE_ALIASES = frozenset({
     "conversationtext", "conversationhistory",
     "apikeys", "passwords", "secrets", "tokens", "cookies", "credentials",
     "privatekeys", "databaseurls", "connectionurls", "webhooksecrets",
-    "webhooksignatures",
+    "webhooksignatures", "connectionstring", "connectionstrings",
 })
 _SENSITIVE_SEGMENTS = frozenset({
     "authorization", "password", "secret", "token", "cookie", "credential",
@@ -27,6 +27,7 @@ _SENSITIVE_PAIRS = frozenset({
     ("api", "key"), ("client", "secret"), ("private", "key"),
     ("raw", "prompt"), ("chain", "thought"),
     ("database", "url"), ("connection", "url"), ("webhook", "signature"),
+    ("connection", "string"),
 })
 
 
@@ -58,6 +59,17 @@ def is_sensitive_key(value: object) -> bool:
     return _is_sensitive_key(value)
 
 
+def _mapping_key_rank(value: object) -> tuple[str, int, str, str]:
+    """Prefer an exact string key when multiple keys stringify identically."""
+    value_type = type(value)
+    return (
+        str(value),
+        0 if isinstance(value, str) else 1,
+        value_type.__module__,
+        value_type.__qualname__,
+    )
+
+
 def sanitize_trace_value(
     value: Any,
     *,
@@ -78,17 +90,20 @@ def sanitize_trace_value(
             key for key in value
             if not _is_sensitive_key(key)
         )
-        selected = heapq.nsmallest(max_items, safe_keys, key=lambda key: str(key))
-        return {
-            key: sanitize_trace_value(
+        selected = heapq.nsmallest(max_items, safe_keys, key=_mapping_key_rank)
+        sanitized: dict[str, Any] = {}
+        for key in selected:
+            normalized = str(key)
+            if normalized in sanitized:
+                continue
+            sanitized[normalized] = sanitize_trace_value(
                 value[key],
                 max_depth=max_depth,
                 max_items=max_items,
                 max_string_length=max_string_length,
                 _depth=_depth + 1,
             )
-            for key in selected
-        }
+        return sanitized
     if isinstance(value, (list, tuple)):
         if _depth >= max_depth - 1:
             return "[max-depth]"

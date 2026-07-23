@@ -274,3 +274,55 @@ async def test_terminal_outbox_deletion_is_bounded_and_not_counted_as_active(
     assert second.terminal_outbox_deleted == 1
     assert second.traces_deleted == 1
     assert second.traces_deferred_terminal_outbox == 0
+
+
+@pytest.mark.asyncio
+async def test_active_retry_child_defers_itself_and_root_without_fk_failure(
+    postgres_pool,
+):
+    root_id, retry_id = uuid4(), uuid4()
+    async with postgres_pool.connection() as connection:
+        async with connection.transaction():
+            await connection.execute(
+                """
+                INSERT INTO observability.traces (
+                    id, tenant_id, customer_id, session_id, root_trace_id,
+                    status, finished_at, expires_at
+                ) VALUES (%s, %s, 'customer', 'lineage', %s, 'succeeded', now(),
+                          now() - interval '1 day')
+                """,
+                (root_id, TENANT, root_id),
+            )
+            await connection.execute(
+                """
+                INSERT INTO observability.traces (
+                    id, tenant_id, customer_id, session_id, root_trace_id,
+                    retry_of_trace_id, retry_sequence, status, finished_at, expires_at
+                ) VALUES (%s, %s, 'customer', 'lineage', %s, %s, 1,
+                          'failed', now(), now() - interval '1 day')
+                """,
+                (retry_id, TENANT, root_id, root_id),
+            )
+            await connection.execute(
+                """
+                INSERT INTO notification.outbox (
+                    id, tenant_id, customer_id, trace_id, idempotency_key,
+                    payload, status, next_attempt_at
+                ) VALUES (%s, %s, 'customer', %s, %s, '{}'::jsonb,
+                          'queued', now())
+                """,
+                (uuid4(), TENANT, retry_id, f"active-retry-{retry_id}"),
+            )
+
+    result = await PostgresRetentionRepository(postgres_pool).cleanup_batch(
+        limit=10, tenant_id=TENANT
+    )
+
+    assert result.traces_deleted == 0
+    assert result.traces_deferred_active_outbox == 1
+    async with postgres_pool.connection() as connection:
+        cursor = await connection.execute(
+            "SELECT id FROM observability.traces WHERE id = ANY(%s)",
+            ([root_id, retry_id],),
+        )
+        assert {row["id"] for row in await cursor.fetchall()} == {root_id, retry_id}

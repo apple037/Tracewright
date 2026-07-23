@@ -171,10 +171,9 @@ class PostgresRetentionRepository:
                                 child.root_trace_id = candidate.id
                                 OR child.retry_of_trace_id = candidate.id
                               )
-                              AND NOT (child.id = ANY(%s))
                           )
                         """,
-                        (trace_ids, trace_ids),
+                        (trace_ids,),
                     )
                     counts["traces_deleted"] = cursor.rowcount
                 else:
