@@ -1,10 +1,14 @@
 import hashlib
 import json
+import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Protocol, Self
+from typing import TYPE_CHECKING, Any, Protocol, Self
 
 from pydantic import Field
+
+if TYPE_CHECKING:
+    from agent_flow.observability import OperationTelemetry
 
 from agent_flow.auth import AuthorizedCustomerContext
 from agent_flow.contracts import (
@@ -90,11 +94,13 @@ class MockRagClient:
         records: tuple[_RagFixture, ...],
         *,
         as_of: datetime = FIXTURE_RETRIEVED_AT,
+        telemetry: "OperationTelemetry | None" = None,
     ) -> None:
         if as_of.tzinfo is None or as_of.utcoffset() is None:
             raise ValueError("as_of must be timezone-aware")
         self._records = records
         self._as_of = as_of
+        self.telemetry = telemetry
 
     @classmethod
     def from_fixture(
@@ -102,16 +108,19 @@ class MockRagClient:
         path: str | Path,
         *,
         as_of: datetime = FIXTURE_RETRIEVED_AT,
+        telemetry: "OperationTelemetry | None" = None,
     ) -> Self:
         return cls(
             tuple(_RagFixture.model_validate(row) for row in _fixture_payload(path)),
             as_of=as_of,
+            telemetry=telemetry,
         )
 
     async def search(
         self, context: AuthorizedCustomerContext, request: RagSearchRequest
     ) -> RagSearchResult:
         _require_context(context)
+        started = time.monotonic()
         eligible = (
             record
             for record in self._records
@@ -129,6 +138,14 @@ class MockRagClient:
             ),
         )
         items = tuple(self._evidence(record) for record in ordered[: request.limit])
+        if self.telemetry is not None:
+            await self.telemetry.record_rag(
+                query=request.query,
+                result_count=len(items),
+                source_ids=[item.source_id for item in items],
+                duration_ms=int((time.monotonic() - started) * 1000),
+                status="completed",
+            )
         return RagSearchResult(items=items)
 
     def _evidence(self, record: _RagFixture) -> EvidenceItem:
@@ -153,19 +170,32 @@ class MockRagClient:
 
 
 class MockToolClient:
-    def __init__(self, records: tuple[_ToolFixture, ...]) -> None:
+    def __init__(
+        self,
+        records: tuple[_ToolFixture, ...],
+        *,
+        telemetry: "OperationTelemetry | None" = None,
+    ) -> None:
         self._records = records
+        self.telemetry = telemetry
 
     @classmethod
-    def from_fixture(cls, path: str | Path) -> Self:
+    def from_fixture(
+        cls,
+        path: str | Path,
+        *,
+        telemetry: "OperationTelemetry | None" = None,
+    ) -> Self:
         return cls(
-            tuple(_ToolFixture.model_validate(row) for row in _fixture_payload(path))
+            tuple(_ToolFixture.model_validate(row) for row in _fixture_payload(path)),
+            telemetry=telemetry,
         )
 
     async def call(
         self, context: AuthorizedCustomerContext, request: ToolCallRequest
     ) -> ToolCallResult:
         _require_context(context)
+        started = time.monotonic()
         requested_arguments = _canonical_json(request.arguments)
         record = next(
             (
@@ -179,6 +209,13 @@ class MockToolClient:
             None,
         )
         if record is None:
+            if self.telemetry is not None:
+                await self.telemetry.record_tool(
+                    tool=request.tool,
+                    arguments=request.arguments,
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                    status="failed",
+                )
             raise LookupError("tool fixture not found in authorized scope")
 
         content = _canonical_json(record.result)
@@ -206,4 +243,13 @@ class MockToolClient:
                 "freshness_seconds": freshness_seconds,
             },
         )
+        if self.telemetry is not None:
+            await self.telemetry.record_tool(
+                tool=request.tool,
+                arguments=request.arguments,
+                duration_ms=int((time.monotonic() - started) * 1000),
+                status="completed",
+                result_source_id=evidence.source_id,
+                freshness_seconds=freshness_seconds,
+            )
         return ToolCallResult(tool=request.tool, evidence=evidence)

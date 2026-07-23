@@ -16,6 +16,11 @@ from agent_flow.contracts import (
     ConversationMode,
 )
 from agent_flow.errors import AgentError
+from agent_flow.observability import (
+    NodeTraceContext,
+    OperationTelemetry,
+    summarize_node_result,
+)
 from agent_flow.pipeline.classify import classify_dialogue
 from agent_flow.pipeline.evidence import collect_evidence, plan_evidence, validate_evidence
 from agent_flow.pipeline.respond import generate_response, repair_response, select_strategy
@@ -134,6 +139,7 @@ class TurnPipeline:
     def __init__(
         self, *, traces, conversations, handoffs, models, rag, tools,
         artifacts: RuntimeArtifacts | None, clock, assurance_mode: str,
+        telemetry: "OperationTelemetry | None" = None,
     ) -> None:
         if assurance_mode not in {"bootstrap", "dual_judge"}:
             raise ValueError("assurance_mode must be 'bootstrap' or 'dual_judge'")
@@ -146,12 +152,14 @@ class TurnPipeline:
         self.artifacts = artifacts
         self.clock = clock
         self.assurance_mode = assurance_mode
+        self.telemetry = telemetry
         self._cleanup_tasks: set[asyncio.Task] = set()
 
     async def _event(
         self, state: TurnState, span_id: UUID, node: str, status: str, *,
         attempt: int, metadata: Mapping[str, JSONValue] | None = None,
         error: BaseException | None = None,
+        summary: Mapping[str, JSONValue] | None = None,
     ):
         error_code = None
         component = node
@@ -164,6 +172,8 @@ class TurnPipeline:
         }
         if metadata:
             payload["metadata"] = dict(metadata)
+        if summary:
+            payload.update(summary)
         if error is not None:
             payload["failure_stage"] = node
             payload["operation"] = operation
@@ -199,9 +209,25 @@ class TurnPipeline:
                     metadata=metadata,
                 )
             )
-            pending_or_value = operation()
-            value = await pending_or_value if isawaitable(pending_or_value) else pending_or_value
+            if self.telemetry is not None:
+                node_context = NodeTraceContext(
+                    trace_id=state.trace_id, span_id=span_id,
+                    tenant_id=state.context.tenant_id, node=name, attempt=attempt,
+                )
+                async with self.telemetry.bind_node(node_context):
+                    pending_or_value = operation()
+                    value = (
+                        await pending_or_value
+                        if isawaitable(pending_or_value) else pending_or_value
+                    )
+            else:
+                pending_or_value = operation()
+                value = (
+                    await pending_or_value
+                    if isawaitable(pending_or_value) else pending_or_value
+                )
             operation_done = True
+            summary = summarize_node_result(name, value) or None
             await self._retry_idempotent(
                 lambda: self.traces.finish_span(
                     span_id, "completed", tenant_id=state.context.tenant_id
@@ -210,7 +236,7 @@ class TurnPipeline:
             await self._retry_idempotent(
                 lambda: self._event(
                     state, span_id, name, "completed", attempt=attempt,
-                    metadata=metadata,
+                    metadata=metadata, summary=summary,
                 )
             )
         except asyncio.CancelledError as error:

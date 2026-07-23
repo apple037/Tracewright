@@ -219,6 +219,24 @@ async def test_run_node_wraps_explicit_sync_and_async_closures(
 
 
 @pytest.mark.asyncio
+async def test_run_node_merges_safe_node_summary_into_completed_event(
+    pipeline_for_run_node, trace_state, trace_spy
+):
+    verdict = ValidationResult(
+        passed=True, failed_criteria=(), confidence=0.9,
+        reason_codes=("GROUNDED",), assurance="reduced_assurance",
+    )
+    await pipeline_for_run_node.run_node(
+        trace_state, "response_validator", lambda: verdict
+    )
+    completed = trace_spy.events[-1]
+    assert completed.status == "completed"
+    assert completed.payload["decision_summary"] == "response accepted"
+    assert completed.payload["reason_codes"] == ["GROUNDED"]
+    assert "text" not in completed.payload
+
+
+@pytest.mark.asyncio
 async def test_run_node_rejects_prompt_bodies_from_trace_metadata(
     pipeline_for_run_node, trace_state
 ):

@@ -4,7 +4,7 @@ import asyncio
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import httpx
 from pydantic import BaseModel, ValidationError
@@ -17,6 +17,9 @@ from agent_flow.model_registry import (
     _authorization_header,
 )
 from agent_flow.retry import CapacityWait
+
+if TYPE_CHECKING:
+    from agent_flow.observability import OperationTelemetry
 
 
 T = TypeVar("T", bound=BaseModel)
@@ -94,21 +97,53 @@ class ModelGateway:
         *,
         timeout: float = 30.0,
         acquire_timeout_ms: int = 5000,
+        telemetry: "OperationTelemetry | None" = None,
     ):
         self.registry = registry
         self.timeout = timeout
         self.acquire_timeout_ms = acquire_timeout_ms
+        self.telemetry = telemetry
+
+    async def _emit_model(
+        self,
+        resolved: ResolvedModel,
+        response: ModelResponse | None,
+        started: float,
+        status: str,
+    ) -> None:
+        if self.telemetry is None:
+            return
+        await self.telemetry.record_model(
+            role=resolved.role,
+            profile=resolved.profile_name,
+            model=resolved.model,
+            duration_ms=int((time.monotonic() - started) * 1000),
+            input_tokens=response.input_tokens if response else None,
+            output_tokens=response.output_tokens if response else None,
+            finish_reason=response.finish_reason if response else None,
+            status=status,
+        )
 
     async def complete(self, role: str, request: object) -> str:
         resolved = self.registry.resolve(role)
         if "chat" not in resolved.capabilities:
             raise RuntimeError(f"role {role} lacks required capability: chat")
-        if resolved.adapter == "openai_compatible":
-            response = await self._openai_chat(resolved, request)
-            return response.text
-        if resolved.adapter == "ollama_compatible":
-            return await self._ollama_chat(resolved, request)
-        raise RuntimeError(f"unsupported model adapter: {resolved.adapter}")
+        started = time.monotonic()
+        try:
+            if resolved.adapter == "openai_compatible":
+                response = await self._openai_chat(resolved, request)
+            elif resolved.adapter == "ollama_compatible":
+                response = ModelResponse(
+                    text=await self._ollama_chat(resolved, request),
+                    finish_reason="stop",
+                )
+            else:
+                raise RuntimeError(f"unsupported model adapter: {resolved.adapter}")
+        except Exception:
+            await self._emit_model(resolved, None, started, "failed")
+            raise
+        await self._emit_model(resolved, response, started, "completed")
+        return response.text
 
     async def structured(
         self, role: str, request: object, response_type: type[T]
@@ -126,24 +161,32 @@ class ModelGateway:
                 f"role {role} lacks required capabilities: chat, structured_json"
             )
         schema = response_type.model_json_schema()
-        if resolved.adapter == "openai_compatible":
-            response = await self._openai_chat(
-                resolved,
-                request,
-                response_format={
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": response_type.__name__,
-                        "strict": True,
-                        "schema": schema,
+        started = time.monotonic()
+        try:
+            if resolved.adapter == "openai_compatible":
+                response = await self._openai_chat(
+                    resolved,
+                    request,
+                    response_format={
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": response_type.__name__,
+                            "strict": True,
+                            "schema": schema,
+                        },
                     },
-                },
-            )
-        elif resolved.adapter == "ollama_compatible":
-            content = await self._ollama_chat(resolved, request, response_format=schema)
-            response = ModelResponse(text=content, finish_reason="stop")
-        else:
-            raise RuntimeError(f"unsupported model adapter: {resolved.adapter}")
+                )
+            elif resolved.adapter == "ollama_compatible":
+                content = await self._ollama_chat(
+                    resolved, request, response_format=schema
+                )
+                response = ModelResponse(text=content, finish_reason="stop")
+            else:
+                raise RuntimeError(f"unsupported model adapter: {resolved.adapter}")
+        except Exception:
+            await self._emit_model(resolved, None, started, "failed")
+            raise
+        await self._emit_model(resolved, response, started, "completed")
         try:
             parsed = response_type.model_validate_json(response.text)
         except ValidationError:
