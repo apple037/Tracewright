@@ -16,6 +16,7 @@ from agent_flow.repositories.retention import (
     PostgresRetentionRepository,
     RetentionResult,
 )
+from agent_flow.turn_worker import TurnJobWorker
 
 
 class HandoffOutboxWorker:
@@ -136,6 +137,7 @@ async def run_worker_runtime(
     stop: asyncio.Event,
     pool: PostgresPool | None = None,
     webhook: HandoffWebhook | None = None,
+    turn_worker: TurnJobWorker | None = None,
 ) -> None:
     runtime_pool = pool or PostgresPool(settings.database_url)
     runtime_webhook = webhook or HandoffWebhook(
@@ -158,6 +160,8 @@ async def run_worker_runtime(
         async with asyncio.TaskGroup() as tasks:
             tasks.create_task(outbox_worker.run(stop))
             tasks.create_task(_run_retention_loop(retention_worker, stop))
+            if turn_worker is not None:
+                tasks.create_task(turn_worker.run(stop))
     finally:
         await runtime_webhook.close()
         if opened:

@@ -501,18 +501,40 @@ class TurnPipeline:
 
     async def run(
         self, context: AuthorizedCustomerContext, request: TurnRequest,
-        retry_of: UUID | None = None, *, retry_initiator: str | None = None,
+        retry_of: UUID | None = None, *, trace_id: UUID | None = None,
+        retry_initiator: str | None = None,
         retry_reason: str | None = None, delivery_disposition: str | None = None,
         suppress_handoff: bool = False, max_retry_count: int | None = None,
+        finalize_on_cancellation: bool = True,
     ) -> TurnResult:
-        trace_id = await self.traces.start_trace(
-            tenant_id=context.tenant_id, customer_id=context.customer_id,
-            session_id=request.session_id, retry_of_trace_id=retry_of,
-            retry_initiator=(retry_initiator or "api") if retry_of else None,
-            retry_reason=(retry_reason or "full_turn_retry") if retry_of else None,
-            delivery_disposition=delivery_disposition,
-            max_retry_count=max_retry_count,
-        )
+        if trace_id is None:
+            trace_id = await self.traces.start_trace(
+                tenant_id=context.tenant_id, customer_id=context.customer_id,
+                session_id=request.session_id, retry_of_trace_id=retry_of,
+                retry_initiator=(retry_initiator or "api") if retry_of else None,
+                retry_reason=(retry_reason or "full_turn_retry") if retry_of else None,
+                delivery_disposition=delivery_disposition,
+                max_retry_count=max_retry_count,
+            )
+        else:
+            reserved = await self.traces.get_trace(
+                trace_id, tenant_id=context.tenant_id
+            )
+            if (
+                reserved is None
+                or reserved.customer_id != context.customer_id
+                or reserved.session_id != request.session_id
+            ):
+                raise AgentError.auth(
+                    "AUTH_SCOPE_CORRUPTION",
+                    failure_stage="context_loader",
+                    component="turn_worker",
+                )
+            await self.traces.activate_trace(
+                trace_id,
+                tenant_id=context.tenant_id,
+                expected_retry_of=retry_of,
+            )
         state = TurnState(
             trace_id=trace_id, context=context, request=request,
             delivery_disposition=delivery_disposition,
@@ -605,16 +627,19 @@ class TurnPipeline:
                 )
             return await self._finalize(state)
         except asyncio.CancelledError:
-            await self._bounded_cleanup(
-                self._retry_idempotent(
-                    lambda: self.traces.finish_trace(
-                        state.trace_id, "failed", tenant_id=state.context.tenant_id,
-                        primary_failure_event_id=state.primary_failure_event_id,
-                        terminal_outcome="cancelled", delivery_disposition="suppressed",
-                    ),
-                    retry_cancellation=True,
+            if finalize_on_cancellation:
+                await self._bounded_cleanup(
+                    self._retry_idempotent(
+                        lambda: self.traces.finish_trace(
+                            state.trace_id, "failed",
+                            tenant_id=state.context.tenant_id,
+                            primary_failure_event_id=state.primary_failure_event_id,
+                            terminal_outcome="cancelled",
+                            delivery_disposition="suppressed",
+                        ),
+                        retry_cancellation=True,
+                    )
                 )
-            )
             raise
         except AgentError as error:
             return await self._handoff(

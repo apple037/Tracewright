@@ -4,7 +4,13 @@ import pytest
 import asyncio
 
 from agent_flow.auth import AuthorizedCustomerContext
-from agent_flow.contracts import TurnRequest
+from agent_flow.contracts import (
+    AssuranceMetadata,
+    ResponseDraft,
+    TurnRequest,
+    TurnResult,
+    ValidationResult,
+)
 from agent_flow.pipeline.turn import TurnPipeline, TurnState
 from agent_flow.errors import AgentError
 
@@ -30,6 +36,160 @@ def test_turn_pipeline_is_exported_from_pipeline_package():
     from agent_flow.pipeline import TurnPipeline as ExportedTurnPipeline
 
     assert ExportedTurnPipeline is TurnPipeline
+
+
+@pytest.mark.asyncio
+async def test_pipeline_activates_reserved_trace_without_creating_another(
+    pipeline_for_run_node,
+    trace_state,
+    monkeypatch,
+    classification,
+    order_plan,
+    fresh_collected_evidence,
+    validated_evidence,
+    transactional_strategy,
+):
+    trace_id = uuid4()
+    activations = []
+    starts = []
+
+    async def activate(
+        activated_trace_id, *, tenant_id, expected_retry_of
+    ):
+        activations.append(
+            (activated_trace_id, tenant_id, expected_retry_of)
+        )
+
+    async def start_trace(**scope):
+        starts.append(scope)
+        return uuid4()
+
+    async def get_trace(loaded_trace_id, *, tenant_id):
+        assert loaded_trace_id == trace_id
+        assert tenant_id == trace_state.context.tenant_id
+        return __import__("types").SimpleNamespace(
+            customer_id=trace_state.context.customer_id,
+            session_id=trace_state.request.session_id,
+        )
+
+    pipeline_for_run_node.traces.activate_trace = activate
+    pipeline_for_run_node.traces.start_trace = start_trace
+    pipeline_for_run_node.traces.get_trace = get_trace
+    results = iter(
+        [
+            object(),
+            classification,
+            object(),
+            order_plan,
+            fresh_collected_evidence,
+            validated_evidence,
+            transactional_strategy,
+            ResponseDraft(text="safe reply"),
+            ValidationResult(
+                passed=True,
+                failed_criteria=(),
+                confidence=1,
+                reason_codes=(),
+                assurance="reduced_assurance",
+            ),
+        ]
+    )
+
+    async def run_node(*_args, **_kwargs):
+        return next(results)
+
+    async def finalize(state):
+        return TurnResult(
+            trace_id=state.trace_id,
+            text="safe reply",
+            assurance=AssuranceMetadata(
+                mode="reduced_assurance", judges=("response_judge",)
+            ),
+        )
+
+    monkeypatch.setattr(pipeline_for_run_node, "run_node", run_node)
+    monkeypatch.setattr(pipeline_for_run_node, "_finalize", finalize)
+    pipeline_for_run_node.artifacts = __import__(
+        "agent_flow.artifacts", fromlist=["load_runtime_artifacts"]
+    ).load_runtime_artifacts(__import__("pathlib").Path("config"))
+
+    result = await pipeline_for_run_node.run(
+        trace_state.context,
+        trace_state.request,
+        trace_id=trace_id,
+    )
+
+    assert result.trace_id == trace_id
+    assert activations == [(trace_id, trace_state.context.tenant_id, None)]
+    assert starts == []
+
+
+@pytest.mark.asyncio
+async def test_pipeline_rejects_reserved_trace_scope_corruption(
+    pipeline_for_run_node, trace_state
+):
+    trace_id = uuid4()
+    activated = []
+
+    async def get_trace(_trace_id, *, tenant_id):
+        return __import__("types").SimpleNamespace(
+            customer_id="different-customer",
+            session_id=trace_state.request.session_id,
+        )
+
+    async def activate(*args, **kwargs):
+        activated.append((args, kwargs))
+
+    pipeline_for_run_node.traces.get_trace = get_trace
+    pipeline_for_run_node.traces.activate_trace = activate
+
+    with pytest.raises(AgentError) as caught:
+        await pipeline_for_run_node.run(
+            trace_state.context,
+            trace_state.request,
+            trace_id=trace_id,
+        )
+
+    assert caught.value.error_code == "AUTH_SCOPE_CORRUPTION"
+    assert activated == []
+
+
+@pytest.mark.asyncio
+async def test_worker_owned_cancellation_leaves_reserved_trace_for_recovery(
+    pipeline_for_run_node, trace_state, monkeypatch
+):
+    trace_id = uuid4()
+    finished = []
+
+    async def get_trace(_trace_id, *, tenant_id):
+        return __import__("types").SimpleNamespace(
+            customer_id=trace_state.context.customer_id,
+            session_id=trace_state.request.session_id,
+        )
+
+    async def activate(*_args, **_kwargs):
+        pass
+
+    async def finish_trace(*args, **kwargs):
+        finished.append((args, kwargs))
+
+    async def cancelled(*_args, **_kwargs):
+        raise asyncio.CancelledError
+
+    pipeline_for_run_node.traces.get_trace = get_trace
+    pipeline_for_run_node.traces.activate_trace = activate
+    pipeline_for_run_node.traces.finish_trace = finish_trace
+    monkeypatch.setattr(pipeline_for_run_node, "run_node", cancelled)
+
+    with pytest.raises(asyncio.CancelledError):
+        await pipeline_for_run_node.run(
+            trace_state.context,
+            trace_state.request,
+            trace_id=trace_id,
+            finalize_on_cancellation=False,
+        )
+
+    assert finished == []
 
 
 @pytest.mark.asyncio

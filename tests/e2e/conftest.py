@@ -48,6 +48,29 @@ class MemoryTraces:
         )
         return trace_id
 
+    async def reserve_for_test(
+        self,
+        *,
+        tenant_id,
+        customer_id,
+        session_id,
+        retry_of_trace_id=None,
+        retry_initiator=None,
+        retry_reason=None,
+        delivery_disposition=None,
+    ):
+        trace_id = await self.start_trace(
+            tenant_id=tenant_id,
+            customer_id=customer_id,
+            session_id=session_id,
+            retry_of_trace_id=retry_of_trace_id,
+            retry_initiator=retry_initiator,
+            retry_reason=retry_reason,
+            delivery_disposition=delivery_disposition,
+        )
+        self.records[trace_id].status = "queued"
+        return trace_id
+
     async def activate_trace(
         self, trace_id, *, tenant_id, expected_retry_of
     ):
