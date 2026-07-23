@@ -1,3 +1,5 @@
+from uuid import uuid4
+
 import pytest
 from pydantic import ValidationError
 
@@ -5,8 +7,10 @@ from agent_flow.contracts import (
     ArtifactRef,
     ConversationMode,
     EmotionAssessment,
+    InboundMessage,
     StrategyDecision,
     StrategyProposal,
+    SubmissionResult,
     TurnRequest,
 )
 from agent_flow.errors import AgentError
@@ -127,3 +131,75 @@ def test_agent_error_location_is_immutable_after_creation():
 
     with pytest.raises(AttributeError):
         error.failure_stage = "response_validator"
+
+
+def test_inbound_message_forbids_identity_override_and_unknown_metadata():
+    message = InboundMessage(
+        channel="console",
+        external_message_id="console-01",
+        session_id="session-01",
+        text="請幫我查詢訂單",
+        idempotency_key="console-01",
+        metadata={"source": "trace-console"},
+    )
+
+    assert message.to_turn_request() == TurnRequest(
+        session_id="session-01", message="請幫我查詢訂單"
+    )
+    assert not hasattr(message, "customer_id")
+    with pytest.raises(ValidationError):
+        InboundMessage.model_validate(
+            {
+                **message.model_dump(),
+                "customer_id": "customer-01",
+            }
+        )
+    with pytest.raises(ValidationError):
+        InboundMessage.model_validate(
+            {
+                **message.model_dump(),
+                "metadata": {"untrusted": "value"},
+            }
+        )
+
+
+def test_inbound_message_accepts_future_bounded_channel_names():
+    message = InboundMessage(
+        channel="web_chat-v2",
+        external_message_id="web-01",
+        session_id="session-01",
+        text="hello",
+        idempotency_key="web-01",
+        metadata={"locale": "en-US"},
+    )
+
+    assert message.channel == "web_chat-v2"
+    with pytest.raises(ValidationError):
+        InboundMessage.model_validate(
+            {
+                **message.model_dump(),
+                "channel": "Uppercase",
+            }
+        )
+
+
+def test_submission_result_contains_only_safe_terminal_fields():
+    result = SubmissionResult.model_validate(
+        {
+            "submission_id": str(uuid4()),
+            "trace_id": str(uuid4()),
+            "status": "completed",
+            "text": "訂單已送達",
+            "citations": [],
+            "handoff": None,
+        }
+    )
+
+    assert "reasoning" not in result.model_dump()
+    with pytest.raises(ValidationError):
+        SubmissionResult.model_validate(
+            {
+                **result.model_dump(),
+                "reasoning": "private chain of thought",
+            }
+        )

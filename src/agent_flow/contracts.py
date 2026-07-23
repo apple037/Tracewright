@@ -3,7 +3,7 @@ from enum import StrEnum
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
 
 
 SEMVER_PATTERN = r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
@@ -239,6 +239,50 @@ class TurnRequest(StrictModel):
     session_id: str = Field(min_length=1, max_length=256)
     message: str = Field(min_length=1, max_length=20_000)
     case_id: str | None = None
+
+
+SubmissionStatus = Literal["queued", "running", "completed", "failed"]
+
+
+class InboundMessage(StrictModel):
+    channel: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,31}$")
+    external_message_id: str = Field(min_length=1, max_length=256)
+    session_id: str = Field(min_length=1, max_length=256)
+    text: str = Field(min_length=1, max_length=20_000)
+    case_id: str | None = Field(default=None, max_length=256)
+    idempotency_key: str = Field(min_length=1, max_length=256)
+    metadata: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("metadata")
+    @classmethod
+    def validate_metadata_keys(cls, value: dict[str, str]) -> dict[str, str]:
+        unknown_keys = value.keys() - {"source", "locale"}
+        if unknown_keys:
+            raise ValueError(
+                f"unsupported metadata keys: {', '.join(sorted(unknown_keys))}"
+            )
+        return value
+
+    def to_turn_request(self) -> TurnRequest:
+        return TurnRequest(
+            session_id=self.session_id,
+            message=self.text,
+            case_id=self.case_id,
+        )
+
+
+class SubmissionReceipt(StrictModel):
+    submission_id: UUID
+    trace_id: UUID
+    status: SubmissionStatus
+
+
+class SubmissionResult(SubmissionReceipt):
+    text: str | None = None
+    citations: tuple[str, ...] = ()
+    handoff: HandoffEvent | None = None
+    error_code: str | None = None
+    error_component: str | None = None
 
 
 class CapturedTurnInput(StrictModel):
