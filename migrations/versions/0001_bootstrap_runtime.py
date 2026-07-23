@@ -163,21 +163,6 @@ def upgrade() -> None:
     )
     op.create_index("ix_snapshots_scope", "conversation_snapshots", ["tenant_id", "customer_id", "session_id"], schema="runtime")
     op.create_table(
-        "turn_inputs",
-        sa.Column("trace_id", UUID, primary_key=True),
-        sa.Column("tenant_id", sa.Text(), nullable=False),
-        sa.Column("customer_id", sa.Text(), nullable=False),
-        sa.Column("session_id", sa.Text(), nullable=False),
-        sa.Column("message", sa.Text(), nullable=False),
-        sa.Column("case_id", sa.Text()),
-        sa.Column("captured_at", sa.DateTime(timezone=True), nullable=False, server_default=NOW),
-        sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
-        sa.ForeignKeyConstraint(["trace_id"], ["observability.traces.id"], ondelete="CASCADE"),
-        schema="runtime",
-    )
-    op.create_index("ix_turn_inputs_scope", "turn_inputs", ["tenant_id", "customer_id", "session_id"], schema="runtime")
-    op.create_index("ix_turn_inputs_expires_at", "turn_inputs", ["expires_at"], schema="runtime")
-    op.create_table(
         "turns",
         sa.Column("id", sa.BigInteger(), sa.Identity(), primary_key=True),
         sa.Column("conversation_id", UUID, nullable=False),
@@ -271,12 +256,8 @@ def upgrade() -> None:
         sa.Column("payload", JSONB, nullable=False),
         sa.Column("status", sa.Text(), nullable=False, server_default="queued"),
         sa.Column("attempts", sa.Integer(), nullable=False, server_default="0"),
-        sa.Column("next_attempt_at", sa.DateTime(timezone=True), server_default=NOW),
+        sa.Column("next_attempt_at", sa.DateTime(timezone=True), nullable=False, server_default=NOW),
         sa.Column("last_error_code", sa.Text()),
-        sa.Column("last_http_status", sa.Integer()),
-        sa.Column("lock_owner", sa.Text()),
-        sa.Column("locked_at", sa.DateTime(timezone=True)),
-        sa.Column("lease_expires_at", sa.DateTime(timezone=True)),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=NOW),
         sa.Column("delivered_at", sa.DateTime(timezone=True)),
         sa.ForeignKeyConstraint(["trace_id"], ["observability.traces.id"]),
@@ -285,7 +266,6 @@ def upgrade() -> None:
             "status IN ('queued', 'delivering', 'delivered', 'failed')",
             name="ck_outbox_status",
         ),
-        sa.CheckConstraint("attempts >= 0", name="ck_outbox_attempts"),
         schema="notification",
     )
     op.create_index("ix_outbox_claim", "outbox", ["status", "next_attempt_at", "created_at"], schema="notification")
@@ -297,7 +277,6 @@ def downgrade() -> None:
     op.drop_table("documents", schema="rag")
     op.drop_table("jobs", schema="runtime")
     op.drop_table("turns", schema="runtime")
-    op.drop_table("turn_inputs", schema="runtime")
     op.drop_table("conversation_snapshots", schema="runtime")
     op.drop_table("conversations", schema="runtime")
     op.drop_constraint("fk_traces_primary_failure", "traces", schema="observability", type_="foreignkey")

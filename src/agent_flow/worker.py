@@ -41,31 +41,38 @@ class HandoffOutboxWorker:
 
     async def run_once(self) -> int:
         rows = await self.repository.claim(
-            owner=self.owner, limit=self.batch_size, lease_seconds=self.lease_seconds
+            owner=self.owner, limit=self.batch_size,
+            lease_seconds=self.lease_seconds, max_attempts=self.max_attempts,
         )
-        for row in rows:
-            try:
-                delivered = await self.webhook.deliver(
-                    row.payload, idempotency_key=row.idempotency_key
-                )
-            except WebhookDeliveryError as error:
-                await self.repository.fail(
-                    row.id,
-                    owner=self.owner,
-                    error_code=error.error_code,
-                    http_status=error.http_status,
-                    retryable=error.retryable,
-                    max_attempts=self.max_attempts,
-                    backoff_seconds=min(
-                        self.max_backoff_seconds,
-                        self.base_backoff_seconds * 2 ** (row.attempts - 1),
-                    ),
-                )
-            else:
-                await self.repository.complete(
-                    row.id, owner=self.owner, http_status=delivered.http_status
-                )
+        async with asyncio.TaskGroup() as tasks:
+            for row in rows:
+                tasks.create_task(self._deliver(row))
         return len(rows)
+
+    async def _deliver(self, row) -> None:
+        try:
+            delivered = await self.webhook.deliver(
+                row.payload, idempotency_key=row.idempotency_key
+            )
+        except WebhookDeliveryError as error:
+            await self.repository.fail(
+                row.id,
+                owner=self.owner,
+                claim_token=row.claim_token,
+                error_code=error.error_code,
+                http_status=error.http_status,
+                retryable=error.retryable,
+                max_attempts=self.max_attempts,
+                backoff_seconds=min(
+                    self.max_backoff_seconds,
+                    self.base_backoff_seconds * 2 ** (row.attempts - 1),
+                ),
+            )
+        else:
+            await self.repository.complete(
+                row.id, owner=self.owner, claim_token=row.claim_token,
+                http_status=delivered.http_status,
+            )
 
     async def run(self, stop: asyncio.Event) -> None:
         while not stop.is_set():

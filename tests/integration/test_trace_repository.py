@@ -9,11 +9,14 @@ from psycopg.types.json import Jsonb
 from agent_flow.repositories.conversations import PostgresConversationRepository
 
 
-MIGRATION = Path("migrations/versions/0001_bootstrap_runtime.py")
+MIGRATIONS = Path("migrations/versions")
 
 
 def test_bootstrap_migration_declares_required_storage() -> None:
-    source = MIGRATION.read_text(encoding="utf-8")
+    source = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted(MIGRATIONS.glob("*.py"))
+    )
 
     for schema in ("runtime", "observability", "rag", "notification"):
         assert f'CREATE SCHEMA IF NOT EXISTS {schema}' in source

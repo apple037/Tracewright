@@ -2,7 +2,8 @@ import asyncio
 import hashlib
 import hmac
 import json
-from datetime import datetime, timedelta, timezone
+import time
+from datetime import datetime, timezone
 from uuid import uuid4
 
 import httpx
@@ -13,6 +14,7 @@ from agent_flow.adapters.webhook import HandoffWebhook, WebhookDeliveryError
 from agent_flow.contracts import HandoffEvent
 from agent_flow.repositories.outbox import OutboxRepository
 from agent_flow.worker import HandoffOutboxWorker
+from conftest import _is_unambiguous_test_database, require_unambiguous_test_database
 
 
 @pytest.fixture
@@ -24,14 +26,20 @@ def handoff() -> HandoffEvent:
     )
 
 
+def test_destructive_cleanup_database_guard_is_strict():
+    assert _is_unambiguous_test_database("agent_flow_test")
+    assert not _is_unambiguous_test_database("contestprod")
+    assert not _is_unambiguous_test_database("production")
+
+
 @pytest.fixture
 async def outbox_repository(postgres_pool):
     repository = OutboxRepository(postgres_pool)
+    await require_unambiguous_test_database(postgres_pool)
     async with postgres_pool.connection() as connection:
-        database = await connection.execute("SELECT current_database() AS name")
-        assert "test" in (await database.fetchone())["name"].lower()
         await connection.execute("TRUNCATE notification.outbox, observability.traces CASCADE")
     yield repository
+    await require_unambiguous_test_database(postgres_pool)
     async with postgres_pool.connection() as connection:
         await connection.execute("TRUNCATE notification.outbox, observability.traces CASCADE")
 
@@ -89,25 +97,36 @@ async def test_claims_are_exclusive_ordered_and_owner_settlement_is_enforced(
         idempotency_key=f"handoff:{second_trace}", event=handoff,
     )
 
-    ordered = await outbox_repository.claim(owner="ordering", limit=2, lease_seconds=1)
-    assert [row.id for row in ordered] == [first.id, second.id]
-    assert [row.created_at for row in ordered] == sorted(row.created_at for row in ordered)
+    async with outbox_repository._pool.connection() as connection:
+        await connection.execute(
+            "UPDATE notification.outbox SET created_at = %s WHERE id IN (%s, %s)",
+            (datetime(2026, 1, 1, tzinfo=timezone.utc), first.id, second.id),
+        )
+    ordered = await outbox_repository.claim(
+        owner="ordering", limit=2, lease_seconds=1, max_attempts=3
+    )
+    assert [row.id for row in ordered] == sorted((first.id, second.id))
     async with outbox_repository._pool.connection() as connection:
         await connection.execute(
             "UPDATE notification.outbox SET lease_expires_at = now() - interval '1 second'"
         )
     claimed_a, claimed_b = await asyncio.gather(
-        outbox_repository.claim(owner="worker-a", limit=1, lease_seconds=30),
-        outbox_repository.claim(owner="worker-b", limit=1, lease_seconds=30),
+        outbox_repository.claim(owner="worker-a", limit=1, lease_seconds=30, max_attempts=3),
+        outbox_repository.claim(owner="worker-b", limit=1, lease_seconds=30, max_attempts=3),
     )
     assert {claimed_a[0].id, claimed_b[0].id} == {first.id, second.id}
-    with pytest.raises(ValueError, match="claim owner"):
-        await outbox_repository.complete(claimed_a[0].id, owner="worker-b", http_status=204)
+    with pytest.raises(ValueError, match="active claim"):
+        await outbox_repository.complete(
+            claimed_a[0].id, owner="worker-b", claim_token=claimed_a[0].claim_token,
+            http_status=204,
+        )
     completed = await outbox_repository.complete(
-        claimed_a[0].id, owner="worker-a", http_status=204
+        claimed_a[0].id, owner="worker-a", claim_token=claimed_a[0].claim_token,
+        http_status=204,
     )
     assert await outbox_repository.complete(
-        claimed_a[0].id, owner="worker-a", http_status=204
+        claimed_a[0].id, owner="worker-a", claim_token=claimed_a[0].claim_token,
+        http_status=204,
     ) == completed
     assert completed.status == "delivered"
     assert completed.last_http_status == 204
@@ -122,20 +141,69 @@ async def test_expired_lease_is_recovered_and_old_owner_cannot_settle(
         tenant_id="tenant-a", customer_id="customer-a", trace_id=trace_id,
         idempotency_key=f"handoff:{trace_id}", event=handoff,
     )
-    claimed = (await outbox_repository.claim(owner="crashed", limit=1, lease_seconds=1))[0]
+    claimed = (await outbox_repository.claim(
+        owner="stable-owner", limit=1, lease_seconds=1, max_attempts=3
+    ))[0]
     async with outbox_repository._pool.connection() as connection:
         await connection.execute(
             "UPDATE notification.outbox SET lease_expires_at = now() - interval '1 second' WHERE id = %s",
             (queued.id,),
         )
-    recovered = (await outbox_repository.claim(owner="replacement", limit=1, lease_seconds=30))[0]
+    with pytest.raises(ValueError, match="active claim"):
+        await outbox_repository.complete(
+            claimed.id, owner="stable-owner", claim_token=claimed.claim_token,
+            http_status=204,
+        )
+    recovered = (await outbox_repository.claim(
+        owner="stable-owner", limit=1, lease_seconds=30, max_attempts=3
+    ))[0]
     assert recovered.id == claimed.id
     assert recovered.attempts == 2
-    with pytest.raises(ValueError, match="claim owner"):
+    assert recovered.claim_token != claimed.claim_token
+    with pytest.raises(ValueError, match="claim"):
         await outbox_repository.fail(
-            recovered.id, owner="crashed", error_code="WEBHOOK_TIMEOUT",
+            recovered.id, owner="stable-owner", claim_token=claimed.claim_token,
+            error_code="WEBHOOK_TIMEOUT",
             http_status=None, retryable=True, max_attempts=3, backoff_seconds=1,
         )
+    await outbox_repository.complete(
+        recovered.id, owner="stable-owner", claim_token=recovered.claim_token,
+        http_status=204,
+    )
+
+
+@pytest.mark.asyncio
+async def test_claim_skips_a_locked_first_due_row_without_blocking(
+    outbox_repository, trace_repository, handoff
+):
+    rows = []
+    for _ in range(2):
+        trace_id = await _trace(trace_repository)
+        rows.append(await outbox_repository.enqueue(
+            tenant_id="tenant-a", customer_id="customer-a", trace_id=trace_id,
+            idempotency_key=f"handoff:{trace_id}", event=handoff,
+        ))
+    ordered = sorted(rows, key=lambda row: row.id)
+    async with outbox_repository._pool.connection() as connection:
+        await connection.execute(
+            "UPDATE notification.outbox SET created_at = %s WHERE id IN (%s, %s)",
+            (datetime(2026, 1, 1, tzinfo=timezone.utc), rows[0].id, rows[1].id),
+        )
+    async with outbox_repository._pool.connection() as connection:
+        async with connection.transaction():
+            await connection.execute(
+                "SELECT id FROM notification.outbox WHERE id = %s FOR UPDATE",
+                (ordered[0].id,),
+            )
+            started = time.monotonic()
+            claimed = await asyncio.wait_for(
+                outbox_repository.claim(
+                    owner="skip-worker", limit=1, lease_seconds=30, max_attempts=3
+                ),
+                timeout=1,
+            )
+            assert time.monotonic() - started < 1
+            assert [row.id for row in claimed] == [ordered[1].id]
 
 
 @pytest.mark.asyncio
@@ -148,23 +216,87 @@ async def test_nonretryable_and_exhausted_rows_are_never_claimed_again(
             tenant_id="tenant-a", customer_id="customer-a", trace_id=trace_id,
             idempotency_key=f"handoff:{trace_id}", event=handoff,
         )
-    rows = await outbox_repository.claim(owner="worker", limit=2, lease_seconds=30)
+    rows = await outbox_repository.claim(
+        owner="worker", limit=2, lease_seconds=30, max_attempts=3
+    )
     permanent = await outbox_repository.fail(
-        rows[0].id, owner="worker", error_code="WEBHOOK_400", http_status=400,
+        rows[0].id, owner="worker", claim_token=rows[0].claim_token,
+        error_code="WEBHOOK_400", http_status=400,
         retryable=False, max_attempts=3, backoff_seconds=1,
     )
     exhausted = await outbox_repository.fail(
-        rows[1].id, owner="worker", error_code="WEBHOOK_503", http_status=503,
+        rows[1].id, owner="worker", claim_token=rows[1].claim_token,
+        error_code="WEBHOOK_503", http_status=503,
         retryable=True, max_attempts=1, backoff_seconds=1,
     )
     assert permanent.status == exhausted.status == "failed"
     assert await outbox_repository.fail(
-        rows[0].id, owner="worker", error_code="WEBHOOK_400", http_status=400,
+        rows[0].id, owner="worker", claim_token=rows[0].claim_token,
+        error_code="WEBHOOK_400", http_status=400,
         retryable=False, max_attempts=3, backoff_seconds=1,
     ) == permanent
     assert permanent.next_attempt_at is None
     assert exhausted.next_attempt_at is None
-    assert await outbox_repository.claim(owner="other", limit=10, lease_seconds=30) == ()
+    assert await outbox_repository.claim(
+        owner="other", limit=10, lease_seconds=30, max_attempts=3
+    ) == ()
+
+
+@pytest.mark.asyncio
+async def test_expired_claim_at_attempt_cap_becomes_terminal_without_reclaim(
+    outbox_repository, trace_repository, handoff
+):
+    trace_id = await _trace(trace_repository)
+    queued = await outbox_repository.enqueue(
+        tenant_id="tenant-a", customer_id="customer-a", trace_id=trace_id,
+        idempotency_key=f"handoff:{trace_id}", event=handoff,
+    )
+    claimed = (await outbox_repository.claim(
+        owner="crash-loop", limit=1, lease_seconds=1, max_attempts=1
+    ))[0]
+    async with outbox_repository._pool.connection() as connection:
+        await connection.execute(
+            "UPDATE notification.outbox SET lease_expires_at = now() - interval '1 second' WHERE id = %s",
+            (claimed.id,),
+        )
+    assert await outbox_repository.claim(
+        owner="crash-loop", limit=1, lease_seconds=30, max_attempts=1
+    ) == ()
+    stored = await outbox_repository.get(queued.id)
+    assert stored.status == "failed"
+    assert stored.attempts == 1
+    assert stored.next_attempt_at is None
+
+
+@pytest.mark.asyncio
+async def test_fail_replay_requires_same_token_and_exact_effective_backoff(
+    outbox_repository, trace_repository, handoff
+):
+    trace_id = await _trace(trace_repository)
+    await outbox_repository.enqueue(
+        tenant_id="tenant-a", customer_id="customer-a", trace_id=trace_id,
+        idempotency_key=f"handoff:{trace_id}", event=handoff,
+    )
+    claimed = (await outbox_repository.claim(
+        owner="worker", limit=1, lease_seconds=30, max_attempts=3
+    ))[0]
+    settled = await outbox_repository.fail(
+        claimed.id, owner="worker", claim_token=claimed.claim_token,
+        error_code="WEBHOOK_503", http_status=503, retryable=True,
+        max_attempts=3, backoff_seconds=7,
+    )
+    assert settled.settlement_backoff_seconds == 7
+    assert await outbox_repository.fail(
+        claimed.id, owner="worker", claim_token=claimed.claim_token,
+        error_code="WEBHOOK_503", http_status=503, retryable=True,
+        max_attempts=3, backoff_seconds=7,
+    ) == settled
+    with pytest.raises(ValueError, match="settlement replay"):
+        await outbox_repository.fail(
+            claimed.id, owner="worker", claim_token=claimed.claim_token,
+            error_code="WEBHOOK_503", http_status=503, retryable=True,
+            max_attempts=3, backoff_seconds=9,
+        )
 
 
 @pytest.mark.asyncio
@@ -310,6 +442,7 @@ class _Delivery:
 async def test_worker_bounds_attempts_and_persists_only_safe_failure_metadata(handoff):
     row = type("Row", (), {
         "id": uuid4(), "idempotency_key": "handoff:key", "attempts": 1,
+        "claim_token": uuid4(),
         "payload": handoff.model_dump(mode="json")
     })()
     repository = _RecordingRepository([row])
@@ -324,7 +457,8 @@ async def test_worker_bounds_attempts_and_persists_only_safe_failure_metadata(ha
     )
     assert await worker.run_once() == 1
     assert repository.failed == [(row.id, {
-        "owner": "worker-a", "error_code": "WEBHOOK_429", "http_status": 429,
+        "owner": "worker-a", "claim_token": row.claim_token,
+        "error_code": "WEBHOOK_429", "http_status": 429,
         "retryable": True, "max_attempts": 3, "backoff_seconds": 2,
     })]
 
@@ -333,6 +467,7 @@ async def test_worker_bounds_attempts_and_persists_only_safe_failure_metadata(ha
 async def test_worker_caps_exponential_backoff(handoff):
     row = type("Row", (), {
         "id": uuid4(), "idempotency_key": "handoff:key", "attempts": 8,
+        "claim_token": uuid4(),
         "payload": handoff.model_dump(mode="json")
     })()
     repository = _RecordingRepository([row])
@@ -354,6 +489,7 @@ async def test_worker_caps_exponential_backoff(handoff):
 async def test_worker_propagates_cancellation_and_leaves_claim_recoverable(handoff):
     row = type("Row", (), {
         "id": uuid4(), "idempotency_key": "handoff:key", "attempts": 1,
+        "claim_token": uuid4(),
         "payload": handoff.model_dump(mode="json")
     })()
     repository = _RecordingRepository([row])
@@ -375,3 +511,38 @@ async def test_worker_propagates_cancellation_and_leaves_claim_recoverable(hando
         await task
     assert repository.completed == []
     assert repository.failed == []
+
+
+@pytest.mark.asyncio
+async def test_worker_processes_claimed_batch_concurrently(handoff):
+    rows = [type("Row", (), {
+        "id": uuid4(), "idempotency_key": f"handoff:{index}", "attempts": 1,
+        "claim_token": uuid4(), "payload": handoff.model_dump(mode="json"),
+    })() for index in range(2)]
+    repository = _RecordingRepository(rows)
+    both_entered = asyncio.Event()
+    release = asyncio.Event()
+    entered = 0
+
+    class CoordinatedWebhook:
+        async def deliver(self, *args, **kwargs):
+            nonlocal entered
+            entered += 1
+            if entered == 2:
+                both_entered.set()
+            await release.wait()
+            return _Delivery()
+
+    worker = HandoffOutboxWorker(
+        repository=repository, webhook=CoordinatedWebhook(), owner="worker-a",
+        batch_size=2, lease_seconds=30, max_attempts=3, base_backoff_seconds=1,
+    )
+    task = asyncio.create_task(worker.run_once())
+    await asyncio.wait_for(both_entered.wait(), timeout=1)
+    release.set()
+    assert await task == 2
+    assert {row_id for row_id, _ in repository.completed} == {row.id for row in rows}
+    assert all(
+        details["claim_token"] in {row.claim_token for row in rows}
+        for _, details in repository.completed
+    )

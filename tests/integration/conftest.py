@@ -20,6 +20,15 @@ def _is_unambiguous_test_database(name: str) -> bool:
     return "test" in re.split(r"[_-]", name.lower())
 
 
+async def require_unambiguous_test_database(pool: PostgresPool) -> str:
+    async with pool.connection() as connection:
+        cursor = await connection.execute("SELECT current_database() AS name")
+        name = (await cursor.fetchone())["name"]
+    if not _is_unambiguous_test_database(name):
+        raise RuntimeError("destructive cleanup is restricted to unambiguous test databases")
+    return name
+
+
 def database_integration_required(
     arguments: Sequence[str], environ: Mapping[str, str]
 ) -> bool:
@@ -77,11 +86,8 @@ async def trace_repository(postgres_pool: PostgresPool):
 
 
 async def _clear_rag_test_data(pool: PostgresPool) -> None:
+    await require_unambiguous_test_database(pool)
     async with pool.connection() as connection:
-        database = await connection.execute("SELECT current_database() AS name")
-        name = (await database.fetchone())["name"]
-        if not _is_unambiguous_test_database(name):
-            raise RuntimeError("RAG cleanup is restricted to test databases")
         await connection.execute(
             "DELETE FROM rag.documents "
             "WHERE access_metadata ->> 'pytest_owner' = %s",

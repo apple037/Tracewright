@@ -28,6 +28,9 @@ class OutboxRecord:
     lock_owner: str | None
     locked_at: datetime | None
     lease_expires_at: datetime | None
+    claim_token: UUID | None
+    settlement_retryable: bool | None
+    settlement_backoff_seconds: int | None
     created_at: datetime
     delivered_at: datetime | None
 
@@ -36,7 +39,8 @@ _COLUMNS = """
 id, tenant_id, customer_id, trace_id, idempotency_key,
 payload_schema_version, payload, status, attempts, next_attempt_at,
 last_error_code, last_http_status, lock_owner, locked_at,
-lease_expires_at, created_at, delivered_at
+lease_expires_at, claim_token, settlement_retryable,
+settlement_backoff_seconds, created_at, delivered_at
 """
 
 
@@ -158,57 +162,79 @@ class OutboxRepository:
             raise ValueError("trace is already finalized with conflicting values")
 
     async def claim(
-        self, *, owner: str, limit: int, lease_seconds: int
+        self, *, owner: str, limit: int, lease_seconds: int, max_attempts: int
     ) -> tuple[OutboxRecord, ...]:
-        if not owner or limit < 1 or lease_seconds < 1:
+        if not owner or min(limit, lease_seconds, max_attempts) < 1:
             raise ValueError("claim requires owner and positive bounds")
         records: list[OutboxRecord] = []
         async with self._pool.connection() as connection:
             async with connection.transaction():
-                await connection.execute(
-                    """
-                    UPDATE notification.outbox
-                    SET status = 'failed', lock_owner = NULL, locked_at = NULL,
-                        lease_expires_at = NULL, next_attempt_at = now(),
-                        last_error_code = 'LEASE_EXPIRED'
-                    WHERE status = 'delivering' AND lease_expires_at <= now()
-                    """
-                )
-                cursor = await connection.execute(
-                    """
-                    SELECT id FROM notification.outbox
-                    WHERE status IN ('queued', 'failed') AND next_attempt_at <= now()
-                    ORDER BY created_at, id
-                    FOR UPDATE SKIP LOCKED
-                    LIMIT %s
-                    """,
-                    (limit,),
-                )
-                selected = await cursor.fetchall()
-                for selected_row in selected:
+                while len(records) < limit:
                     cursor = await connection.execute(
-                        f"""
-                        UPDATE notification.outbox
-                        SET status = 'delivering', attempts = attempts + 1,
-                            lock_owner = %s, locked_at = now(),
-                            lease_expires_at = now() + make_interval(secs => %s)
-                        WHERE id = %s
-                        RETURNING {_COLUMNS}
+                        """
+                        SELECT id, attempts FROM notification.outbox
+                        WHERE (
+                            status IN ('queued', 'failed')
+                            AND next_attempt_at IS NOT NULL
+                            AND next_attempt_at <= now()
+                        ) OR (
+                            status = 'delivering' AND lease_expires_at <= now()
+                        )
+                        ORDER BY created_at, id
+                        FOR UPDATE SKIP LOCKED
+                        LIMIT %s
                         """,
-                        (owner, lease_seconds, selected_row["id"]),
+                        (limit - len(records),),
                     )
-                    records.append(_record(await cursor.fetchone()))
+                    selected = await cursor.fetchall()
+                    if not selected:
+                        break
+                    for selected_row in selected:
+                        if selected_row["attempts"] >= max_attempts:
+                            await connection.execute(
+                                """
+                                UPDATE notification.outbox
+                                SET status = 'failed', next_attempt_at = NULL,
+                                    last_error_code = 'ATTEMPTS_EXHAUSTED',
+                                    last_http_status = NULL, locked_at = NULL,
+                                    lease_expires_at = NULL,
+                                    settlement_retryable = false,
+                                    settlement_backoff_seconds = NULL
+                                WHERE id = %s
+                                """,
+                                (selected_row["id"],),
+                            )
+                            continue
+                        claim_token = uuid4()
+                        cursor = await connection.execute(
+                            f"""
+                            UPDATE notification.outbox
+                            SET status = 'delivering', attempts = attempts + 1,
+                                lock_owner = %s, claim_token = %s, locked_at = now(),
+                                lease_expires_at = now() + make_interval(secs => %s),
+                                last_error_code = NULL, last_http_status = NULL,
+                                settlement_retryable = NULL,
+                                settlement_backoff_seconds = NULL
+                            WHERE id = %s
+                            RETURNING {_COLUMNS}
+                            """,
+                            (owner, claim_token, lease_seconds, selected_row["id"]),
+                        )
+                        records.append(_record(await cursor.fetchone()))
         return tuple(records)
 
     async def complete(
-        self, row_id: UUID, *, owner: str, http_status: int
+        self, row_id: UUID, *, owner: str, claim_token: UUID, http_status: int
     ) -> OutboxRecord:
         return await self._settle(
             row_id,
             owner=owner,
+            claim_token=claim_token,
             status="delivered",
             error_code=None,
             http_status=http_status,
+            retryable=None,
+            max_attempts=None,
             backoff_seconds=None,
         )
 
@@ -217,26 +243,23 @@ class OutboxRepository:
         row_id: UUID,
         *,
         owner: str,
+        claim_token: UUID,
         error_code: str,
         http_status: int | None,
         retryable: bool,
         max_attempts: int,
         backoff_seconds: int,
     ) -> OutboxRecord:
-        async with self._pool.connection() as connection:
-            cursor = await connection.execute(
-                "SELECT attempts FROM notification.outbox WHERE id = %s",
-                (row_id,),
-            )
-            row = await cursor.fetchone()
-        permanent = not retryable or row is None or row["attempts"] >= max_attempts
         return await self._settle(
             row_id,
             owner=owner,
+            claim_token=claim_token,
             status="failed",
             error_code=error_code,
             http_status=http_status,
-            backoff_seconds=None if permanent else backoff_seconds,
+            retryable=retryable,
+            max_attempts=max_attempts,
+            backoff_seconds=backoff_seconds,
         )
 
     async def _settle(
@@ -244,44 +267,90 @@ class OutboxRepository:
         row_id: UUID,
         *,
         owner: str,
+        claim_token: UUID,
         status: str,
         error_code: str | None,
         http_status: int | None,
+        retryable: bool | None,
+        max_attempts: int | None,
         backoff_seconds: int | None,
     ) -> OutboxRecord:
+        if status == "failed" and (
+            max_attempts is None or max_attempts < 1
+            or backoff_seconds is None or backoff_seconds < 0
+        ):
+            raise ValueError("failure settlement requires positive retry bounds")
         async with self._pool.connection() as connection:
-            cursor = await connection.execute(
-                f"""
-                UPDATE notification.outbox
-                SET status = %s, last_error_code = %s, last_http_status = %s,
-                    next_attempt_at = now() + make_interval(secs => %s),
-                    delivered_at = CASE WHEN %s = 'delivered' THEN now() ELSE delivered_at END,
-                    locked_at = NULL, lease_expires_at = NULL
-                WHERE id = %s AND status = 'delivering' AND lock_owner = %s
-                RETURNING {_COLUMNS}
-                """,
-                (
-                    status, error_code, http_status, backoff_seconds,
-                    status, row_id, owner,
-                ),
-            )
-            row = await cursor.fetchone()
-            if row is None:
+            async with connection.transaction():
                 cursor = await connection.execute(
-                    f"SELECT {_COLUMNS} FROM notification.outbox WHERE id = %s",
+                    f"SELECT {_COLUMNS}, lease_expires_at > now() AS lease_active "
+                    "FROM notification.outbox WHERE id = %s FOR UPDATE",
                     (row_id,),
                 )
                 row = await cursor.fetchone()
-                next_attempt_matches = row is not None and (
-                    (backoff_seconds is None and row["next_attempt_at"] is None)
-                    or (backoff_seconds is not None and row["next_attempt_at"] is not None)
+                if row is None:
+                    raise ValueError("outbox row does not exist")
+                effective_retryable = (
+                    retryable and row["attempts"] < max_attempts
+                    if status == "failed"
+                    else None
                 )
-                if row is None or (
-                    row["status"], row["lock_owner"], row["last_error_code"],
-                    row["last_http_status"],
-                ) != (status, owner, error_code, http_status) or not next_attempt_matches:
-                    raise ValueError("outbox row is not delivering for claim owner")
+                effective_backoff = backoff_seconds if effective_retryable else None
+                expected = (
+                    status, owner, claim_token, error_code, http_status,
+                    effective_retryable, effective_backoff,
+                )
+                stored = (
+                    row["status"], row["lock_owner"], row["claim_token"],
+                    row["last_error_code"], row["last_http_status"],
+                    row["settlement_retryable"],
+                    row["settlement_backoff_seconds"],
+                )
+                if row["status"] != "delivering":
+                    if stored == expected:
+                        return _record({key: row[key] for key in OutboxRecord.__dataclass_fields__})
+                    raise ValueError("settlement replay conflicts with stored decision")
+                if (
+                    row["lock_owner"] != owner
+                    or row["claim_token"] != claim_token
+                    or not row["lease_active"]
+                ):
+                    raise ValueError("outbox row does not have a matching active claim")
+                cursor = await connection.execute(
+                    f"""
+                    UPDATE notification.outbox
+                    SET status = %s, last_error_code = %s, last_http_status = %s,
+                        next_attempt_at = now() + make_interval(secs => %s),
+                        delivered_at = CASE
+                            WHEN %s = 'delivered' THEN now() ELSE delivered_at END,
+                        locked_at = NULL, lease_expires_at = NULL,
+                        settlement_retryable = %s,
+                        settlement_backoff_seconds = %s
+                    WHERE id = %s AND status = 'delivering'
+                      AND lock_owner = %s AND claim_token = %s
+                      AND lease_expires_at > now()
+                    RETURNING {_COLUMNS}
+                    """,
+                    (
+                        status, error_code, http_status, effective_backoff,
+                        status, effective_retryable, effective_backoff,
+                        row_id, owner, claim_token,
+                    ),
+                )
+                settled = await cursor.fetchone()
+                if settled is None:
+                    raise ValueError("outbox row does not have a matching active claim")
+                row = settled
         return _record(row)
+
+    async def get(self, row_id: UUID) -> OutboxRecord | None:
+        async with self._pool.connection() as connection:
+            cursor = await connection.execute(
+                f"SELECT {_COLUMNS} FROM notification.outbox WHERE id = %s",
+                (row_id,),
+            )
+            row = await cursor.fetchone()
+        return _record(row) if row is not None else None
 
     async def count(self, *, tenant_id: str) -> int:
         async with self._pool.connection() as connection:
