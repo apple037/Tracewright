@@ -140,12 +140,14 @@ class PostgresSubmissionRepository:
                         message.external_message_id,
                     ),
                 )
-                await connection.execute(
+                cursor = await connection.execute(
                     """
                     INSERT INTO runtime.jobs (
                         id, trace_id, tenant_id, customer_id, job_type,
                         payload, status, idempotency_key
                     ) VALUES (%s, %s, %s, %s, 'turn', %s, 'queued', %s)
+                    ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
+                    RETURNING id
                     """,
                     (
                         submission_id,
@@ -156,6 +158,20 @@ class PostgresSubmissionRepository:
                         message.idempotency_key,
                     ),
                 )
+                if await cursor.fetchone() is None:
+                    await connection.execute(
+                        "DELETE FROM observability.traces WHERE id = %s",
+                        (trace_id,),
+                    )
+                    existing = await self._get_by_key(
+                        connection, context.tenant_id, message.idempotency_key
+                    )
+                    if existing is None or (
+                        existing.customer_id != context.customer_id
+                        or existing.payload != payload
+                    ):
+                        raise ValueError("submission idempotency conflict")
+                    return existing
                 return await self._get_required(connection, submission_id)
 
     async def get(

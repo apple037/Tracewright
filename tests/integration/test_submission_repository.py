@@ -198,6 +198,109 @@ async def test_enqueue_rejects_key_owned_by_another_job_type(
 
 
 @pytest.mark.asyncio
+async def test_enqueue_classifies_concurrent_other_job_collision_without_orphan_trace(
+    submissions, customer_context, postgres_pool
+):
+    lock_class, lock_object = 2_147_480_000, 3
+    async with postgres_pool.connection() as connection:
+        await connection.execute(
+            """
+            CREATE OR REPLACE FUNCTION runtime.block_turn_job_insert_for_test()
+            RETURNS trigger
+            LANGUAGE plpgsql
+            AS $$
+            BEGIN
+                IF NEW.job_type = 'turn' THEN
+                    PERFORM pg_advisory_xact_lock(2147480000, 3);
+                END IF;
+                RETURN NEW;
+            END
+            $$
+            """
+        )
+        await connection.execute(
+            """
+            CREATE TRIGGER block_turn_job_insert_for_test
+            BEFORE INSERT ON runtime.jobs
+            FOR EACH ROW
+            EXECUTE FUNCTION runtime.block_turn_job_insert_for_test()
+            """
+        )
+
+    enqueue_task = None
+    try:
+        async with postgres_pool.connection() as collision:
+            async with collision.transaction():
+                await collision.execute(
+                    "SELECT pg_advisory_xact_lock(%s, %s)",
+                    (lock_class, lock_object),
+                )
+                enqueue_task = asyncio.create_task(
+                    submissions.enqueue(
+                        customer_context,
+                        inbound_message(idempotency_key="concurrent-job-key"),
+                    )
+                )
+                for _ in range(200):
+                    cursor = await collision.execute(
+                        """
+                        SELECT count(*) AS count
+                        FROM pg_locks
+                        WHERE locktype = 'advisory'
+                          AND classid = %s AND objid = %s
+                          AND NOT granted
+                        """,
+                        (lock_class, lock_object),
+                    )
+                    if (await cursor.fetchone())["count"] == 1:
+                        break
+                    await asyncio.sleep(0.01)
+                else:
+                    pytest.fail("submission insert did not reach the lock barrier")
+                await collision.execute(
+                    """
+                    INSERT INTO runtime.jobs (
+                        id, tenant_id, customer_id, job_type,
+                        payload, idempotency_key
+                    ) VALUES (
+                        %s, 't1', 'c1', 'maintenance',
+                        %s, 'concurrent-job-key'
+                    )
+                    """,
+                    (uuid4(), Jsonb({"safe": "maintenance"})),
+                )
+
+        with pytest.raises(ValueError, match="submission idempotency conflict"):
+            await enqueue_task
+        async with postgres_pool.connection() as connection:
+            cursor = await connection.execute(
+                """
+                SELECT count(*) AS count
+                FROM observability.traces
+                WHERE tenant_id = 't1' AND customer_id = 'c1'
+                  AND external_message_id IS NOT NULL
+                """
+            )
+            assert (await cursor.fetchone())["count"] == 0
+    finally:
+        if enqueue_task is not None and not enqueue_task.done():
+            enqueue_task.cancel()
+        async with postgres_pool.connection() as connection:
+            await connection.execute(
+                """
+                DROP TRIGGER IF EXISTS block_turn_job_insert_for_test
+                ON runtime.jobs
+                """
+            )
+            await connection.execute(
+                """
+                DROP FUNCTION IF EXISTS
+                runtime.block_turn_job_insert_for_test()
+                """
+            )
+
+
+@pytest.mark.asyncio
 async def test_claim_uses_unique_token_and_skip_locked(
     submissions, postgres_pool, customer_context
 ):
