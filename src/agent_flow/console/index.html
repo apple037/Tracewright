@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Agent Flow — Trace Console</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header id="app-header">
+    <h1>Agent Flow · Trace Console</h1>
+    <button id="simulator-toggle" type="button" aria-controls="simulator-panel" aria-expanded="false">
+      Open message simulator
+    </button>
+    <button id="logout-button" type="button" hidden>Sign out</button>
+  </header>
+
+  <dialog id="token-dialog" aria-labelledby="token-title">
+    <form id="token-form" method="dialog">
+      <h2 id="token-title">Demo authentication</h2>
+      <label for="token-input">Demo token</label>
+      <input id="token-input" name="token" type="password" autocomplete="off" required />
+      <button type="submit">Enter</button>
+    </form>
+  </dialog>
+
+  <main>
+    <aside id="trace-list" aria-label="Trace records"></aside>
+    <section id="trace-workspace" aria-live="polite"></section>
+  </main>
+
+  <aside id="simulator-panel" hidden aria-label="Inbound message simulator"></aside>
+  <div id="alert-region" role="alert" aria-live="assertive"></div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

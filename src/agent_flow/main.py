@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+import mimetypes
 from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
+
+
+# Windows registry can mismap these; force standard types for console assets.
+mimetypes.add_type("text/javascript", ".js")
+mimetypes.add_type("text/css", ".css")
 
 from agent_flow.api.dependencies import AppServices, ReadinessCheck
 from agent_flow.api.health import router as health_router
@@ -32,6 +39,15 @@ def _safe_dependency_checks(
         if key in checks:
             checks[key] = _normalize_check(value)
     return checks
+
+
+def mount_console(app: FastAPI) -> None:
+    """Serve the packaged trace console at /console from wheel resources."""
+    app.mount(
+        "/console",
+        StaticFiles(packages=[("agent_flow", "console")], html=True),
+        name="console",
+    )
 
 
 def create_app(
@@ -65,6 +81,7 @@ def create_app(
     app.include_router(submissions_router)
     app.include_router(traces_router)
     app.include_router(health_router)
+    mount_console(app)
     return app
 
 

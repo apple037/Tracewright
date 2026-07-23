@@ -18,6 +18,7 @@ from agent_flow.artifacts import load_runtime_artifacts
 from agent_flow.auth import DemoTokenAuthenticator
 from agent_flow.config import Settings, load_model_config
 from agent_flow.inbound import InboundMessageService
+from agent_flow.main import mount_console
 from agent_flow.model_registry import ModelInventoryProbe, ModelRegistry
 from agent_flow.observability import OperationTelemetry
 from agent_flow.pipeline.turn import TurnPipeline
@@ -152,4 +153,5 @@ def create_runtime_app(
     app.include_router(submissions_router)
     app.include_router(traces_router)
     app.include_router(health_router)
+    mount_console(app)
     return app
