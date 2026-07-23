@@ -36,6 +36,7 @@ def queued_submission():
         customer_id="customer-1",
         status="running",
         attempts=1,
+        retry_of_trace_id=None,
         payload={
             "message": _message_payload(),
             "retry": {
@@ -63,6 +64,8 @@ class FakeSubmissionRepository:
         self.original_trace_id = record.trace_id
         self.abandoned_error_code = None
         self.retry_of_trace_id = None
+        self.terminal_error_code = None
+        self.trace_status = "queued"
 
     async def claim(self, **_options):
         if self.claimed:
@@ -106,8 +109,26 @@ class FakeSubmissionRepository:
         self.abandoned_error_code = error_code
         old_trace_id = record.trace_id
         record.trace_id = uuid4()
+        record.retry_of_trace_id = old_trace_id
         self.retry_of_trace_id = old_trace_id
         return record
+
+    async def fail_terminal_with_trace(
+        self,
+        submission_id,
+        *,
+        error_code,
+        error_component,
+        **_options,
+    ):
+        record = next(row for row in self.records if row.id == submission_id)
+        record.status = "failed"
+        record.last_error_code = error_code
+        record.last_error_component = error_component
+        record.result = None
+        self.terminal_error_code = error_code
+        self.trace_status = "failed"
+        return True
 
     async def get_unscoped(self, submission_id):
         return next(row for row in self.records if row.id == submission_id)
@@ -267,11 +288,39 @@ async def test_reclaimed_active_trace_creates_retry_lineage(
 
 
 @pytest.mark.asyncio
+async def test_restarted_worker_uses_persisted_recovery_lineage(
+    fake_submission_repository, pipeline
+):
+    record = fake_submission_repository.records[0]
+    persisted_parent = uuid4()
+    replacement_trace = uuid4()
+    record.attempts = 3
+    record.trace_id = replacement_trace
+    record.retry_of_trace_id = persisted_parent
+
+    async def return_already_queued(*_args, **_options):
+        return record
+
+    fake_submission_repository.recover_expired_claim = return_already_queued
+
+    await TurnJobWorker(
+        repository=fake_submission_repository,
+        pipeline=pipeline,
+        owner="worker-3",
+        max_attempts=4,
+    ).run_once()
+
+    assert pipeline.calls[0][2]["trace_id"] == replacement_trace
+    assert pipeline.calls[0][2]["retry_of"] == persisted_parent
+
+
+@pytest.mark.asyncio
 async def test_worker_uses_stored_retry_controls_not_channel_metadata(
     fake_submission_repository, pipeline
 ):
     record = fake_submission_repository.records[0]
     retry_of = uuid4()
+    record.retry_of_trace_id = retry_of
     record.payload["retry"] = {
         "retry_of_trace_id": str(retry_of),
         "retry_initiator": "operator-1",
@@ -294,6 +343,25 @@ async def test_worker_uses_stored_retry_controls_not_channel_metadata(
 
 
 @pytest.mark.asyncio
+async def test_persisted_null_lineage_overrides_payload_retry_uuid(
+    fake_submission_repository, pipeline
+):
+    record = fake_submission_repository.records[0]
+    record.retry_of_trace_id = None
+    record.payload["retry"]["retry_of_trace_id"] = str(uuid4())
+
+    await TurnJobWorker(
+        repository=fake_submission_repository,
+        pipeline=pipeline,
+        owner="worker-1",
+    ).run_once()
+
+    options = pipeline.calls[0][2]
+    assert options["retry_of"] is None
+    assert options["max_retry_count"] is None
+
+
+@pytest.mark.asyncio
 async def test_invalid_payload_is_terminal_and_never_reaches_pipeline(
     fake_submission_repository, pipeline
 ):
@@ -309,6 +377,8 @@ async def test_invalid_payload_is_terminal_and_never_reaches_pipeline(
     assert stored.status == "failed"
     assert stored.last_error_code == "INVALID_PAYLOAD"
     assert stored.last_error_component == "turn_worker"
+    assert fake_submission_repository.terminal_error_code == "INVALID_PAYLOAD"
+    assert fake_submission_repository.trace_status == "failed"
     assert pipeline.calls == []
 
 
@@ -328,7 +398,39 @@ async def test_corrupt_authorization_scope_is_terminal(
     assert stored.status == "failed"
     assert stored.last_error_code == "AUTH_SCOPE_CORRUPTION"
     assert stored.last_error_component == "turn_worker"
+    assert (
+        fake_submission_repository.terminal_error_code
+        == "AUTH_SCOPE_CORRUPTION"
+    )
+    assert fake_submission_repository.trace_status == "failed"
     assert pipeline.calls == []
+
+
+@pytest.mark.asyncio
+async def test_reserved_trace_scope_corruption_terminally_fails_trace(
+    fake_submission_repository,
+):
+    class ScopeCorruptionPipeline:
+        async def run(self, *_args, **_options):
+            raise AgentError.auth(
+                "AUTH_SCOPE_CORRUPTION",
+                failure_stage="context_loader",
+                component="turn_worker",
+            )
+
+    await TurnJobWorker(
+        repository=fake_submission_repository,
+        pipeline=ScopeCorruptionPipeline(),
+        owner="worker-1",
+    ).run_once()
+
+    stored = fake_submission_repository.records[0]
+    assert stored.status == "failed"
+    assert (
+        fake_submission_repository.terminal_error_code
+        == "AUTH_SCOPE_CORRUPTION"
+    )
+    assert fake_submission_repository.trace_status == "failed"
 
 
 @pytest.mark.asyncio

@@ -152,11 +152,7 @@ class TurnJobWorker:
             result = await self.pipeline.run(
                 context,
                 message.to_turn_request(),
-                retry_of=(
-                    recovery_retry_of
-                    if recovery_retry_of is not None
-                    else retry["retry_of_trace_id"]
-                ),
+                retry_of=recovery_retry_of,
                 trace_id=record.trace_id,
                 retry_initiator=retry["retry_initiator"],
                 retry_reason=retry["retry_reason"],
@@ -166,41 +162,50 @@ class TurnJobWorker:
                 ),
                 max_retry_count=(
                     self.max_attempts
-                    if (
-                        recovery_retry_of is not None
-                        or retry["retry_of_trace_id"] is not None
-                    )
+                    if recovery_retry_of is not None
                     else None
                 ),
                 finalize_on_cancellation=False,
             )
         except _AuthorizationScopeCorruption:
-            await self._fail(
-                record,
+            await self.repository.fail_terminal_with_trace(
+                record.id,
+                owner=self.owner,
+                claim_token=record.claim_token,
                 error_code="AUTH_SCOPE_CORRUPTION",
                 error_component="turn_worker",
-                retryable=False,
             )
             return
         except _InvalidSubmission:
-            await self._fail(
-                record,
+            await self.repository.fail_terminal_with_trace(
+                record.id,
+                owner=self.owner,
+                claim_token=record.claim_token,
                 error_code="INVALID_PAYLOAD",
                 error_component="turn_worker",
-                retryable=False,
             )
             return
         except AgentError as error:
-            await self._fail(
-                record,
-                error_code=error.error_code,
-                error_component=(
-                    error.component
-                    or error.failure_stage
-                    or "turn_pipeline"
-                ),
-                retryable=error.retryable,
+            component = (
+                error.component
+                or error.failure_stage
+                or "turn_pipeline"
             )
+            if error.error_code == "AUTH_SCOPE_CORRUPTION":
+                await self.repository.fail_terminal_with_trace(
+                    record.id,
+                    owner=self.owner,
+                    claim_token=record.claim_token,
+                    error_code=error.error_code,
+                    error_component=component,
+                )
+            else:
+                await self._fail(
+                    record,
+                    error_code=error.error_code,
+                    error_component=component,
+                    retryable=error.retryable,
+                )
             return
         except (TimeoutError, OSError, OperationalError):
             await self._fail(
@@ -230,22 +235,14 @@ class TurnJobWorker:
         self, record: SubmissionRecord
     ) -> tuple[SubmissionRecord, UUID | None]:
         if record.attempts <= 1:
-            return record, None
-        original_trace_id = record.trace_id
+            return record, record.retry_of_trace_id
         recovered = await self.repository.recover_expired_claim(
             record.id,
             owner=self.owner,
             claim_token=record.claim_token,
             error_code="WORKER_LEASE_EXPIRED",
         )
-        return (
-            recovered,
-            (
-                original_trace_id
-                if recovered.trace_id != original_trace_id
-                else None
-            ),
-        )
+        return recovered, recovered.retry_of_trace_id
 
     def _decode(
         self, record: SubmissionRecord

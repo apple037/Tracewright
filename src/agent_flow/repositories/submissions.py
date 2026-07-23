@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
@@ -28,6 +28,7 @@ class SubmissionRecord:
     claim_token: UUID | None
     created_at: datetime
     finished_at: datetime | None
+    retry_of_trace_id: UUID | None = None
 
     def to_result(self) -> SubmissionResult:
         if self.result is not None:
@@ -46,10 +47,24 @@ id, trace_id, tenant_id, customer_id, status, attempts, payload, result,
 last_error_code, last_error_component, lease_expires_at, claim_token,
 created_at, finished_at
 """
+_COLUMNS_WITH_LINEAGE = f"""
+{_COLUMNS},
+(
+    SELECT traces.retry_of_trace_id
+    FROM observability.traces AS traces
+    WHERE traces.id = runtime.jobs.trace_id
+) AS retry_of_trace_id
+"""
 
 
 def _record(row: dict[str, Any]) -> SubmissionRecord:
-    return SubmissionRecord(**row)
+    values = {
+        field: row[field]
+        for field in SubmissionRecord.__dataclass_fields__
+        if field != "retry_of_trace_id"
+    }
+    values["retry_of_trace_id"] = row.get("retry_of_trace_id")
+    return SubmissionRecord(**values)
 
 
 class PostgresSubmissionRepository:
@@ -180,7 +195,7 @@ class PostgresSubmissionRepository:
         async with self._pool.connection() as connection:
             cursor = await connection.execute(
                 f"""
-                SELECT {_COLUMNS}
+                SELECT {_COLUMNS_WITH_LINEAGE}
                 FROM runtime.jobs
                 WHERE id = %s AND tenant_id = %s AND customer_id = %s
                   AND job_type = 'turn'
@@ -240,7 +255,7 @@ class PostgresSubmissionRepository:
                             claim_token = %s, last_error_code = NULL,
                             last_error_component = NULL
                         WHERE id = %s
-                        RETURNING {_COLUMNS}
+                        RETURNING id
                         """,
                         (
                             owner,
@@ -249,7 +264,10 @@ class PostgresSubmissionRepository:
                             selected["id"],
                         ),
                     )
-                    records.append(_record(await cursor.fetchone()))
+                    await cursor.fetchone()
+                    records.append(
+                        await self._get_required(connection, selected["id"])
+                    )
         return tuple(records)
 
     async def heartbeat(
@@ -402,6 +420,132 @@ class PostgresSubmissionRepository:
                     raise ValueError("submission does not have a matching active claim")
         return True
 
+    async def fail_terminal_with_trace(
+        self,
+        submission_id: UUID,
+        *,
+        owner: str,
+        claim_token: UUID,
+        error_code: str,
+        error_component: str,
+    ) -> bool:
+        if (
+            not owner
+            or not 1 <= len(error_code) <= 128
+            or not 1 <= len(error_component) <= 128
+        ):
+            raise ValueError(
+                "terminal failure settlement requires bounded safe fields"
+            )
+        async with self._pool.connection() as connection:
+            async with connection.transaction():
+                cursor = await connection.execute(
+                    """
+                    SELECT trace_id, status, lock_owner, claim_token,
+                           lease_expires_at > now() AS lease_active
+                    FROM runtime.jobs
+                    WHERE id = %s AND job_type = 'turn'
+                    FOR UPDATE
+                    """,
+                    (submission_id,),
+                )
+                job = await cursor.fetchone()
+                if job is None:
+                    raise ValueError("submission does not exist")
+                if (
+                    job["status"] != "running"
+                    or job["lock_owner"] != owner
+                    or job["claim_token"] != claim_token
+                    or not job["lease_active"]
+                ):
+                    raise ValueError(
+                        "submission does not have a matching active claim"
+                    )
+                cursor = await connection.execute(
+                    """
+                    SELECT id, tenant_id, customer_id, status
+                    FROM observability.traces
+                    WHERE id = %s
+                    FOR UPDATE
+                    """,
+                    (job["trace_id"],),
+                )
+                trace = await cursor.fetchone()
+                if trace is None:
+                    raise ValueError("submission trace does not exist")
+                if trace["status"] not in {"queued", "running"}:
+                    raise ValueError("submission trace is already finalized")
+                cursor = await connection.execute(
+                    """
+                    UPDATE observability.traces
+                    SET next_event_sequence = next_event_sequence + 1
+                    WHERE id = %s
+                    RETURNING next_event_sequence
+                    """,
+                    (trace["id"],),
+                )
+                sequence = (await cursor.fetchone())["next_event_sequence"]
+                cursor = await connection.execute(
+                    """
+                    INSERT INTO observability.events (
+                        trace_id, tenant_id, customer_id, sequence,
+                        event_type, component, status, error_code, payload,
+                        expires_at
+                    ) VALUES (
+                        %s, %s, %s, %s, 'worker.pre_pipeline_failed', %s,
+                        'failed', %s, %s, now() + interval '180 days'
+                    )
+                    RETURNING id
+                    """,
+                    (
+                        trace["id"],
+                        trace["tenant_id"],
+                        trace["customer_id"],
+                        sequence,
+                        error_component,
+                        error_code,
+                        Jsonb(
+                            {
+                                "node": "turn_worker",
+                                "operation": "pre_pipeline_validation",
+                            }
+                        ),
+                    ),
+                )
+                failure_event_id = (await cursor.fetchone())["id"]
+                await connection.execute(
+                    """
+                    UPDATE observability.traces
+                    SET status = 'failed', terminal_outcome = 'error',
+                        primary_failure_event_id = %s, finished_at = now()
+                    WHERE id = %s AND status IN ('queued', 'running')
+                    """,
+                    (failure_event_id, trace["id"]),
+                )
+                cursor = await connection.execute(
+                    """
+                    UPDATE runtime.jobs
+                    SET status = 'failed', last_error_code = %s,
+                        last_error_component = %s, result = NULL,
+                        lease_expires_at = NULL, finished_at = now()
+                    WHERE id = %s AND status = 'running'
+                      AND lock_owner = %s AND claim_token = %s
+                      AND lease_expires_at > now()
+                    """,
+                    (
+                        error_code,
+                        error_component,
+                        submission_id,
+                        owner,
+                        claim_token,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise ValueError(
+                        "submission does not have a matching active claim"
+                    )
+        return True
+
     async def recover_expired_claim(
         self,
         submission_id: UUID,
@@ -437,8 +581,8 @@ class PostgresSubmissionRepository:
                 cursor = await connection.execute(
                     """
                     SELECT id, tenant_id, customer_id, session_id, status,
-                           root_trace_id, retry_sequence, delivery_disposition,
-                           channel, external_message_id
+                           root_trace_id, retry_of_trace_id, retry_sequence,
+                           delivery_disposition, channel, external_message_id
                     FROM observability.traces
                     WHERE id = %s AND tenant_id = %s AND customer_id = %s
                     FOR UPDATE
@@ -449,11 +593,13 @@ class PostgresSubmissionRepository:
                 if trace is None:
                     raise ValueError("submission trace does not exist")
                 if trace["status"] == "queued":
-                    return _record(
-                        {
+                    return replace(
+                        _record({
                             field: job[field]
                             for field in SubmissionRecord.__dataclass_fields__
-                        }
+                            if field in job
+                        }),
+                        retry_of_trace_id=trace["retry_of_trace_id"],
                     )
                 if trace["status"] != "running":
                     raise ValueError("submission trace is already finalized")
@@ -560,7 +706,7 @@ class PostgresSubmissionRepository:
     ) -> SubmissionRecord | None:
         cursor = await connection.execute(
             f"""
-            SELECT {_COLUMNS}, job_type
+            SELECT {_COLUMNS_WITH_LINEAGE}, job_type
             FROM runtime.jobs
             WHERE tenant_id = %s AND idempotency_key = %s
             FOR UPDATE
@@ -647,7 +793,11 @@ class PostgresSubmissionRepository:
         self, connection, submission_id: UUID
     ) -> SubmissionRecord:
         cursor = await connection.execute(
-            f"SELECT {_COLUMNS} FROM runtime.jobs WHERE id = %s",
+            f"""
+            SELECT {_COLUMNS_WITH_LINEAGE}
+            FROM runtime.jobs
+            WHERE id = %s
+            """,
             (submission_id,),
         )
         row = await cursor.fetchone()

@@ -535,6 +535,151 @@ async def test_recover_expired_claim_retries_running_trace_atomically(
 
 
 @pytest.mark.asyncio
+async def test_recovery_lineage_survives_restart_before_replacement_activation(
+    submissions, customer_context, expire_job_lease, postgres_pool
+):
+    queued = await submissions.enqueue(customer_context, inbound_message())
+    traces = PostgresTraceRepository(postgres_pool)
+    await traces.activate_trace(
+        queued.trace_id, tenant_id="t1", expected_retry_of=None
+    )
+    first = (
+        await submissions.claim(
+            owner="worker-a", limit=1, lease_seconds=30, max_attempts=4
+        )
+    )[0]
+    await expire_job_lease(first.id)
+    second = (
+        await submissions.claim(
+            owner="worker-b", limit=1, lease_seconds=30, max_attempts=4
+        )
+    )[0]
+    replacement = await submissions.recover_expired_claim(
+        second.id,
+        owner="worker-b",
+        claim_token=second.claim_token,
+    )
+    replacement_trace_id = replacement.trace_id
+
+    # Simulate process death after recovery commits, before pipeline activation.
+    await expire_job_lease(first.id)
+    restarted = (
+        await submissions.claim(
+            owner="worker-c", limit=1, lease_seconds=30, max_attempts=4
+        )
+    )[0]
+    persisted = await submissions.recover_expired_claim(
+        restarted.id,
+        owner="worker-c",
+        claim_token=restarted.claim_token,
+    )
+
+    assert persisted.trace_id == replacement_trace_id
+    assert persisted.retry_of_trace_id == first.trace_id
+    await traces.activate_trace(
+        persisted.trace_id,
+        tenant_id=persisted.tenant_id,
+        expected_retry_of=persisted.retry_of_trace_id,
+    )
+    replacement_trace = await traces.get_trace(
+        persisted.trace_id, tenant_id=persisted.tenant_id
+    )
+    assert replacement_trace is not None
+    assert replacement_trace.status == "running"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error_code", "activate_first"),
+    [
+        ("INVALID_PAYLOAD", False),
+        ("AUTH_SCOPE_CORRUPTION", True),
+    ],
+)
+async def test_terminal_pre_pipeline_failure_atomically_finalizes_job_and_trace(
+    submissions,
+    customer_context,
+    postgres_pool,
+    error_code,
+    activate_first,
+):
+    queued = await submissions.enqueue(customer_context, inbound_message())
+    traces = PostgresTraceRepository(postgres_pool)
+    if activate_first:
+        await traces.activate_trace(
+            queued.trace_id, tenant_id="t1", expected_retry_of=None
+        )
+    claimed = (
+        await submissions.claim(
+            owner="worker-a", limit=1, lease_seconds=30, max_attempts=3
+        )
+    )[0]
+
+    await submissions.fail_terminal_with_trace(
+        claimed.id,
+        owner="worker-a",
+        claim_token=claimed.claim_token,
+        error_code=error_code,
+        error_component="turn_worker",
+    )
+
+    stored = await submissions.get(
+        claimed.id, tenant_id="t1", customer_id="c1"
+    )
+    trace = await traces.get_trace(claimed.trace_id, tenant_id="t1")
+    assert stored is not None
+    assert trace is not None
+    assert stored.status == "failed"
+    assert stored.last_error_code == error_code
+    assert stored.last_error_component == "turn_worker"
+    assert stored.result is None
+    assert trace.status == "failed"
+    assert trace.terminal_outcome == "error"
+    primary = next(
+        event
+        for event in trace.events
+        if event.id == trace.primary_failure_event_id
+    )
+    assert primary.error_code == error_code
+    assert primary.component == "turn_worker"
+    serialized = json.dumps(
+        {
+            "job": stored.result,
+            "event": primary.payload,
+        }
+    )
+    assert "private exception body" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_terminal_pre_pipeline_failure_requires_active_owner(
+    submissions, customer_context, postgres_pool
+):
+    queued = await submissions.enqueue(customer_context, inbound_message())
+    claimed = (
+        await submissions.claim(
+            owner="worker-a", limit=1, lease_seconds=30, max_attempts=3
+        )
+    )[0]
+
+    with pytest.raises(ValueError, match="matching active claim"):
+        await submissions.fail_terminal_with_trace(
+            claimed.id,
+            owner="worker-b",
+            claim_token=claimed.claim_token,
+            error_code="INVALID_PAYLOAD",
+            error_component="turn_worker",
+        )
+
+    stored = await submissions.get(
+        claimed.id, tenant_id="t1", customer_id="c1"
+    )
+    assert stored is not None
+    assert stored.status == "running"
+    assert await trace_status(postgres_pool, queued.trace_id) == "queued"
+
+
+@pytest.mark.asyncio
 async def test_activate_trace_is_scoped_lineage_checked_and_idempotent(
     submissions, customer_context, postgres_pool
 ):
