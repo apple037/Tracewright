@@ -8,11 +8,13 @@ handoff delivery, retention, and JSON operational logs. Bootstrap validation
 uses deterministic gates plus one Qwen semantic judge and therefore reports
 `reduced_assurance`. It is not approved for unattended production promotion.
 
-The repository currently exposes a dependency-injected FastAPI shell. A
-deployment must supply its authenticator, pipeline, conversation repository,
-and trace repository composition. Without that composition `/health/live`
-works, while `/health/ready` and authenticated turn APIs correctly remain
-unavailable.
+The repository ships a runnable **demo composition root**
+(`agent_flow.runtime:create_runtime_app`) that wires PostgreSQL repositories,
+the configured model gateway, deterministic mock RAG/tool adapters, and static
+demo-token authentication into FastAPI and one background turn worker. Inbound
+messages are queued in `runtime.jobs`, executed by the worker, and observed
+through a trace-first console at `/console/`. The dependency-injected
+`agent_flow.main:create_app` shell remains available for custom compositions.
 
 ## Prerequisites
 
@@ -128,11 +130,106 @@ overwritten. It validates and counts `tests/fixtures/tools.json`, which remains
 file-backed for the mock tool adapter; tool results are deliberately not indexed
 as RAG evidence. No model, remote RAG, tool, or webhook endpoint is called.
 
+## Demo Runtime, Console, and Submissions
+
+The Compose `app` service serves `agent_flow.runtime:create_runtime_app`. Its
+lifespan opens the pool, runs the required inventory/capability probes, and only
+reports `/health/ready` once every model role is verified. Bring up the full
+demo:
+
+```powershell
+docker compose up --build
+```
+
+### Demo tokens (demo only)
+
+The console authenticates with two static bearer tokens. They exist for the demo
+only and must never gate a real deployment. Set them locally in the Git-ignored
+`.env` with at least 16 characters each; never commit them or copy them into
+`.env.example`:
+
+```powershell
+$env:DEMO_CUSTOMER_TOKEN = [guid]::NewGuid().ToString("N")
+$env:DEMO_ADMIN_TOKEN = [guid]::NewGuid().ToString("N")
+Add-Content .env "DEMO_CUSTOMER_TOKEN=$($env:DEMO_CUSTOMER_TOKEN)"
+Add-Content .env "DEMO_ADMIN_TOKEN=$($env:DEMO_ADMIN_TOKEN)"
+```
+
+`APP_RUNTIME_MODE=demo` enables this authenticator; `production` rejects it until
+a real authenticator is implemented.
+
+### Trace console
+
+Open `http://localhost:8080/console/` and paste the customer token into the
+dialog. The token stays only in JavaScript memory — never in URLs, storage,
+cookies, logs, or traces — so a page refresh returns to the token dialog. The
+collapsible simulator submits an inbound message; the trace-first workspace polls
+structured events and opens failed nodes with their exact error location. Manual
+retry creates an immutable `review_required` trace under the same lineage.
+
+### Submission API
+
+The console uses the same channel-neutral queue you can drive directly. The
+request body carries no `customer_id`; scope is bound from the bearer token:
+
+```powershell
+$headers = @{ Authorization = "Bearer $env:DEMO_CUSTOMER_TOKEN" }
+$body = @{
+  channel = "console"
+  external_message_id = [guid]::NewGuid().ToString("N")
+  session_id = "demo-session-1"
+  text = "我的訂單在哪裡？"
+  idempotency_key = [guid]::NewGuid().ToString("N")
+  metadata = @{ source = "trace-console" }
+} | ConvertTo-Json
+
+$receipt = Invoke-RestMethod -Method Post `
+  -Uri http://localhost:8080/api/v1/submissions `
+  -Headers $headers -ContentType application/json -Body $body
+
+Invoke-RestMethod `
+  -Uri "http://localhost:8080/api/v1/submissions/$($receipt.submission_id)" `
+  -Headers $headers
+Invoke-RestMethod -Uri "http://localhost:8080/api/v1/traces" -Headers $headers
+```
+
+Poll the submission and its trace events to a terminal safe response or explicit
+handoff. Replaying an identical `idempotency_key` returns the same receipt.
+
+### Queue recovery and failure locations
+
+The worker claims jobs with `FOR UPDATE SKIP LOCKED`, a fresh claim token, and an
+expiring lease. If a worker dies mid-turn, the next claim finalizes the abandoned
+trace with the safe code `WORKER_LEASE_EXPIRED`, reserves a retry trace under the
+same root, and re-executes it; both traces stay queryable. Every failure maps to
+a diagnosable location. Read the chain left to right:
+
+```text
+readiness check -> model role -> probe stage -> trace node -> component ->
+operation -> safe error code -> automatic/manual retry disposition
+```
+
+Example: readiness `models` unavailable → role `response_generator` → stage
+`capability` → node `response_generator` → component `model` → operation
+`chat` → safe error code `MODEL_CAPABILITY_FAILED` → manual retry once the model
+is restored. A tool timeout surfaces as node `evidence_collector` → component
+`order_api` → operation `order.lookup` → safe error code `TOOL_TIMEOUT` with a
+bounded automatic retry. No model content or hidden reasoning is ever rendered.
+
+### Future LINE adapter boundary
+
+`InboundMessage.channel` is a bounded string, not a `Literal`, so a future LINE
+adapter adds a channel value without a migration or a console rewrite. The LINE
+adapter, its webhook verification, and outbound delivery are intentionally out of
+scope for this demo.
+
 ## Model Registry and Inventory Gate
 
 `config/models.bootstrap.example.yaml` maps roles to replaceable profiles and
-profiles to replaceable endpoints. Endpoint semaphores are authoritative when
-their cap is lower than the sum of role/profile concurrency.
+profiles to replaceable endpoints. Model role names are stable while profile and
+model names are replaceable, and the remote roles use an OpenAI-compatible remote
+endpoint for structured and embedding calls. Endpoint semaphores are
+authoritative when their cap is lower than the sum of role/profile concurrency.
 
 `response_generator` requires `chat`, `structured_json`, and
 `reasoning_toggle`. A matching model name and `max_model_len=6144` are not enough:
@@ -310,12 +407,11 @@ loop. Linux Compose does not require that Windows-only test/runtime adjustment.
 - **Native Windows psycopg loop:** use the Selector-compatible loop for explicit
   async database integration. This is not needed inside Linux containers.
 
-## Deferred: Incident-first Console, Dual Judge, Improvement Lifecycle
+## Deferred: LINE Channel, Dual Judge, Improvement Lifecycle
 
-The horizontal incident-first trace console (click-to-expand steps, failed steps
-open by default, exact error location, manual retry), bounded context
-compaction/per-role views, orchestrator mode and queue expansion, Gemma/Qwen
-dual judging, and gated self-improvement ledger are intentionally deferred.
-Promotion remains human-only in bootstrap, and any future improvement candidate
-must pass deterministic, safety, regression, and semantic tests before atomic
-activation.
+The incident-first trace console and channel-neutral submission queue are now
+built (see above). Still deferred: the LINE inbound adapter, bounded context
+compaction/per-role views, orchestrator mode and multi-worker queue expansion,
+Gemma/Qwen dual judging, and the gated self-improvement ledger. Promotion remains
+human-only in bootstrap, and any future improvement candidate must pass
+deterministic, safety, regression, and semantic tests before atomic activation.

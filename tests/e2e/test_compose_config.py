@@ -211,6 +211,31 @@ def test_readme_remote_ollama_and_outbox_checks_are_endpoint_and_tenant_scoped()
     assert "tenant_id = '<tenant-id>'" in readme
 
 
+def test_readme_documents_live_trace_console_demo():
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    required = [
+        "uv sync --frozen",
+        "Qwen/Qwen3-8B-AWQ",
+        "--max-model-len 6144",
+        "localhost:8000",
+        "OpenAI-compatible remote",
+        "role names are stable",
+        "DEMO_CUSTOMER_TOKEN",
+        "demo only",
+        "docker compose up --build",
+        "/health/ready",
+        "/api/v1/submissions",
+        "/console/",
+        "WORKER_LEASE_EXPIRED",
+        "readiness check",
+        "safe error code",
+        "LINE adapter",
+    ]
+    missing = [needle for needle in required if needle not in readme]
+    assert missing == [], f"README is missing: {missing}"
+
+
 def test_worker_module_exposes_explicit_runtime_cli():
     from agent_flow.worker import build_argument_parser
 
