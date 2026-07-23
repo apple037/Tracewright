@@ -11,6 +11,20 @@ from agent_flow.api.turns import router as turns_router
 from agent_flow.artifacts import load_runtime_artifacts
 
 
+_READINESS_CHECKS = frozenset({"database", "models"})
+_READINESS_STATUSES = frozenset({"ok", "missing", "invalid", "unavailable"})
+
+
+def _safe_dependency_checks(values: dict[str, str] | None) -> dict[str, str]:
+    return {
+        key: value
+        if isinstance(value, str) and value in _READINESS_STATUSES
+        else "unavailable"
+        for key, value in (values or {}).items()
+        if key in _READINESS_CHECKS
+    }
+
+
 def create_app(
     *, pipeline=None, traces=None, conversations=None, authenticate=None,
     artifact_root: Path = Path("config"),
@@ -32,7 +46,7 @@ def create_app(
         pipeline=pipeline, traces=traces, conversations=conversations,
         authenticate=authenticate, artifact_root=artifact_root,
         artifact_status=artifact_status,
-        dependency_checks=dict(dependency_checks or {}),
+        dependency_checks=_safe_dependency_checks(dependency_checks),
     )
     app.include_router(turns_router)
     app.include_router(traces_router)

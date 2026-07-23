@@ -19,6 +19,7 @@ def test_bootstrap_migration_declares_required_storage() -> None:
         assert f'CREATE SCHEMA IF NOT EXISTS {schema}' in source
     for table in (
         "conversations",
+        "turn_inputs",
         "turns",
         "jobs",
         "traces",
@@ -84,6 +85,12 @@ async def test_trace_events_are_monotonic_and_locate_failure(trace_repository):
     assert [item.sequence for item in loaded.events] == [1]
     assert loaded.events[0].payload == {"field_path": "draft.delivery_date"}
     assert await trace_repository.get_trace(trace_id, tenant_id="other") is None
+    assert await trace_repository.get_trace(
+        trace_id, tenant_id="t1", customer_id="c2"
+    ) is None
+    assert await trace_repository.events_after(
+        trace_id, tenant_id="t1", customer_id="c2", after_sequence=0
+    ) == ()
 
 
 @pytest.mark.asyncio
@@ -224,22 +231,34 @@ async def test_turn_input_is_scoped_immutable_and_can_bind_retry(
 
 @pytest.mark.asyncio
 async def test_retry_limit_is_atomic_across_root_siblings(trace_repository):
+    import asyncio
+
     root = await trace_repository.start_trace(
         tenant_id="t1", customer_id="c1", session_id="limit-s"
     )
-    for _ in range(3):
-        await trace_repository.start_trace(
-            tenant_id="t1", customer_id="c1", session_id="limit-s",
-            retry_of_trace_id=root, max_retry_count=3,
-        )
+    results = await asyncio.gather(
+        *(
+            trace_repository.start_trace(
+                tenant_id="t1", customer_id="c1", session_id="limit-s",
+                retry_of_trace_id=root, max_retry_count=3,
+            )
+            for _ in range(8)
+        ),
+        return_exceptions=True,
+    )
+    succeeded = [item for item in results if not isinstance(item, BaseException)]
+    rejected = [item for item in results if isinstance(item, BaseException)]
+    loaded = [
+        await trace_repository.get_trace(item, tenant_id="t1", customer_id="c1")
+        for item in succeeded
+    ]
+    assert len(succeeded) == 3
+    assert len(rejected) == 5
+    assert sorted(item.retry_sequence for item in loaded) == [1, 2, 3]
     assert await trace_repository.count_retries(
         root, tenant_id="t1", customer_id="c1"
     ) == 3
-    with pytest.raises(ValueError, match="lineage limit"):
-        await trace_repository.start_trace(
-            tenant_id="t1", customer_id="c1", session_id="limit-s",
-            retry_of_trace_id=root, max_retry_count=3,
-        )
+    assert all("lineage limit" in str(item) for item in rejected)
 
 
 @pytest.mark.asyncio

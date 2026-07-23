@@ -469,19 +469,23 @@ class PostgresTraceRepository:
                         return
                     raise ValueError("trace is already finalized with conflicting values")
 
-    async def get_trace(self, trace_id: UUID, *, tenant_id: str) -> TraceRecord | None:
+    async def get_trace(
+        self, trace_id: UUID, *, tenant_id: str, customer_id: str | None = None
+    ) -> TraceRecord | None:
         async with self._pool.connection() as connection:
-            cursor = await connection.execute(
-                """
+            query = """
                 SELECT id, tenant_id, customer_id, session_id, status,
                        terminal_outcome, primary_failure_event_id, root_trace_id,
                        retry_of_trace_id, retry_sequence, retry_initiator,
                        retry_reason, delivery_disposition, created_at, finished_at
                 FROM observability.traces
                 WHERE id = %s AND tenant_id = %s
-                """,
-                (trace_id, tenant_id),
-            )
+            """
+            parameters: tuple[Any, ...] = (trace_id, tenant_id)
+            if customer_id is not None:
+                query += " AND customer_id = %s"
+                parameters += (customer_id,)
+            cursor = await connection.execute(query, parameters)
             trace = await cursor.fetchone()
             if trace is None:
                 return None
@@ -498,13 +502,16 @@ class PostgresTraceRepository:
         return TraceRecord(**trace, spans=spans, events=events)
 
     async def events_after(
-        self, trace_id: UUID, *, tenant_id: str, after_sequence: int
+        self, trace_id: UUID, *, tenant_id: str, after_sequence: int,
+        customer_id: str | None = None,
     ) -> tuple[TraceEvent, ...]:
         async with self._pool.connection() as connection:
-            cursor = await connection.execute(
-                "SELECT 1 FROM observability.traces WHERE id = %s AND tenant_id = %s",
-                (trace_id, tenant_id),
-            )
+            query = "SELECT 1 FROM observability.traces WHERE id = %s AND tenant_id = %s"
+            parameters: tuple[Any, ...] = (trace_id, tenant_id)
+            if customer_id is not None:
+                query += " AND customer_id = %s"
+                parameters += (customer_id,)
+            cursor = await connection.execute(query, parameters)
             if await cursor.fetchone() is None:
                 return ()
             return await self._events(connection, trace_id, after_sequence)

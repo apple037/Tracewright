@@ -9,6 +9,7 @@ from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from agent_flow.api.dependencies import principal, require_scope, services
+from agent_flow.api.sanitization import sanitize_trace_value
 from agent_flow.auth import AuthenticatedPrincipal, bind_customer_context
 from agent_flow.errors import AgentError
 
@@ -26,17 +27,17 @@ class ManualRetryRequest(BaseModel):
         normalized = value.strip()
         if not normalized:
             raise ValueError("reason must not be blank")
-        return normalized
+        return value
+
+
+def _trace_customer_scope(authenticated: AuthenticatedPrincipal) -> str | None:
+    require_scope(
+        authenticated, "trace:internal", "trace:admin", "trace:retry"
+    )
+    return authenticated.customer_id
 
 
 def _trace_access(authenticated: AuthenticatedPrincipal, trace) -> Any:
-    require_scope(
-        authenticated, "trace:read", "trace:internal", "trace:admin", "trace:retry"
-    )
-    if authenticated.customer_id is not None and authenticated.scopes.isdisjoint(
-        {"trace:internal", "trace:admin", "trace:retry"}
-    ):
-        raise HTTPException(status_code=403, detail="internal trace access required")
     try:
         return bind_customer_context(authenticated, trace.customer_id, trace.customer_id)
     except AgentError as error:
@@ -44,10 +45,13 @@ def _trace_access(authenticated: AuthenticatedPrincipal, trace) -> Any:
 
 
 async def _scoped_trace(request: Request, trace_id: UUID, authenticated):
+    customer_id = _trace_customer_scope(authenticated)
     repository = services(request).traces
     if repository is None:
         raise HTTPException(status_code=503, detail="trace repository unavailable")
-    trace = await repository.get_trace(trace_id, tenant_id=authenticated.tenant_id)
+    trace = await repository.get_trace(
+        trace_id, tenant_id=authenticated.tenant_id, customer_id=customer_id
+    )
     if trace is None:
         raise HTTPException(status_code=404, detail="trace not found")
     _trace_access(authenticated, trace)
@@ -57,20 +61,7 @@ async def _scoped_trace(request: Request, trace_id: UUID, authenticated):
 def _public_values(value) -> dict[str, Any]:
     raw = vars(value).copy()
     raw.pop("issue_summary", None)
-    return jsonable_encoder(_safe_trace_value(raw))
-
-
-def _safe_trace_value(value):
-    if isinstance(value, dict):
-        forbidden = ("authorization", "api_key", "password", "secret", "thinking", "chain_of_thought", "raw_prompt")
-        return {
-            key: _safe_trace_value(item)
-            for key, item in value.items()
-            if not any(marker in str(key).lower() for marker in forbidden)
-        }
-    if isinstance(value, (list, tuple)):
-        return [_safe_trace_value(item) for item in value]
-    return value
+    return jsonable_encoder(sanitize_trace_value(raw))
 
 
 @router.get("/traces/{trace_id}")
@@ -97,7 +88,9 @@ async def incremental_events(
 ):
     trace = await _scoped_trace(request, trace_id, authenticated)
     events = await services(request).traces.events_after(
-        trace.id, tenant_id=authenticated.tenant_id, after_sequence=after_sequence
+        trace.id, tenant_id=authenticated.tenant_id,
+        customer_id=_trace_customer_scope(authenticated),
+        after_sequence=after_sequence,
     )
     return {"trace_id": trace.id, "events": [_public_values(item) for item in events]}
 

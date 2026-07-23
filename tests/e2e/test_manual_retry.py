@@ -78,7 +78,7 @@ def client_for(app):
 async def test_manual_retry_is_admin_only_and_review_required(app_factory, pipeline):
     source = await seed_source(pipeline)
     app = app_factory()
-    body = {"reason": "operator verified transient failure"}
+    body = {"reason": "  operator verified transient failure  "}
     async with client_for(app) as client:
         forbidden = await client.post(
             f"/api/v1/traces/{source}/retry", headers={"Authorization": "Bearer customer"}, json=body
@@ -94,7 +94,7 @@ async def test_manual_retry_is_admin_only_and_review_required(app_factory, pipel
     replay = pipeline.traces.records[__import__("uuid").UUID(payload["trace_id"])]
     assert replay.retry_of_trace_id == source
     assert replay.retry_initiator == "admin-u1"
-    assert replay.retry_reason == "operator verified transient failure"
+    assert replay.retry_reason == "  operator verified transient failure  "
     assert replay.delivery_disposition == "review_required"
     assert replay.id not in pipeline.conversations.turns_by_trace
     assert pipeline.conversations.inputs[replay.id] == pipeline.conversations.inputs[source]
@@ -170,3 +170,33 @@ async def test_manual_retry_maps_atomic_lineage_limit_race_to_conflict(app_facto
             json={"reason": "reviewed"},
         )
     assert response.status_code == 409
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("case", "expected"),
+    (("missing_input", 404), ("missing_snapshot", 404), ("snapshot_expired", 409)),
+)
+async def test_manual_retry_rejects_each_missing_or_expired_capture_before_pipeline(
+    app_factory, pipeline, case, expected
+):
+    source = await seed_source(pipeline)
+    if case == "missing_input":
+        pipeline.conversations.inputs.pop(source)
+    elif case == "missing_snapshot":
+        pipeline.conversations.snapshots.pop(source)
+    else:
+        snapshot = pipeline.conversations.snapshots[source]
+        pipeline.conversations.snapshots[source] = snapshot.model_copy(
+            update={"captured_at": pipeline.clock.now() - timedelta(days=31)}
+        )
+    recording = RecordingRetryPipeline(pipeline)
+    app = app_factory(pipeline_override=recording)
+    async with client_for(app) as client:
+        response = await client.post(
+            f"/api/v1/traces/{source}/retry",
+            headers={"Authorization": "Bearer admin"},
+            json={"reason": "reviewed"},
+        )
+    assert response.status_code == expected
+    assert recording.calls == []

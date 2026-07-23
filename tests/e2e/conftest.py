@@ -113,12 +113,20 @@ class MemoryTraces:
                 component=event.component, operation=event.operation,
             )
 
-    async def get_trace(self, trace_id, *, tenant_id):
+    async def get_trace(self, trace_id, *, tenant_id, customer_id=None):
         record = self.records.get(trace_id)
-        return record if record is not None and record.tenant_id == tenant_id else None
+        return (
+            record
+            if record is not None
+            and record.tenant_id == tenant_id
+            and (customer_id is None or record.customer_id == customer_id)
+            else None
+        )
 
-    async def events_after(self, trace_id, *, tenant_id, after_sequence):
-        record = await self.get_trace(trace_id, tenant_id=tenant_id)
+    async def events_after(self, trace_id, *, tenant_id, after_sequence, customer_id=None):
+        record = await self.get_trace(
+            trace_id, tenant_id=tenant_id, customer_id=customer_id
+        )
         if record is None:
             return ()
         return tuple(event for event in record.events if event.sequence > after_sequence)
@@ -188,7 +196,11 @@ class MemoryConversations:
 
     async def get_retry_snapshot(self, trace_id, *, tenant_id, customer_id, bind_trace_id=None):
         scope = self.scopes.get(trace_id)
-        if scope is None or scope[:2] != (tenant_id, customer_id):
+        if (
+            scope is None
+            or scope[:2] != (tenant_id, customer_id)
+            or trace_id not in self.snapshots
+        ):
             raise ValueError("retry snapshot does not exist in this scope")
         snapshot = self.snapshots[trace_id]
         if bind_trace_id is not None:
@@ -285,20 +297,31 @@ def app_factory(pipeline):
             subject_id="admin-u2", tenant_id="t2", customer_id=None,
             scopes=frozenset({"customer:act_as", "trace:read", "trace:retry"}),
         ),
+        "internal-c2": AuthenticatedPrincipal(
+            subject_id="internal-u2", tenant_id="t1", customer_id="c2",
+            scopes=frozenset({"trace:internal"}),
+        ),
     }
 
     async def authenticate(token):
         return principals.get(token)
 
-    def factory(*, artifact_root=__import__("pathlib").Path("config"), pipeline_override=None):
+    def factory(
+        *, artifact_root=__import__("pathlib").Path("config"),
+        pipeline_override=None, traces_override=None,
+        dependency_checks=None,
+    ):
         selected = pipeline_override or pipeline
         return create_app(
             pipeline=selected,
-            traces=selected.traces,
+            traces=traces_override or selected.traces,
             conversations=selected.conversations,
             authenticate=authenticate,
             artifact_root=artifact_root,
-            dependency_checks={"database": "ok", "models": "ok"},
+            dependency_checks=(
+                {"database": "ok", "models": "ok"}
+                if dependency_checks is None else dependency_checks
+            ),
         )
 
     return factory
