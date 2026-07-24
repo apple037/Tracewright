@@ -702,6 +702,13 @@ body.chat-page { height: 100vh; overflow: hidden; }
   color: var(--accent);
   margin-bottom: 0.25rem;
 }
+.reasoning-cot-model {
+  display: block;
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  color: var(--text-dim);
+  margin-bottom: 0.3rem;
+}
 .reasoning-cot-text {
   margin: 0;
   max-height: 260px;

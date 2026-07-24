@@ -202,13 +202,28 @@ function renderConversation(trace) {
     details.appendChild(el("summary", {
       text: `${t("io.reasoning")} · ${reasoning.length}`,
     }));
+    // Same node can reason more than once (retries, repair passes), so number
+    // every step and add a per-node pass count — the raw CoT is otherwise
+    // ambiguous about which flow it belongs to.
+    const nodeTotals = {};
     for (const step of reasoning) {
+      const node = String(step.node || "");
+      nodeTotals[node] = (nodeTotals[node] || 0) + 1;
+    }
+    const nodeSeen = {};
+    reasoning.forEach((step, index) => {
+      const node = String(step.node || "");
+      nodeSeen[node] = (nodeSeen[node] || 0) + 1;
       const block = el("div", { class: "reasoning-cot" });
-      const label = step.model_role ? `${step.node} · ${step.model_role}` : String(step.node || "");
-      block.appendChild(el("span", { class: "reasoning-cot-node", text: label }));
+      const parts = [`#${index + 1}`, node];
+      if (step.model_role) parts.push(step.model_role);
+      if (nodeTotals[node] > 1) parts.push(`${t("io.pass")} ${nodeSeen[node]}/${nodeTotals[node]}`);
+      if (Number(step.attempt) > 1) parts.push(`${t("io.attempt")} ${step.attempt}`);
+      block.appendChild(el("span", { class: "reasoning-cot-node", text: parts.join(" · ") }));
+      if (step.model) block.appendChild(el("span", { class: "reasoning-cot-model", text: String(step.model) }));
       block.appendChild(el("pre", { class: "reasoning-cot-text", text: String(step.text || "") }));
       details.appendChild(block);
-    }
+    });
     panel.appendChild(details);
   }
   return panel;

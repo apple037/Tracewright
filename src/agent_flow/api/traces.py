@@ -152,6 +152,8 @@ def _admin_reasoning(trace) -> list[dict[str, Any]]:
         steps.append({
             "node": payload.get("node"),
             "model_role": payload.get("model_role"),
+            "model": payload.get("model"),
+            "attempt": payload.get("attempt"),
             "text": text,
         })
     return steps
