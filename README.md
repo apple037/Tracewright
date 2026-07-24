@@ -234,6 +234,81 @@ Health checks: `http://localhost:8000/health/live` (alive) and
 
 ---
 
+## Operations reference
+
+Detail for whoever runs or extends this. The friendly guide above is enough for
+a demo; this section is the operational contract.
+
+### Models & configuration
+
+- Each pipeline step is a **model role** (`dialogue_classifier`,
+  `strategy_advisor`, `response_generator`, `response_judge`, `embedding`, …).
+  the **role names are stable**; the *profile* and *model* names behind them are
+  replaceable in `config/models.bootstrap.example.yaml`. Swap models there, not
+  in code.
+- The initial local model is **`Qwen/Qwen3-8B-AWQ`**. Start it on the host on
+  `localhost:8000` (OpenAI-compatible) and inspect the launch arguments for
+  `--max-model-len 6144`.
+- The remote roles use an **OpenAI-compatible remote** endpoint
+  (`REMOTE_MODEL_BASE_URL`). For an all-local flow check, point every LLM role
+  at the local profile (see `config/models.local.yaml`) and set
+  `MODEL_CONFIG_PATH` to it.
+- Verify the remote endpoint directly rather than the Ollama CLI's implicit
+  localhost:
+
+  ```powershell
+  $remoteBase = $env:REMOTE_MODEL_BASE_URL.TrimEnd('/')
+  Invoke-RestMethod "$remoteBase/api/tags" | ConvertTo-Json -Depth 8
+  foreach ($model in @("qwen3.5:9b", "qwen3:embedding:0.6b")) {
+    $body = @{ model = $model } | ConvertTo-Json
+    Invoke-RestMethod "$remoteBase/api/show" `
+      -Method Post -ContentType application/json -Body $body |
+      ConvertTo-Json -Depth 8
+  }
+  ```
+
+### Demo tokens (demo only)
+
+The console authenticates with two static bearer tokens that exist for the
+**demo only** and must never gate a real deployment. Set `DEMO_CUSTOMER_TOKEN`
+and `DEMO_ADMIN_TOKEN` (≥ 16 chars each) in the Git-ignored `.env`; never commit
+them. `APP_RUNTIME_MODE=demo` enables this authenticator; `production` rejects
+it.
+
+### Running & submitting
+
+- `docker compose up --build` starts postgres + app + worker. The app serves the
+  console at `/console/` and reports `/health/ready` only after every model role
+  passes its **readiness check**.
+- Drive the queue directly (same path the console uses); scope is bound from the
+  bearer token, so the body carries no `customer_id`:
+
+  ```
+  POST /api/v1/submissions
+  { "channel": "console", "external_message_id": "...", "session_id": "...",
+    "text": "...", "idempotency_key": "..." }
+  ```
+
+### Failure & retry model
+
+- Every failure maps through one chain:
+  `readiness check -> model role -> probe stage -> trace node -> component ->
+  operation -> safe error code -> automatic/manual retry disposition`.
+- Failures surface as a **safe error code**, never raw internals — e.g. a stalled
+  worker lease finishes the trace with `WORKER_LEASE_EXPIRED` and reserves a
+  retry trace; a tool timeout surfaces as `TOOL_TIMEOUT` on component
+  `order_api`, operation `order.lookup`.
+- Inspect a failed handoff outbox for one authorized tenant only:
+  `select tenant_id,id,status,attempts,last_error_code,last_http_status,next_attempt_at from notification.outbox where tenant_id = '<tenant-id>' and status='failed' order by created_at desc;`
+
+### Extending: the future LINE adapter boundary
+
+The submission API is channel-neutral. A future **LINE adapter** (or any
+channel) plugs in by translating inbound webhooks into the same
+`POST /api/v1/submissions` shape and mapping replies back — no pipeline changes.
+
+---
+
 ## License / status
 
 Bootstrap demo runtime. Use it to learn, demo, and build on — validate and
