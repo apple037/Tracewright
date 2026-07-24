@@ -648,3 +648,33 @@ def _snapshot():
     return ConversationSnapshot(
         session_id="s1", messages=("訂單呢？",), captured_at=datetime.now(timezone.utc)
     )
+
+
+def test_model_output_reason_codes_dedupe_preserving_order():
+    # Small models sometimes repeat a reason code many times; the result models
+    # collapse duplicates so a single node never shows NO_EVIDENCE_REQUIRED x9.
+    from agent_flow.pipeline.model_outputs import (
+        JudgeVerdictResult,
+        StrategyProposalResult,
+    )
+
+    strat = StrategyProposalResult.model_validate(
+        {
+            "strategy_version": "v1",
+            "response_mode": "business_first",
+            "answer_order": ["status"],
+            "reason_codes": ["NO_EVIDENCE_REQUIRED"] * 9 + ["BUSINESS_FIRST"],
+        }
+    )
+    assert strat.reason_codes == ["NO_EVIDENCE_REQUIRED", "BUSINESS_FIRST"]
+
+    judge = JudgeVerdictResult.model_validate(
+        {
+            "passed": False,
+            "confidence": 0.4,
+            "failed_criteria": ["CITATION_MISMATCH", "CITATION_MISMATCH"],
+            "reason_codes": ["REPAIR_REQUIRED", "REPAIR_REQUIRED"],
+        }
+    )
+    assert judge.failed_criteria == ("CITATION_MISMATCH",)
+    assert judge.reason_codes == ("REPAIR_REQUIRED",)

@@ -65,7 +65,28 @@ JudgeReasonCode = Literal[
 ]
 
 
-class BoundedEmotionAssessment(EmotionAssessment):
+def _unique(values):
+    # Order-preserving dedupe. Small models sometimes repeat the same reason
+    # code many times in one list (e.g. NO_EVIDENCE_REQUIRED x9); the codes are
+    # a set, so collapse dupes before Literal validation and length bounds.
+    if isinstance(values, (list, tuple)):
+        return list(dict.fromkeys(values))
+    return values
+
+
+class _DedupeCodes:
+    @model_validator(mode="before")
+    @classmethod
+    def _dedupe_code_lists(cls, data):
+        if isinstance(data, dict):
+            data = dict(data)
+            for key in ("reason_codes", "failed_criteria"):
+                if key in data:
+                    data[key] = _unique(data[key])
+        return data
+
+
+class BoundedEmotionAssessment(_DedupeCodes, EmotionAssessment):
     reason_codes: tuple[EmotionReasonCode, ...] = Field(max_length=20)
 
 
@@ -73,11 +94,11 @@ class DialogueClassificationResult(DialogueClassification):
     emotion: BoundedEmotionAssessment
 
 
-class StrategyProposalResult(StrategyProposal):
+class StrategyProposalResult(_DedupeCodes, StrategyProposal):
     reason_codes: list[StrategyReasonCode] = Field(max_length=20)
 
 
-class JudgeVerdictResult(JudgeVerdict):
+class JudgeVerdictResult(_DedupeCodes, JudgeVerdict):
     failed_criteria: tuple[JudgeCriterion, ...] = Field(max_length=20)
     reason_codes: tuple[JudgeReasonCode, ...] = Field(max_length=20)
 
