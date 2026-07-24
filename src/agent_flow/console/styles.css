@@ -127,6 +127,53 @@ main {
   min-height: calc(100vh - 53px);
 }
 
+/* Demo console: trace list · workspace · live customer chat, all in one view. */
+body.demo-page { height: 100vh; overflow: hidden; }
+main.demo-grid {
+  grid-template-columns: minmax(230px, 300px) minmax(0, 1fr) minmax(320px, 400px);
+  height: calc(100vh - 53px);
+  min-height: 0;
+}
+main.demo-grid > * { min-height: 0; }
+
+#chat-panel {
+  display: flex;
+  flex-direction: column;
+  background: var(--surface-1);
+  border-left: 1px solid var(--border);
+  overflow: hidden;
+}
+
+#chat-panel-header {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  padding: 0.8rem 1rem;
+  border-bottom: 1px solid var(--border-soft);
+}
+#chat-panel-header .sim-title { font-weight: 600; font-size: 0.92rem; }
+#chat-panel-header .sim-sub { font-size: 0.72rem; color: var(--text-dim); }
+
+#chat-panel #chat-transcript {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 1rem;
+  overflow-y: auto;
+}
+
+#chat-panel #chat-form {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  border-top: 1px solid var(--border-soft);
+  background: var(--surface-0);
+}
+#chat-panel #chat-form textarea { flex: 1 1 auto; min-height: 2.6rem; }
+#chat-panel #chat-form button { flex: 0 0 auto; white-space: nowrap; }
+
 #trace-list {
   background: var(--surface-1);
   border-right: 1px solid var(--border-soft);
@@ -360,46 +407,69 @@ dialog h2 { margin: 0 0 0.4rem; font-size: 1rem; }
   padding: 0;
 }
 
-/* ---------- Simulator drawer ---------- */
+/* ---------- Header ghost links ---------- */
 
-#simulator-panel {
-  position: fixed;
-  top: 53px;
-  right: 0;
-  bottom: 0;
-  width: min(380px, 100vw);
-  z-index: 9;
+.ghost-button {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+  background: transparent;
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.42rem 0.9rem;
+  font-size: 0.85rem;
+  transition: color 0.12s ease, border-color 0.12s ease;
+}
+.ghost-button:hover { color: var(--text); border-color: var(--accent); }
+
+/* ---------- Customer chat page ---------- */
+
+body.chat-page { height: 100vh; overflow: hidden; }
+
+#chat-main {
   display: flex;
-  flex-direction: column;
-  gap: 0.8rem;
-  background: var(--surface-1);
-  border-left: 1px solid var(--border);
+  justify-content: center;
+  height: calc(100vh - 53px);
   padding: 1rem;
-  overflow: auto;
-  box-shadow: -12px 0 32px rgba(0, 0, 0, 0.35);
 }
 
-#simulator-panel[hidden] { display: none; }
-
-#simulator-header {
+#chat-window {
   display: flex;
   flex-direction: column;
-  gap: 0.1rem;
-  padding-bottom: 0.6rem;
-  border-bottom: 1px solid var(--border-soft);
+  width: min(720px, 100%);
+  height: 100%;
+  background: var(--surface-1);
+  border: 1px solid var(--border-soft);
+  border-radius: 14px;
+  overflow: hidden;
 }
-#simulator-header .sim-title { font-weight: 600; font-size: 0.95rem; }
-#simulator-header .sim-sub { font-size: 0.72rem; color: var(--text-dim); }
 
-#simulator-form {
+#chat-transcript {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 1rem;
+  overflow-y: auto;
+}
+
+.chat-empty {
+  margin: auto;
+  color: var(--text-dim);
+  font-size: 0.9rem;
+}
+
+#chat-form {
   display: flex;
   align-items: flex-end;
   gap: 0.5rem;
-  padding-top: 0.6rem;
+  padding: 0.75rem;
   border-top: 1px solid var(--border-soft);
+  background: var(--surface-0);
 }
-#simulator-form textarea { flex: 1 1 auto; min-height: 2.6rem; }
-#simulator-form button { flex: 0 0 auto; white-space: nowrap; }
+#chat-form textarea { flex: 1 1 auto; min-height: 2.6rem; }
+#chat-form button { flex: 0 0 auto; white-space: nowrap; }
 
 .visually-hidden {
   position: absolute;
@@ -414,16 +484,6 @@ dialog h2 { margin: 0 0 0.4rem; font-size: 1rem; }
 }
 
 /* ---------- Chatroom transcript ---------- */
-
-#simulator-transcript {
-  flex: 1 1 auto;
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  padding: 0.5rem 0.15rem;
-  overflow-y: auto;
-  min-height: 8rem;
-}
 
 .chat-row {
   display: flex;
@@ -543,6 +603,79 @@ dialog h2 { margin: 0 0 0.4rem; font-size: 1rem; }
 .reasoning-detail { color: var(--text); word-break: break-word; }
 .reasoning-failed .reasoning-detail { color: var(--fail); }
 
+/* ---------- Input / output (admin only) ---------- */
+
+.io-panel {
+  margin: 0 0 1.25rem;
+  background: var(--surface-1);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  padding: 0.9rem 1rem;
+}
+
+.io-heading {
+  margin: 0 0 0.7rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.io-row { display: flex; flex-direction: column; gap: 0.3rem; }
+.io-row + .io-row { margin-top: 0.8rem; }
+
+.io-label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+}
+
+.io-text {
+  margin: 0;
+  padding: 0.55rem 0.75rem;
+  border-radius: 10px;
+  font-size: 0.9rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.io-input .io-text {
+  background: var(--accent-soft);
+  border: 1px solid rgba(88, 166, 255, 0.35);
+}
+.io-output .io-text {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+.io-handoff { border-color: rgba(227, 179, 65, 0.4) !important; }
+.io-muted { color: var(--text-dim); }
+
+.io-tag {
+  display: inline-block;
+  margin-right: 0.5rem;
+  padding: 0.05rem 0.45rem;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--warn);
+  background: var(--warn-soft);
+}
+
+.io-citations {
+  margin: 0.4rem 0 0;
+  display: flex;
+  gap: 0.5rem;
+  align-items: baseline;
+  flex-wrap: wrap;
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  color: var(--text-dim);
+}
+
 /* ---------- Alerts ---------- */
 
 #alert-region:not(:empty) {
@@ -564,5 +697,6 @@ dialog h2 { margin: 0 0 0.4rem; font-size: 1rem; }
 @media (max-width: 720px) {
   main { grid-template-columns: 1fr; }
   #trace-list { max-height: 40vh; border-right: none; border-bottom: 1px solid var(--border-soft); }
-  #simulator-panel { top: auto; height: 70vh; }
+  #chat-window { border-radius: 0; }
+  #chat-main { padding: 0; }
 }

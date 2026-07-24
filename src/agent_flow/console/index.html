@@ -6,54 +6,52 @@
   <title>Agent Flow — Trace Console</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
-<body>
+<body class="demo-page" data-title-key="app.title">
   <header id="app-header">
-    <h1>Agent Flow · Trace Console</h1>
-    <button id="retry-button" type="button" hidden>Retry trace</button>
-    <button id="simulator-toggle" type="button" aria-controls="simulator-panel" aria-expanded="false">
-      Open message simulator
-    </button>
-    <button id="logout-button" type="button" hidden>Sign out</button>
+    <h1 data-i18n="app.title">Agent Flow · Trace Console</h1>
+    <a id="chat-link" class="ghost-button" href="chat.html" data-i18n="header.openChat">Customer chat</a>
+    <button id="lang-toggle" type="button" data-i18n="lang.toggle">EN</button>
+    <button id="retry-button" type="button" data-i18n="header.retry" hidden>Retry trace</button>
+    <button id="logout-button" type="button" data-i18n="header.signout" hidden>Sign out</button>
   </header>
 
   <dialog id="token-dialog" aria-labelledby="token-title">
     <form id="token-form" method="dialog">
-      <h2 id="token-title">Demo authentication</h2>
-      <label for="token-input">Demo token</label>
+      <h2 id="token-title" data-i18n="token.title">Demo authentication</h2>
+      <label for="token-input" data-i18n="token.label">Demo token</label>
       <input id="token-input" name="token" type="password" autocomplete="off" required />
-      <button type="submit">Enter</button>
+      <button type="submit" data-i18n="token.enter">Enter</button>
     </form>
   </dialog>
 
   <dialog id="retry-dialog" aria-labelledby="retry-title">
     <form id="retry-form" method="dialog">
-      <h2 id="retry-title">Retry trace</h2>
-      <label for="retry-reason">Retry reason</label>
+      <h2 id="retry-title" data-i18n="retry.title">Retry trace</h2>
+      <label for="retry-reason" data-i18n="retry.reason">Retry reason</label>
       <textarea id="retry-reason" name="reason" required></textarea>
       <menu>
-        <button value="cancel" type="submit">Cancel</button>
-        <button id="retry-confirm" value="confirm" type="submit">Confirm retry</button>
+        <button value="cancel" type="submit" data-i18n="retry.cancel">Cancel</button>
+        <button id="retry-confirm" value="confirm" type="submit" data-i18n="retry.confirm">Confirm retry</button>
       </menu>
     </form>
   </dialog>
 
-  <main>
+  <main class="demo-grid">
     <aside id="trace-list" aria-label="Trace records"></aside>
     <section id="trace-workspace" aria-live="polite"></section>
+    <aside id="chat-panel" aria-label="Customer chat">
+      <header id="chat-panel-header">
+        <span class="sim-title" data-i18n="chat.header">Customer chat</span>
+        <span class="sim-sub" data-i18n="chat.sub">Demo channel · console</span>
+      </header>
+      <div id="chat-transcript" aria-live="polite" aria-label="Message history"></div>
+      <form id="chat-form">
+        <label for="chat-input" class="visually-hidden" data-i18n="chat.placeholder">Message</label>
+        <textarea id="chat-input" name="message" rows="2" data-i18n-placeholder="chat.placeholder" required></textarea>
+        <button type="submit" data-i18n="chat.send">Send message</button>
+      </form>
+    </aside>
   </main>
-
-  <aside id="simulator-panel" hidden aria-label="Inbound channel simulator">
-    <header id="simulator-header">
-      <span class="sim-title">Customer chat</span>
-      <span class="sim-sub">Demo channel · console</span>
-    </header>
-    <div id="simulator-transcript" aria-live="polite"></div>
-    <form id="simulator-form">
-      <label for="sim-message" class="visually-hidden">Message</label>
-      <textarea id="sim-message" name="message" rows="2" placeholder="Type a customer message…" required></textarea>
-      <button type="submit">Send message</button>
-    </form>
-  </aside>
 
   <div id="alert-region" role="alert" aria-live="assertive"></div>
 

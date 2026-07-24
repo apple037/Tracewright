@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Agent Flow — Customer Chat</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body class="chat-page" data-title-key="chat.title">
+  <header id="app-header">
+    <h1 data-i18n="chat.header">Customer chat</h1>
+    <a id="trace-link" class="ghost-button" href="index.html" data-i18n="header.openTrace">Trace console</a>
+    <button id="lang-toggle" type="button" data-i18n="lang.toggle">EN</button>
+    <button id="logout-button" type="button" data-i18n="header.signout" hidden>Sign out</button>
+  </header>
+
+  <dialog id="token-dialog" aria-labelledby="token-title">
+    <form id="token-form" method="dialog">
+      <h2 id="token-title" data-i18n="token.title">Demo authentication</h2>
+      <label for="token-input" data-i18n="token.label">Demo token</label>
+      <input id="token-input" name="token" type="password" autocomplete="off" required />
+      <button type="submit" data-i18n="token.enter">Enter</button>
+    </form>
+  </dialog>
+
+  <main id="chat-main">
+    <div id="chat-window">
+      <div id="chat-transcript" aria-live="polite" aria-label="Message history"></div>
+      <form id="chat-form">
+        <label for="chat-input" class="visually-hidden" data-i18n="chat.placeholder">Message</label>
+        <textarea id="chat-input" name="message" rows="2" data-i18n-placeholder="chat.placeholder" required></textarea>
+        <button type="submit" data-i18n="chat.send">Send message</button>
+      </form>
+    </div>
+  </main>
+
+  <div id="alert-region" role="alert" aria-live="assertive"></div>
+
+  <script type="module" src="chat.js"></script>
+</body>
+</html>

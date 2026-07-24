@@ -107,8 +107,6 @@ def _submission_status_sequence(page, submission_id, trace_id, statuses, termina
 
 def install_submission_sequence(page, *, statuses, handoff=None, text="訂單正在配送中",
                                 forbidden_partial_text=None):
-    _get_route(page, "**/api/v1/traces", {"items": [], "next_cursor": None})
-    _get_route(page, "**/api/v1/traces/*/events*", {"trace_id": "trace-001", "events": []})
     page.route(
         "**/api/v1/submissions",
         lambda route: _fulfill(
@@ -121,34 +119,56 @@ def install_submission_sequence(page, *, statuses, handoff=None, text="訂單正
     _submission_status_sequence(page, "sub-1", "trace-001", statuses, terminal)
 
 
-def submit_message(page, text):
-    page.get_by_role("button", name="Open message simulator").click()
-    page.get_by_label("Message").fill(text)
+def submit_chat(page, text):
+    page.get_by_label("Type a customer message…").fill(text)
     page.get_by_role("button", name="Send message").click()
 
 
-def test_simulator_selects_trace_and_waits_for_safe_terminal_reply(page, console_url):
+def test_chat_shows_customer_bubble_and_safe_terminal_reply(page, chat_url):
+    install_submission_sequence(page, statuses=["queued", "running", "completed"])
+    page.goto(chat_url)
+    authenticate(page)
+    submit_chat(page, "我的訂單在哪裡？")
+    expect(page.locator(".chat-customer .chat-bubble")).to_have_text("我的訂單在哪裡？")
+    expect(page.get_by_text("Running")).to_be_visible()
+    expect(page.locator(".chat-agent .chat-bubble")).to_have_text("訂單正在配送中")
+
+
+def test_demo_page_chat_selects_trace_and_shows_reply(page, console_url):
+    _get_route(page, "**/api/v1/traces", {
+        "items": [{
+            "trace_id": "trace-001", "status": "succeeded", "channel": "console",
+            "external_message_id": None, "terminal_outcome": "reply",
+            "retry_of_trace_id": None, "delivery_disposition": "deliver",
+            "created_at": "2026-07-23T00:00:00Z",
+        }],
+        "next_cursor": None,
+    })
+    _get_route(page, "**/api/v1/traces/trace-001", {
+        "id": "trace-001", "trace_id": "trace-001", "status": "succeeded",
+        "spans": [{"id": "s1", "node": "response_generator", "name": "response_generator",
+                   "status": "completed", "attempt": 1, "error_code": None}],
+        "events": [], "issue_summary": None,
+    })
+    _get_route(page, "**/api/v1/traces/*/events*", {"trace_id": "trace-001", "events": []})
     install_submission_sequence(page, statuses=["queued", "running", "completed"])
     page.goto(console_url)
     authenticate(page)
-    page.get_by_role("button", name="Open message simulator").click()
-    page.get_by_label("Message").fill("我的訂單在哪裡？")
-    page.get_by_role("button", name="Send message").click()
+    submit_chat(page, "我的訂單在哪裡？")
+    expect(page.locator(".chat-agent .chat-bubble")).to_have_text("訂單正在配送中")
     expect(page.locator("[data-selected-trace]")).to_have_text("trace-001")
-    expect(page.get_by_text("處理中")).to_be_visible()
-    expect(page.get_by_text("訂單正在配送中")).to_be_visible()
 
 
-def test_handoff_renders_safe_message_without_partial_draft(page, console_url):
+def test_chat_renders_handoff_safe_message_without_partial_draft(page, chat_url):
     install_submission_sequence(
         page,
         statuses=["queued", "running", "completed"],
         handoff={"required": True, "reason_code": "HIGH_RISK", "safe_message": "已轉交人工協助"},
         forbidden_partial_text="unvalidated draft",
     )
-    page.goto(console_url)
+    page.goto(chat_url)
     authenticate(page)
-    submit_message(page, "我需要人工協助")
+    submit_chat(page, "我需要人工協助")
     expect(page.get_by_text("已轉交人工協助")).to_be_visible()
     expect(page.get_by_text("unvalidated draft")).to_have_count(0)
 

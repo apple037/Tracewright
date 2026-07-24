@@ -1,5 +1,6 @@
 // Allowlisted, injection-safe rendering. Dynamic data only via textContent.
 import { nodeKey } from "./state.js";
+import { t, statusLabel } from "./i18n.js";
 
 const DETAIL_FIELDS = new Set([
   "decision_summary", "reason_codes", "model_role", "model_profile",
@@ -39,7 +40,7 @@ function traceLabel(trace) {
 export function renderTraceList(container, state, onSelect) {
   container.textContent = "";
   if (state.traces.length === 0) {
-    container.appendChild(el("p", { text: "No traces yet." }));
+    container.appendChild(el("p", { text: t("list.empty") }));
     return;
   }
   for (const trace of state.traces) {
@@ -62,7 +63,7 @@ function statusBadge(status) {
   const icon = { succeeded: "✓", completed: "✓", running: "…", queued: "…", failed: "✗" };
   return el("span", {
     class: `status status-${status}`,
-    text: `${icon[status] || "•"} ${status}`,
+    text: `${icon[status] || "•"} ${statusLabel(status)}`,
   });
 }
 
@@ -117,10 +118,16 @@ function reasoningLine(payload) {
   if (Array.isArray(payload.evidence_ids) && payload.evidence_ids.length) {
     parts.push(`${payload.evidence_ids.length} evidence linked`);
   }
+  if (payload.delivery_disposition) parts.push(`disposition: ${payload.delivery_disposition}`);
+  if (payload.error_code) parts.push(`error: ${payload.error_code}`);
   if (payload.model_role) {
-    const timing = payload.duration_ms != null ? ` · ${payload.duration_ms} ms` : "";
-    const tokens = payload.output_tokens != null ? ` · ${payload.output_tokens} out-tok` : "";
-    parts.push(`model ${payload.model_role}${timing}${tokens}`);
+    const bits = [`model ${payload.model_role}`];
+    if (payload.model_profile) bits.push(payload.model_profile);
+    if (payload.duration_ms != null) bits.push(`${payload.duration_ms} ms`);
+    if (payload.input_tokens != null) bits.push(`${payload.input_tokens} in`);
+    if (payload.output_tokens != null) bits.push(`${payload.output_tokens} out`);
+    if (payload.finish_reason) bits.push(payload.finish_reason);
+    parts.push(bits.join(" · "));
   }
   return parts.join(" — ");
 }
@@ -141,7 +148,9 @@ function renderReasoningTrail(trace) {
   if (rows.length === 0) return null;
 
   const details = el("details", { class: "reasoning-trail", open: "" });
-  details.appendChild(el("summary", { text: `Reasoning summary · ${rows.length} steps` }));
+  details.appendChild(el("summary", {
+    text: `${t("reasoning.summary")} · ${rows.length} ${t("reasoning.steps")}`,
+  }));
   const list = el("ol", { class: "reasoning-steps" });
   for (const row of rows) {
     const li = el("li", { class: `reasoning-step reasoning-${row.status}`, dataset: { node: row.node } });
@@ -153,14 +162,52 @@ function renderReasoningTrail(trace) {
   return details;
 }
 
+// Admin-only real input/output — the customer message and the final reply.
+function renderConversation(trace) {
+  const convo = trace.conversation;
+  if (!convo) return null;
+  const panel = el("section", { class: "io-panel", "aria-label": t("workspace.io") });
+  panel.appendChild(el("h2", { class: "io-heading", text: t("workspace.io") }));
+
+  const input = (convo.input && convo.input.text) || "";
+  const inputRow = el("div", { class: "io-row io-input" });
+  inputRow.appendChild(el("span", { class: "io-label", text: t("io.input") }));
+  inputRow.appendChild(el("p", { class: "io-text", dataset: { ioInput: "" }, text: input }));
+  panel.appendChild(inputRow);
+
+  const output = convo.output || {};
+  const outRow = el("div", { class: "io-row io-output" });
+  outRow.appendChild(el("span", { class: "io-label", text: t("io.output") }));
+  if (output.handoff && output.handoff.safe_message) {
+    const ho = el("p", { class: "io-text io-handoff", dataset: { ioOutput: "" } });
+    ho.appendChild(el("span", { class: "io-tag", text: t("io.handoff") }));
+    ho.appendChild(el("span", { text: output.handoff.safe_message }));
+    outRow.appendChild(ho);
+  } else if (output.text) {
+    outRow.appendChild(el("p", { class: "io-text", dataset: { ioOutput: "" }, text: output.text }));
+  } else {
+    outRow.appendChild(el("p", { class: "io-text io-muted", dataset: { ioOutput: "" }, text: t("io.noReply") }));
+  }
+  if (Array.isArray(output.citations) && output.citations.length) {
+    const cites = el("p", { class: "io-citations" });
+    cites.appendChild(el("span", { class: "io-label", text: t("io.citations") }));
+    cites.appendChild(el("span", { class: "io-text", text: output.citations.slice(0, 12).join(", ") }));
+    outRow.appendChild(cites);
+  }
+  panel.appendChild(outRow);
+  return panel;
+}
+
 export function renderWorkspace(container, state, onToggle) {
   container.textContent = "";
   const trace = state.selectedTrace;
   if (!trace) {
-    container.appendChild(el("p", { text: "Select a trace to inspect its flow." }));
+    container.appendChild(el("p", { text: t("workspace.select") }));
     return;
   }
   container.appendChild(el("p", { class: "workspace-heading", dataset: { selectedTrace: "" }, text: traceLabel(trace) }));
+  const conversation = renderConversation(trace);
+  if (conversation) container.appendChild(conversation);
   const trail = renderReasoningTrail(trace);
   if (trail) container.appendChild(trail);
   const flow = el("div", { class: "node-flow" });

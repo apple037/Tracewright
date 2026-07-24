@@ -1,11 +1,13 @@
 import { requestJson, setToken, clearToken } from "./api.js";
 import { createState, mergeEvents, toggleNode, selectTrace, isTerminal } from "./state.js";
 import { renderTraceList, renderWorkspace, showAlert } from "./render.js";
+import { t, applyStatic, toggleLang } from "./i18n.js";
+import { createChatroom } from "./chatroom.js";
 
 const state = createState();
 let eventTimer = null;
 let listTimer = null;
-let submissionActive = false;
+let chatroom = null;
 
 const LIST_REFRESH_MS = 5000;
 
@@ -14,12 +16,26 @@ const dom = {};
 function cacheDom() {
   for (const id of [
     "token-dialog", "token-form", "token-input", "retry-button", "retry-dialog",
-    "retry-form", "retry-reason", "logout-button", "simulator-toggle",
-    "simulator-panel", "simulator-form", "sim-message", "simulator-transcript",
-    "trace-list", "trace-workspace",
+    "retry-form", "retry-reason", "logout-button", "lang-toggle",
+    "trace-list", "trace-workspace", "chat-transcript", "chat-form", "chat-input",
   ]) {
     dom[id] = document.getElementById(id);
   }
+}
+
+// Sending a chat message from the demo panel selects its trace so the operator
+// watches the pipeline run live in the same view — no page switch.
+async function onChatTrace(traceId) {
+  await refreshTraces();
+  await selectAndLoad(traceId);
+}
+
+async function onChatSubmit(event) {
+  event.preventDefault();
+  const text = dom["chat-input"].value.trim();
+  if (!text || !chatroom) return;
+  dom["chat-input"].value = "";
+  await chatroom.submit(text);
 }
 
 function uuid() {
@@ -72,7 +88,7 @@ function stopListRefresh() {
 async function refreshTraces() {
   const { ok, body } = await requestJson("/api/v1/traces");
   if (!ok || !body) {
-    showAlert("Unable to load traces.");
+    showAlert(t("alert.tracesFailed"));
     return;
   }
   state.traces = body.items || [];
@@ -141,12 +157,32 @@ async function pollEventsOnce() {
     }
     state.polling.failures = 0;
     const terminal = state.selectedTrace && isTerminal(state.selectedTrace.status);
+    if (terminal) {
+      // Refresh the detail once so conversation input/output and final status land.
+      await reloadSelectedDetail();
+    }
     schedulePoll(terminal ? 5000 : 1000);
   } catch (error) {
     state.polling.stale = true;
     const delay = BACKOFF[Math.min(state.polling.failures, BACKOFF.length - 1)];
     state.polling.failures += 1;
     schedulePoll(delay);
+  }
+}
+
+let lastReloadedStatus = null;
+async function reloadSelectedDetail() {
+  const traceId = state.selectedTraceId;
+  if (!traceId) return;
+  const key = `${traceId}:${state.selectedTrace && state.selectedTrace.status}`;
+  if (key === lastReloadedStatus) return;
+  lastReloadedStatus = key;
+  const { ok, body } = await requestJson(`/api/v1/traces/${traceId}`);
+  if (ok && body && traceId === state.selectedTraceId) {
+    body.events = state.events.length ? state.events : body.events;
+    state.selectedTrace = body;
+    renderWorkspace(dom["trace-workspace"], state, onToggleNode);
+    updateRetryButton();
   }
 }
 
@@ -177,7 +213,7 @@ async function onRetrySubmit(event) {
   );
   dom["retry-dialog"].close();
   if (status !== 202 || !body) {
-    showAlert("Retry was not accepted.");
+    showAlert(t("alert.retryRejected"));
     return;
   }
   state.selectedTraceId = null;
@@ -185,118 +221,34 @@ async function onRetrySubmit(event) {
   await selectAndLoad(body.trace_id);
 }
 
-// --- inbound simulator ----------------------------------------------------
+// --- language -------------------------------------------------------------
 
-function toggleSimulator() {
-  const open = dom["simulator-panel"].hidden;
-  dom["simulator-panel"].hidden = !open;
-  dom["simulator-toggle"].setAttribute("aria-expanded", open ? "true" : "false");
-  if (open && !state.simulator.sessionId) {
-    state.simulator.sessionId = `console-${uuid()}`;
-  }
-}
-
-async function onSimulatorSubmit(event) {
-  event.preventDefault();
-  const text = dom["sim-message"].value.trim();
-  if (!text || submissionActive) return;
-  const messageId = uuid();
-  pushMessage("customer", text);
-  const { status, body } = await requestJson("/api/v1/submissions", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      channel: "console",
-      external_message_id: messageId,
-      session_id: state.simulator.sessionId,
-      text,
-      idempotency_key: messageId,
-      metadata: { source: "trace-console" },
-    }),
-  });
-  if (status !== 202 || !body) {
-    showAlert("Submission was rejected.");
-    return;
-  }
-  dom["sim-message"].value = "";
-  selectTrace(state, { trace_id: body.trace_id, id: body.trace_id, spans: [], events: [] });
-  state.selectedTraceId = body.trace_id;
+function onToggleLang() {
+  toggleLang();
+  applyStatic();
+  renderTraceList(dom["trace-list"], state, selectAndLoad);
   renderWorkspace(dom["trace-workspace"], state, onToggleNode);
-  await refreshTraces();
-  startEventPolling();
-  await pollSubmission(body.submission_id);
-}
-
-const STATUS_LABEL = { queued: "佇列中", running: "處理中", failed: "處理失敗" };
-
-// Chatroom transcript: {role: "customer"|"agent"|"status", text}. Only safe
-// customer-facing text is ever shown here — never drafts or reasoning.
-function pushMessage(role, text) {
-  const log = state.simulator.messages || (state.simulator.messages = []);
-  const last = log[log.length - 1];
-  if (last && last.role === role && last.text === text) return;
-  // Status is transient: replace a prior status rather than stacking them.
-  if (role === "status" && last && last.role === "status") log.pop();
-  log.push({ role, text });
-  renderTranscript();
-}
-
-function renderTranscript() {
-  const panel = dom["simulator-transcript"];
-  panel.textContent = "";
-  for (const message of state.simulator.messages || []) {
-    const row = document.createElement("div");
-    row.className = `chat-row chat-${message.role}`;
-    const bubble = document.createElement("div");
-    bubble.className = "chat-bubble";
-    bubble.textContent = message.text;
-    row.appendChild(bubble);
-    panel.appendChild(row);
-  }
-  panel.scrollTop = panel.scrollHeight;
-}
-
-function transcriptMessage(body) {
-  if (body.status === "completed") {
-    if (body.handoff && body.handoff.safe_message) {
-      return { role: "agent", text: body.handoff.safe_message };
-    }
-    return { role: "agent", text: body.text || "已完成" };
-  }
-  return { role: "status", text: STATUS_LABEL[body.status] || body.status };
-}
-
-async function pollSubmission(submissionId) {
-  submissionActive = true;
-  try {
-    for (let attempt = 0; attempt < 100; attempt += 1) {
-      const { ok, body } = await requestJson(`/api/v1/submissions/${submissionId}`);
-      if (!ok || !body) break;
-      const message = transcriptMessage(body);
-      pushMessage(message.role, message.text);
-      if (body.status === "completed" || body.status === "failed") break;
-      await sleep(300);
-    }
-  } finally {
-    submissionActive = false;
-  }
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  if (chatroom) chatroom.render();
 }
 
 // --- bootstrap ------------------------------------------------------------
 
 function init() {
   cacheDom();
+  applyStatic();
+  chatroom = createChatroom({
+    transcript: dom["chat-transcript"],
+    onTrace: onChatTrace,
+    onError: (message) => showAlert(message),
+  });
+  chatroom.render();
   dom["token-form"].addEventListener("submit", onTokenSubmit);
   dom["logout-button"].addEventListener("click", logout);
+  dom["lang-toggle"].addEventListener("click", onToggleLang);
   dom["retry-button"].addEventListener("click", openRetry);
   dom["retry-form"].addEventListener("submit", onRetrySubmit);
-  dom["simulator-toggle"].addEventListener("click", toggleSimulator);
-  dom["simulator-form"].addEventListener("submit", onSimulatorSubmit);
-  window.addEventListener("beforeunload", stopEventPolling);
+  dom["chat-form"].addEventListener("submit", onChatSubmit);
+  window.addEventListener("beforeunload", () => { stopEventPolling(); stopListRefresh(); });
   requireAuth();
 }
 

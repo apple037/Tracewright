@@ -39,6 +39,11 @@ def console_url(server):
     return f"{server}/console/"
 
 
+@pytest.fixture(scope="session")
+def chat_url(server):
+    return f"{server}/console/chat.html"
+
+
 @pytest.fixture
 def _browser():
     # The sync Playwright driver closes the main-thread event loop on exit; run it
