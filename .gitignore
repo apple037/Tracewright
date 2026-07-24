@@ -31,3 +31,6 @@ Thumbs.db
 # Local scratch images
 workflow.png
 screenshot.png
+
+# Local flow-check model config
+config/models.local.yaml
