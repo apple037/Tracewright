@@ -681,16 +681,34 @@ def test_model_output_reason_codes_dedupe_preserving_order():
 
 
 def test_planner_retrieves_only_when_classifier_names_a_topic(classification):
-    # Casual/unknown turn: classifier left knowledge_topic None -> no retrieval.
+    from agent_flow.contracts import ConversationMode
+
+    # Casual intent: no retrieval, even if the model wrongly named a topic.
     casual = classification.model_copy(
-        update={"intent": "greeting", "knowledge_topic": None}
-    )
-    assert plan_evidence(casual).rag_queries == ()
-    # Named a corpus topic -> retrieve it.
-    info = classification.model_copy(
         update={"intent": "greeting", "knowledge_topic": "policy:refund"}
     )
+    assert plan_evidence(casual).rag_queries == ()
+    # Casual/unclear mode overrides a stray topic too.
+    casual_mode = classification.model_copy(
+        update={
+            "intent": "answer",
+            "conversation_mode": ConversationMode.CASUAL,
+            "knowledge_topic": "policy:refund",
+        }
+    )
+    assert plan_evidence(casual_mode).rag_queries == ()
+    # Genuine info-seeking turn with a named topic -> retrieve it.
+    info = classification.model_copy(
+        update={
+            "intent": "answer",
+            "conversation_mode": ConversationMode.INFORMATIONAL,
+            "knowledge_topic": "policy:refund",
+        }
+    )
     assert plan_evidence(info).rag_queries == ("policy:refund",)
+    # Info-seeking but no topic named -> nothing to retrieve.
+    none = info.model_copy(update={"knowledge_topic": None})
+    assert plan_evidence(none).rag_queries == ()
 
 
 def test_validator_drops_evidence_when_nothing_was_planned(fresh_collected_evidence):

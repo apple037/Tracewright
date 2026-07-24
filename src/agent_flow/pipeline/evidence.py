@@ -32,6 +32,13 @@ class EvidenceCollectionCancelled(asyncio.CancelledError):
         self.outcomes = outcomes
 
 
+# Casual/unclear turns never retrieve, whatever topic the model also emitted.
+_CASUAL_INTENTS = frozenset(
+    {"greeting", "farewell", "goodbye", "smalltalk", "chitchat", "thanks", "hello"}
+)
+_CASUAL_MODES = frozenset({"casual", "unknown"})
+
+
 def plan_evidence(classification: DialogueClassification) -> EvidencePlan:
     if classification.intent == "order_status":
         return EvidencePlan(
@@ -48,12 +55,16 @@ def plan_evidence(classification: DialogueClassification) -> EvidencePlan:
         return EvidencePlan(
             required_facts=("refund.current_status",),
         )
-    # Retrieve only when the classifier — having seen the knowledge catalog —
-    # judged the turn to need a specific corpus topic. Greetings and anything
-    # the catalog does not cover leave knowledge_topic None, so no RAG runs and
-    # the generator has no stray doc to parrot.
+    # Small models sometimes set a knowledge_topic even for a greeting, so the
+    # topic alone is not trusted. A casual/greeting intent, or a casual/unclear
+    # conversation mode, means "just chat" — no RAG runs, so the generator has
+    # no stray doc to parrot. Otherwise, retrieve the named topic if there is one.
     # ponytail: queries by source_id (the mock ignores query text); a real
     # semantic RAG would query the message — thread it here if that changes.
+    if classification.intent in _CASUAL_INTENTS:
+        return EvidencePlan()
+    if classification.conversation_mode.value in _CASUAL_MODES:
+        return EvidencePlan()
     if classification.knowledge_topic:
         return EvidencePlan(rag_queries=(classification.knowledge_topic,))
     return EvidencePlan()
