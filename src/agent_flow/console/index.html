@@ -43,12 +43,16 @@
   </main>
 
   <aside id="simulator-panel" hidden aria-label="Inbound channel simulator">
+    <header id="simulator-header">
+      <span class="sim-title">Customer chat</span>
+      <span class="sim-sub">Demo channel · console</span>
+    </header>
+    <div id="simulator-transcript" aria-live="polite"></div>
     <form id="simulator-form">
-      <label for="sim-message">Message</label>
-      <textarea id="sim-message" name="message" required></textarea>
+      <label for="sim-message" class="visually-hidden">Message</label>
+      <textarea id="sim-message" name="message" rows="2" placeholder="Type a customer message…" required></textarea>
       <button type="submit">Send message</button>
     </form>
-    <div id="simulator-transcript" aria-live="polite"></div>
   </aside>
 
   <div id="alert-region" role="alert" aria-live="assertive"></div>

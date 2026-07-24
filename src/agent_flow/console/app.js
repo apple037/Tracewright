@@ -182,8 +182,7 @@ async function onSimulatorSubmit(event) {
   const text = dom["sim-message"].value.trim();
   if (!text || submissionActive) return;
   const messageId = uuid();
-  state.simulator.log = [text];
-  renderTranscript();
+  pushMessage("customer", text);
   const { status, body } = await requestJson("/api/v1/submissions", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -209,29 +208,41 @@ async function onSimulatorSubmit(event) {
 
 const STATUS_LABEL = { queued: "佇列中", running: "處理中", failed: "處理失敗" };
 
-// Accumulate a safe transcript: user text, status transitions, terminal reply.
-function pushTranscript(line) {
-  const log = state.simulator.log || (state.simulator.log = []);
-  if (log[log.length - 1] !== line) log.push(line);
+// Chatroom transcript: {role: "customer"|"agent"|"status", text}. Only safe
+// customer-facing text is ever shown here — never drafts or reasoning.
+function pushMessage(role, text) {
+  const log = state.simulator.messages || (state.simulator.messages = []);
+  const last = log[log.length - 1];
+  if (last && last.role === role && last.text === text) return;
+  // Status is transient: replace a prior status rather than stacking them.
+  if (role === "status" && last && last.role === "status") log.pop();
+  log.push({ role, text });
   renderTranscript();
 }
 
 function renderTranscript() {
   const panel = dom["simulator-transcript"];
   panel.textContent = "";
-  for (const line of state.simulator.log || []) {
-    const paragraph = document.createElement("p");
-    paragraph.textContent = line;
-    panel.appendChild(paragraph);
+  for (const message of state.simulator.messages || []) {
+    const row = document.createElement("div");
+    row.className = `chat-row chat-${message.role}`;
+    const bubble = document.createElement("div");
+    bubble.className = "chat-bubble";
+    bubble.textContent = message.text;
+    row.appendChild(bubble);
+    panel.appendChild(row);
   }
+  panel.scrollTop = panel.scrollHeight;
 }
 
-function transcriptLine(body) {
+function transcriptMessage(body) {
   if (body.status === "completed") {
-    if (body.handoff && body.handoff.safe_message) return body.handoff.safe_message;
-    return body.text || "已完成";
+    if (body.handoff && body.handoff.safe_message) {
+      return { role: "agent", text: body.handoff.safe_message };
+    }
+    return { role: "agent", text: body.text || "已完成" };
   }
-  return STATUS_LABEL[body.status] || body.status;
+  return { role: "status", text: STATUS_LABEL[body.status] || body.status };
 }
 
 async function pollSubmission(submissionId) {
@@ -240,7 +251,8 @@ async function pollSubmission(submissionId) {
     for (let attempt = 0; attempt < 100; attempt += 1) {
       const { ok, body } = await requestJson(`/api/v1/submissions/${submissionId}`);
       if (!ok || !body) break;
-      pushTranscript(transcriptLine(body));
+      const message = transcriptMessage(body);
+      pushMessage(message.role, message.text);
       if (body.status === "completed" || body.status === "failed") break;
       await sleep(300);
     }

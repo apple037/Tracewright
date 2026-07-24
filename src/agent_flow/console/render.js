@@ -7,6 +7,7 @@ const DETAIL_FIELDS = new Set([
   "freshness_seconds", "attempt", "delivery_disposition",
   "error_code", "failure_stage", "component", "operation",
   "artifact_id", "semantic_version", "checksum", "sequence", "created_at",
+  "intent", "emotion_category",
 ]);
 
 let panelCounter = 0;
@@ -102,6 +103,56 @@ function nodeSummaryFields(trace, node) {
   return fields;
 }
 
+// A safe, ordered narrative of the agent's decisions — the "thinking process"
+// summary for operators. Every line is an allowlisted field; no raw model
+// reasoning or chain-of-thought is ever stored or shown.
+function reasoningLine(payload) {
+  const parts = [];
+  if (payload.decision_summary) parts.push(String(payload.decision_summary));
+  if (payload.intent) parts.push(`intent: ${payload.intent}`);
+  if (payload.emotion_category) parts.push(`emotion: ${payload.emotion_category}`);
+  if (Array.isArray(payload.reason_codes) && payload.reason_codes.length) {
+    parts.push(payload.reason_codes.slice(0, 8).join(", "));
+  }
+  if (Array.isArray(payload.evidence_ids) && payload.evidence_ids.length) {
+    parts.push(`${payload.evidence_ids.length} evidence linked`);
+  }
+  if (payload.model_role) {
+    const timing = payload.duration_ms != null ? ` · ${payload.duration_ms} ms` : "";
+    const tokens = payload.output_tokens != null ? ` · ${payload.output_tokens} out-tok` : "";
+    parts.push(`model ${payload.model_role}${timing}${tokens}`);
+  }
+  return parts.join(" — ");
+}
+
+function renderReasoningTrail(trace) {
+  const rows = [];
+  for (const event of trace.events || []) {
+    const payload = event.payload || {};
+    const node = payload.node;
+    if (!node) continue;
+    if (event.event_type === "node" && (payload.lifecycle_id || "").endsWith(":started")) continue;
+    const status = event.status || "";
+    if (event.event_type === "node" && status !== "completed" && status !== "failed") continue;
+    const summary = reasoningLine(payload);
+    if (!summary && status !== "failed") continue;
+    rows.push({ node, status, summary });
+  }
+  if (rows.length === 0) return null;
+
+  const details = el("details", { class: "reasoning-trail", open: "" });
+  details.appendChild(el("summary", { text: `Reasoning summary · ${rows.length} steps` }));
+  const list = el("ol", { class: "reasoning-steps" });
+  for (const row of rows) {
+    const li = el("li", { class: `reasoning-step reasoning-${row.status}`, dataset: { node: row.node } });
+    li.appendChild(el("span", { class: "reasoning-node", text: row.node }));
+    li.appendChild(el("span", { class: "reasoning-detail", text: row.summary || row.status }));
+    list.appendChild(li);
+  }
+  details.appendChild(list);
+  return details;
+}
+
 export function renderWorkspace(container, state, onToggle) {
   container.textContent = "";
   const trace = state.selectedTrace;
@@ -110,6 +161,8 @@ export function renderWorkspace(container, state, onToggle) {
     return;
   }
   container.appendChild(el("p", { class: "workspace-heading", dataset: { selectedTrace: "" }, text: traceLabel(trace) }));
+  const trail = renderReasoningTrail(trace);
+  if (trail) container.appendChild(trail);
   const flow = el("div", { class: "node-flow" });
   for (const span of trace.spans || []) {
     const node = span.node || span.name;
