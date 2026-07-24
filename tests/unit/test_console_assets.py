@@ -23,6 +23,8 @@ def test_console_and_declared_assets_are_served():
     assert client.get("/console/i18n.js").headers["content-type"].startswith(
         "text/javascript"
     )
+    # Assets must revalidate so a rebuilt console never serves a stale UI.
+    assert client.get("/console/app.js").headers["cache-control"] == "no-cache"
 
 
 def test_console_does_not_expose_parent_files():

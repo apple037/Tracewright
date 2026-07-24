@@ -41,11 +41,26 @@ def _safe_dependency_checks(
     return checks
 
 
+class _NoCacheStatic(StaticFiles):
+    """Static assets that must always revalidate.
+
+    Without an explicit Cache-Control, browsers apply heuristic freshness and
+    serve stale JS/CSS from disk without revalidating — during iterative demos
+    that means an old console UI with dead handlers. `no-cache` forces a
+    revalidation each load; the existing etag keeps it a cheap 304.
+    """
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 def mount_console(app: FastAPI) -> None:
     """Serve the packaged trace console at /console from wheel resources."""
     app.mount(
         "/console",
-        StaticFiles(packages=[("agent_flow", "console")], html=True),
+        _NoCacheStatic(packages=[("agent_flow", "console")], html=True),
         name="console",
     )
 
