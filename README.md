@@ -1,420 +1,240 @@
-# Agent Flow Bootstrap Runtime
+# Tracewright
 
-## Scope and Reduced-Assurance Warning
+**A customer-service AI that answers safely — and shows its work.**
 
-Agent Flow is a local/open-model customer-service bootstrap. It provides the
-typed turn pipeline, pgvector evidence storage, trace/event APIs, retry lineage,
-handoff delivery, retention, and JSON operational logs. Bootstrap validation
-uses deterministic gates plus one Qwen semantic judge and therefore reports
-`reduced_assurance`. It is not approved for unattended production promotion.
+Tracewright takes a customer message, runs it through a chain of small AI steps
+(understand → check risk → look up facts → write reply → fact-check the reply),
+and then lets an operator **watch every step happen live** in a web console. If
+the AI isn't sure, or a message looks risky, it hands off to a human instead of
+guessing.
 
-The repository ships a runnable **demo composition root**
-(`agent_flow.runtime:create_runtime_app`) that wires PostgreSQL repositories,
-the configured model gateway, deterministic mock RAG/tool adapters, and static
-demo-token authentication into FastAPI and one background turn worker. Inbound
-messages are queued in `runtime.jobs`, executed by the worker, and observed
-through a trace-first console at `/console/`. The dependency-injected
-`agent_flow.main:create_app` shell remains available for custom compositions.
+The headline feature is the word in the name: **traces**. Every message becomes
+a fully recorded, click-through trace so you can see exactly *why* the AI said
+what it said — which is normally the scariest black box in an AI product.
 
-## Prerequisites
+> ⚠️ **This is a demo / bootstrap, not a locked-down production system.** It uses
+> small open models and simple demo login tokens. Great for learning, demos, and
+> building on top of — not for handling real customers unattended. See
+> [Safety & limits](#safety--limits).
 
-- Docker Desktop with Compose, or Python 3.12 plus
-  [uv](https://docs.astral.sh/uv/).
-- A local vLLM OpenAI-compatible endpoint on host port `8000`.
-- The exact initial local model `Qwen/Qwen3-8B-AWQ`, configured with
-  `max_model_len=6144`.
-- Optional remote Ollama-compatible Qwen structured and embedding models.
+---
 
-The PostgreSQL `agent/agent` credentials in Compose are demo bootstrap defaults.
-They are unsuitable for production or any network-exposed database.
+## What it does, in plain words
 
-## Host Development
+Imagine a support chat. A customer types *"Where's my refund?"*. Behind the
+scenes Tracewright runs a small assembly line:
 
-### `Copy-Item .env.example .env`
+| Step | Node name | What it decides |
+|------|-----------|-----------------|
+| 1. Understand | `dialogue_classifier` | What does the customer want? What's their mood? Is this just chit-chat? |
+| 2. Safety check | `risk_precheck` | Is this dangerous or sensitive? If so, **stop and hand to a human**. |
+| 3. Plan facts | `evidence_planner` | Do we need to look anything up (order status, policy)? |
+| 4. Gather facts | `evidence_collector` | Fetch those facts from the knowledge base / tools. |
+| 5. Verify facts | `evidence_validator` | Only keep facts we actually asked for. |
+| 6. Pick a style | `strategy_selector` | How should we answer — brief, business-first, supportive? |
+| 7. Write reply | `response_generator` | Draft the actual answer, citing its sources. |
+| 8. Fact-check | `response_validator` | A second AI checks the draft is grounded and safe. If not → repair or hand off. |
 
-```powershell
-Copy-Item .env.example .env
+Every one of those steps is recorded as a **trace** with timing, decisions, and
+(for admins) the model's raw reasoning. That's what you see in the console.
+
+### Why "grounded" matters
+
+The AI is only allowed to state facts it actually retrieved. It can't invent a
+refund policy — if it has no evidence, it shouldn't cite one. Step 5 and step 8
+exist to enforce that. (A real bug we fixed: a plain "good morning" was pulling
+the refund policy into the answer — the pipeline now correctly retrieves nothing
+for chit-chat.)
+
+---
+
+## Quick start (the 5-minute demo)
+
+You need **Docker Desktop** installed. That's the easy path — it runs everything
+(database, API, background worker) for you.
+
+```bash
+# 1. Copy the example settings file and give yourself demo login tokens
+cp .env.example .env
 ```
 
-Edit `.env` locally. It is Git-ignored. Keep model names replaceable in
-`config/models.bootstrap.example.yaml`; endpoint URLs and credentials come from
-environment variables rather than application code.
+Open `.env` in any text editor and add two demo tokens at the bottom (any random
+16+ character strings — these are just demo passwords for the console):
 
-### `uv sync --frozen`
-
-```powershell
-uv sync --frozen
+```
+DEMO_CUSTOMER_TOKEN=pick-any-random-string-16-chars-min
+DEMO_ADMIN_TOKEN=pick-another-random-string-16-chars
 ```
 
-### `Invoke-RestMethod http://localhost:8000/v1/models`
+> 🔒 `.env` is **private** and never uploaded to GitHub (it's git-ignored). Never
+> put real passwords or API keys anywhere else.
 
-Start vLLM on the Windows host, then verify its inventory:
+You also need an AI model endpoint for the AI steps to call. Tracewright expects:
+- a **local** model (vLLM) serving `Qwen/Qwen3-8B-AWQ` on port `8000`, and
+- optionally a **remote** Ollama-style model for the classifier/judge.
 
-```powershell
-Invoke-RestMethod http://localhost:8000/v1/models |
-  ConvertTo-Json -Depth 8
-```
+Point at yours in `.env` (`LOCAL_VLLM_BASE_URL`, `REMOTE_MODEL_BASE_URL`).
 
-The returned model ID must be `Qwen/Qwen3-8B-AWQ`.
-
-### `uv run alembic upgrade head`
-
-Start PostgreSQL/pgvector and apply migrations:
-
-```powershell
-uv run --frozen alembic upgrade head
-```
-
-### `uv run uvicorn agent_flow.main:app --reload`
-
-```powershell
-uv run --frozen uvicorn agent_flow.main:app --reload
-```
-
-Liveness is at `http://localhost:8000/health/live`; readiness is at
-`http://localhost:8000/health/ready`.
-
-### `uv run python -m agent_flow.worker`
-
-The explicit flag prevents accidental worker startup:
-
-```powershell
-uv run --frozen python -m agent_flow.worker --run
-```
-
-This single-instance bootstrap runs bounded handoff-outbox and retention loops.
-It does not require Redis, RabbitMQ, Kafka, Celery, or an orchestrator.
-
-## Docker Compose
-
-### Why Compose uses host.docker.internal
-
-`localhost` inside `app` or `worker` is the container itself, not host vLLM.
-Compose therefore sets:
-
-```text
-LOCAL_VLLM_BASE_URL=http://host.docker.internal:8000/v1
-extra_hosts=host.docker.internal:host-gateway
-```
-
-Both services share the named `agent-net` bridge. PostgreSQL data persists in
-`postgres-data`; migration completion gates app, worker, and seed startup.
-
-### `docker compose up --build`
-
-```powershell
-docker compose config --quiet
+```bash
+# 2. Start everything
 docker compose up --build
-```
 
-Runtime `uv run` commands are frozen and exclude dev dependencies, matching the
-non-dev image. Shut down with:
-
-```powershell
-docker compose down
-```
-
-Add `--volumes` only when intentionally deleting the demo database.
-
-### `docker compose --profile demo run --rm demo-seed`
-
-```powershell
+# 3. (optional) load the demo knowledge base
 docker compose --profile demo run --rm demo-seed
 ```
 
-The idempotent seed upserts only `tests/fixtures/rag.json` into tenant-scoped
-pgvector rows using deterministic offline embeddings. Seeded sources use the
-`agent-flow-demo:` namespace and explicit ownership metadata; an existing
-non-demo document or chunk collision aborts and rolls back instead of being
-overwritten. It validates and counts `tests/fixtures/tools.json`, which remains
-file-backed for the mock tool adapter; tool results are deliberately not indexed
-as RAG evidence. No model, remote RAG, tool, or webhook endpoint is called.
+When it's ready, open **http://localhost:8080/console/** and paste your
+**admin** token.
 
-## Demo Runtime, Console, and Submissions
+---
 
-The Compose `app` service serves `agent_flow.runtime:create_runtime_app`. Its
-lifespan opens the pool, runs the required inventory/capability probes, and only
-reports `/health/ready` once every model role is verified. Bring up the full
-demo:
+## Using the console
 
-```powershell
-docker compose up --build
+The console is **one page, three columns** — no page-switching:
+
+```
+┌───────────────┬───────────────────────────┬──────────────────┐
+│  Trace list   │       Trace workspace      │  Customer chat   │
+│ (every turn,  │  Input & Output            │  (type here,     │
+│  auto-refresh │  Model reasoning (admin)   │   press Send)    │
+│  every 5s)    │  Reasoning summary         │                  │
+│               │  Node flow (the 8 steps)   │                  │
+└───────────────┴───────────────────────────┴──────────────────┘
 ```
 
-### Demo tokens (demo only)
+1. **Type a message** in the right-hand chat and press Send (try `where is my
+   order order-1?`).
+2. Its trace **auto-selects** in the middle and **streams live** as each step runs.
+3. Click any step card to expand its decisions; click a row on the left to switch
+   traces.
+4. **EN / 中文** toggles language. **Retry trace** re-runs a finished trace.
 
-The console authenticates with two static bearer tokens. They exist for the demo
-only and must never gate a real deployment. Set them locally in the Git-ignored
-`.env` with at least 16 characters each; never commit them or copy them into
-`.env.example`:
+**Admin vs customer token:**
+- **Admin** token sees everything: the real input/output, the model's raw
+  chain-of-thought (collapsible, labeled per step), and full reasoning.
+- **Customer** token sees only the chat — no internal reasoning.
 
-```powershell
-$env:DEMO_CUSTOMER_TOKEN = [guid]::NewGuid().ToString("N")
-$env:DEMO_ADMIN_TOKEN = [guid]::NewGuid().ToString("N")
-Add-Content .env "DEMO_CUSTOMER_TOKEN=$($env:DEMO_CUSTOMER_TOKEN)"
-Add-Content .env "DEMO_ADMIN_TOKEN=$($env:DEMO_ADMIN_TOKEN)"
+> ⏳ The AI steps use real models, so a full reply can take ~1–2 minutes on the
+> demo setup. Watch the node flow fill in while you wait.
+
+---
+
+## Tech stack
+
+| Layer | Choice | Why |
+|-------|--------|-----|
+| Language | **Python 3.12** | The whole backend. |
+| Web API | **FastAPI** | Serves the API + the console. |
+| Data models | **Pydantic 2** | Strict, typed data at every step (no loose dicts). |
+| Database | **PostgreSQL 16 + pgvector** | Stores traces, jobs, and the searchable knowledge base. |
+| DB access | **psycopg 3** + **Alembic** | Queries + versioned schema migrations. |
+| AI models | **vLLM** (local) + **Ollama** (remote), OpenAI-compatible | The actual language models; swappable via config. |
+| Frontend | **Plain HTML/CSS/JavaScript** (no framework) | The console — nothing to build, just static files. |
+| Packaging | **uv** + **hatchling** | Fast installs, reproducible builds. |
+| Containers | **Docker Compose** | One command runs DB + API + worker. |
+| Tests | **pytest** + **Playwright** | Unit, integration, and browser tests. |
+
+**No message queue, no Redis, no Kafka.** The job queue is just a
+PostgreSQL table — simpler to run and reason about.
+
+---
+
+## How it's built (system structure)
+
+```
+Customer message
+      │
+      ▼
+┌─────────────┐   writes a job    ┌──────────────┐   picks up job   ┌──────────────┐
+│  FastAPI    │ ────────────────▶ │  PostgreSQL  │ ───────────────▶ │   Worker     │
+│  (app)      │                   │  jobs +      │                  │  runs the 8- │
+│  serves API │ ◀──────────────── │  traces      │ ◀─────────────── │  step pipeline│
+│  + console  │   reads traces    │  (pgvector)  │   writes traces  │  calls models │
+└─────────────┘                   └──────────────┘                  └──────────────┘
+      │                                                                    │
+      ▼                                                                    ▼
+  Browser console                                                    AI models
+  (live traces)                                                (vLLM local / Ollama remote)
 ```
 
-`APP_RUNTIME_MODE=demo` enables this authenticator; `production` rejects it until
-a real authenticator is implemented.
+**Two processes** share one database:
+- **`app`** — the web server. Takes messages in, serves the console, reads traces
+  out. Does *not* call the AI itself.
+- **`worker`** — the background engine. Pulls queued jobs, runs the pipeline,
+  writes every step as a trace.
 
-### Trace console
+### Where things live in the code
 
-Open `http://localhost:8080/console/` and paste the customer token into the
-dialog. The token stays only in JavaScript memory — never in URLs, storage,
-cookies, logs, or traces — so a page refresh returns to the token dialog. The
-collapsible simulator submits an inbound message; the trace-first workspace polls
-structured events and opens failed nodes with their exact error location. Manual
-retry creates an immutable `review_required` trace under the same lineage.
+```
+src/agent_flow/
+├── main.py            # web app wiring; serves the console
+├── runtime.py         # the demo "composition root" — plugs everything together
+├── worker.py          # background job runner
+├── contracts.py       # the typed data shapes used everywhere
+├── observability.py   # how traces/events/reasoning get recorded
+├── auth.py            # demo bearer-token login
+├── api/               # HTTP endpoints (submissions, traces, health)
+├── pipeline/          # THE BRAIN — the 8 steps, one file each:
+│   ├── classify.py    #   understand the message
+│   ├── risk.py        #   safety check
+│   ├── evidence.py    #   plan / gather / verify facts
+│   ├── respond.py     #   pick style, write reply, repair
+│   ├── validate.py    #   fact-check the reply
+│   ├── model_outputs.py #  strict shapes for what models may return
+│   └── turn.py        #   the conductor that runs steps 1→8 in order
+├── adapters/          # talk to the outside: models, RAG search, tools
+├── repositories/      # read/write the database
+└── console/           # the web UI (HTML/CSS/JS, i18n EN + 中文)
 
-### Submission API
-
-The console uses the same channel-neutral queue you can drive directly. The
-request body carries no `customer_id`; scope is bound from the bearer token:
-
-```powershell
-$headers = @{ Authorization = "Bearer $env:DEMO_CUSTOMER_TOKEN" }
-$body = @{
-  channel = "console"
-  external_message_id = [guid]::NewGuid().ToString("N")
-  session_id = "demo-session-1"
-  text = "我的訂單在哪裡？"
-  idempotency_key = [guid]::NewGuid().ToString("N")
-  metadata = @{ source = "trace-console" }
-} | ConvertTo-Json
-
-$receipt = Invoke-RestMethod -Method Post `
-  -Uri http://localhost:8080/api/v1/submissions `
-  -Headers $headers -ContentType application/json -Body $body
-
-Invoke-RestMethod `
-  -Uri "http://localhost:8080/api/v1/submissions/$($receipt.submission_id)" `
-  -Headers $headers
-Invoke-RestMethod -Uri "http://localhost:8080/api/v1/traces" -Headers $headers
+config/                # editable settings, prompts, demo knowledge base
+├── models.bootstrap.example.yaml  # which model powers each step (swap here)
+├── prompts/           # the instructions given to each AI step
+└── demo/rag.json      # the demo knowledge base (facts the AI may cite)
 ```
 
-Poll the submission and its trace events to a terminal safe response or explicit
-handoff. Replaying an identical `idempotency_key` returns the same receipt.
+**Want to change what the AI knows?** Edit `config/demo/rag.json`.
+**Want to change which model runs a step?** Edit `config/models.bootstrap.example.yaml`.
+**Want to change how a step behaves?** Edit its prompt in `config/prompts/`.
+You rarely need to touch Python for those.
 
-### Queue recovery and failure locations
+---
 
-The worker claims jobs with `FOR UPDATE SKIP LOCKED`, a fresh claim token, and an
-expiring lease. If a worker dies mid-turn, the next claim finalizes the abandoned
-trace with the safe code `WORKER_LEASE_EXPIRED`, reserves a retry trace under the
-same root, and re-executes it; both traces stay queryable. Every failure maps to
-a diagnosable location. Read the chain left to right:
+## Running without Docker (developers)
 
-```text
-readiness check -> model role -> probe stage -> trace node -> component ->
-operation -> safe error code -> automatic/manual retry disposition
+If you'd rather run the pieces by hand (needs Python 3.12 + [uv](https://docs.astral.sh/uv/)):
+
+```bash
+uv sync --frozen                              # install dependencies
+uv run --frozen alembic upgrade head          # set up the database
+uv run --frozen uvicorn agent_flow.main:app --reload   # start the API
+uv run --frozen python -m agent_flow.worker --run      # start the worker
+uv run pytest -q                              # run the tests
 ```
 
-Example: readiness `models` unavailable → role `response_generator` → stage
-`capability` → node `response_generator` → component `model` → operation
-`chat` → safe error code `MODEL_CAPABILITY_FAILED` → manual retry once the model
-is restored. A tool timeout surfaces as node `evidence_collector` → component
-`order_api` → operation `order.lookup` → safe error code `TOOL_TIMEOUT` with a
-bounded automatic retry. No model content or hidden reasoning is ever rendered.
+Health checks: `http://localhost:8000/health/live` (alive) and
+`/health/ready` (all models verified).
 
-### Future LINE adapter boundary
+---
 
-`InboundMessage.channel` is a bounded string, not a `Literal`, so a future LINE
-adapter adds a channel value without a migration or a console rewrite. The LINE
-adapter, its webhook verification, and outbound delivery are intentionally out of
-scope for this demo.
+## Safety & limits
 
-## Model Registry and Inventory Gate
+- **Demo login only.** The console uses two static tokens set in `.env`. This is
+  fine for a demo; a real deployment needs proper authentication
+  (`APP_RUNTIME_MODE=production` deliberately refuses the demo tokens).
+- **Small models = variable quality.** The local 8B model can produce weak or
+  off replies on open chit-chat. That's expected; a larger model improves it.
+- **"Reduced assurance."** Fact-checking uses deterministic rules plus one AI
+  judge, so the system labels its own confidence as `reduced_assurance` and is
+  **not** approved to run unattended in production.
+- **Admin reasoning is stored.** Admin tokens can view the models' raw
+  chain-of-thought; it's recorded in the trace and filtered out for everyone
+  else. Turn it off if that's not acceptable for your use.
+- **Never commit secrets.** `.env`, real tokens, and API keys stay local. The
+  repo is regularly checked to ensure none leak in.
 
-`config/models.bootstrap.example.yaml` maps roles to replaceable profiles and
-profiles to replaceable endpoints. Model role names are stable while profile and
-model names are replaceable, and the remote roles use an OpenAI-compatible remote
-endpoint for structured and embedding calls. Endpoint semaphores are
-authoritative when their cap is lower than the sum of role/profile concurrency.
+---
 
-`response_generator` requires `chat` and `structured_json`. A matching model
-name and `max_model_len=6144` are not enough: the `ResponseDraft`
-structured-output probe must also pass. Structured profiles keep reasoning
-enabled (`reasoning_effort: low`) — with the vLLM reasoning parser, disabling
-thinking leaves `message.content` empty, so the answer must flow through the
-reasoning-completed path.
+## License / status
 
-Run the opt-in live local gate only when vLLM is available:
-
-```powershell
-uv run --frozen pytest tests/live/test_local_inventory.py -v --run-live-model
-```
-
-In the currently observed vLLM combination, exact inventory and the 6144
-context check may pass while the strict `ResponseDraft` capability check fails
-because `message.content` is null or non-string. Treat that result as not ready;
-do not claim the capability gate passed.
-
-## Versioned Prompts, Persona Scope, and Artifact Checksums
-
-Runtime artifacts are exactly:
-
-- `config/prompts/strategy_selector.v1.yaml`
-- `config/prompts/response_generator.v1.yaml`
-- `config/personas/familiar_companion.zh-TW.v1.yaml`
-
-`familiar_companion.zh-TW` applies only to emotional-support and casual modes,
-not transactional responses. Each artifact has a stable ID, semantic version,
-schema version, and canonical SHA-256 checksum. Strategy/generation trace events
-record those references without copying full prompt/persona bodies. Rollback is
-a committed configuration rollback followed by readiness and test verification;
-never edit an active checksum in the database.
-
-## Turn, Trace, Event, Health, and Manual Retry APIs
-
-The examples assume the deployment composition has issued valid bearer tokens:
-
-```powershell
-$customerHeaders = @{ Authorization = "Bearer <customer-token>" }
-$adminHeaders = @{ Authorization = "Bearer <admin-token>" }
-$body = @{
-  session_id = "demo-session-1"
-  message = "我的訂單現在在哪裡？"
-} | ConvertTo-Json
-
-$turn = Invoke-RestMethod `
-  -Method Post `
-  -Uri http://localhost:8080/api/v1/turns `
-  -Headers $customerHeaders `
-  -ContentType application/json `
-  -Body $body
-
-$trace = Invoke-RestMethod `
-  -Uri "http://localhost:8080/api/v1/traces/$($turn.trace_id)" `
-  -Headers $adminHeaders
-
-$events = Invoke-RestMethod `
-  -Uri "http://localhost:8080/api/v1/traces/$($turn.trace_id)/events?after_sequence=0" `
-  -Headers $adminHeaders
-
-$retryBody = @{ reason = "operator verified transient dependency recovery" } |
-  ConvertTo-Json
-$retry = Invoke-RestMethod `
-  -Method Post `
-  -Uri "http://localhost:8080/api/v1/traces/$($turn.trace_id)/retry" `
-  -Headers $adminHeaders `
-  -ContentType application/json `
-  -Body $retryBody
-```
-
-Incremental events use `after_sequence`; retain the highest returned sequence.
-Manual retry accepts only a terminal trace, captures a reason, creates a new
-immutable trace, preserves `root_trace_id`/`retry_of_trace_id`, caps lineage at
-three retries, and marks the result `review_required`.
-
-## Authorization and Tenant Binding
-
-Authentication must convert the bearer token into an
-`AuthenticatedPrincipal`. Self-service callers derive `customer_id` from that
-principal; a conflicting request customer is rejected before model, RAG, or tool
-use. An agent may specify a customer only with `customer:act_as`, within the
-same tenant. Session/case ownership and trace access retain the same
-tenant/customer binding. Trace read and retry require their internal/admin
-scopes; an admin is not implicitly cross-tenant.
-
-## Retry and Handoff Outbox
-
-Retry policy distinguishes safe transient retries from permanent or high-risk
-failures. Automatic model/tool retries are bounded. A high-risk or exhausted
-path creates an idempotent, tenant-scoped handoff outbox row in the same durable
-flow as trace finalization. The worker claims rows with PostgreSQL
-`FOR UPDATE SKIP LOCKED`, a claim token, and an expiring lease. HMAC webhook
-delivery preserves the idempotency key; terminal failures remain diagnosable.
-
-## Retention and Structured Logs
-
-Raw customer/assistant turn text, turn inputs, and conversation snapshots expire
-after 30 days. Structured traces, spans, events, and terminal outbox history
-expire after 180 days; active/retryable outbox or retry-lineage references defer
-trace deletion.
-
-Stdout is JSON Lines with bounded, secret-filtered fields such as `trace_id`,
-`span_id`, `node`, `component`, `operation`, `decision_summary`,
-`reason_codes`, `retry`, `tool`, `model`, `error_location`, and `error_code`.
-It never emits hidden chain-of-thought, credentials, raw exceptions, or raw
-conversation messages. Decision logs contain finite reason codes and summaries,
-not model reasoning.
-
-## Test Commands
-
-Ordinary tests are offline and skip opt-in live probes:
-
-```powershell
-uv run --frozen pytest -v
-```
-
-Explicit PostgreSQL integration requires both the opt-in switch and an isolated
-test database URL:
-
-```powershell
-$env:REQUIRE_DB_INTEGRATION = "1"
-$env:TEST_DATABASE_URL = "postgresql://agent:agent@localhost:5432/agent_test"
-uv run --frozen pytest tests/integration -v
-Remove-Item Env:REQUIRE_DB_INTEGRATION
-Remove-Item Env:TEST_DATABASE_URL
-```
-
-The ordinary root suite must not make model, RAG, tool, webhook, or live database
-calls. The live model probe is separate:
-
-```powershell
-uv run --frozen pytest tests/live/test_local_inventory.py -v --run-live-model
-```
-
-On native Windows, psycopg async integration uses a Selector-compatible event
-loop. Linux Compose does not require that Windows-only test/runtime adjustment.
-
-## Troubleshooting
-
-- **vLLM inventory:** run
-  `Invoke-RestMethod http://localhost:8000/v1/models`; confirm exact model ID
-  and inspect the server launch arguments for `--max-model-len 6144`.
-- **Structured output:** if `response_format` is rejected, JSON is invalid, or
-  `message.content` is null/non-string, the capability gate has failed. Check
-  vLLM guided-decoding support and the `ResponseDraft` schema before enabling
-  the role.
-- **Artifacts/readiness:** call `/health/ready`. `missing` means one of the exact
-  prompt/persona files is absent; `invalid` means schema/version/checksum loading
-  failed. Do not bypass readiness.
-- **Compose host routing:** from the app container, verify
-  `http://host.docker.internal:8000/v1/models`; never replace it with container
-  localhost. Confirm `extra_hosts` is present in `docker compose config`.
-- **Remote Ollama:** query the configured endpoint rather than the CLI's
-  implicit localhost:
-
-  ```powershell
-  $remoteBase = $env:REMOTE_MODEL_BASE_URL.TrimEnd('/')
-  Invoke-RestMethod "$remoteBase/api/tags" | ConvertTo-Json -Depth 8
-  foreach ($model in @("qwen3.5:9b", "qwen3:embedding:0.6b")) {
-    $body = @{ model = $model } | ConvertTo-Json
-    Invoke-RestMethod "$remoteBase/api/show" `
-      -Method Post -ContentType application/json -Body $body |
-      ConvertTo-Json -Depth 8
-  }
-  ```
-
-  Private/custom tags must resolve on this same configured server.
-- **pgvector:** run
-  `docker compose exec postgres psql -U agent -d agent -c "\dx vector"`.
-- **Migrations:** run
-  `docker compose run --rm migrate` and
-  `docker compose exec postgres psql -U agent -d agent -c "select version_num from alembic_version;"`.
-- **Semaphore saturation:** compare endpoint `max_concurrency` with the sum of
-  role/profile limits. The endpoint cap wins; queued calls are expected.
-- **Failed outbox:** inspect only the authorized tenant:
-  `select tenant_id,id,status,attempts,last_error_code,last_http_status,next_attempt_at from notification.outbox where tenant_id = '<tenant-id>' and status='failed' order by created_at desc;`.
-- **Native Windows psycopg loop:** use the Selector-compatible loop for explicit
-  async database integration. This is not needed inside Linux containers.
-
-## Deferred: LINE Channel, Dual Judge, Improvement Lifecycle
-
-The incident-first trace console and channel-neutral submission queue are now
-built (see above). Still deferred: the LINE inbound adapter, bounded context
-compaction/per-role views, orchestrator mode and multi-worker queue expansion,
-Gemma/Qwen dual judging, and the gated self-improvement ledger. Promotion remains
-human-only in bootstrap, and any future improvement candidate must pass
-deterministic, safety, regression, and semantic tests before atomic activation.
+Bootstrap demo runtime. Use it to learn, demo, and build on — validate and
+harden before trusting it with anything real.
