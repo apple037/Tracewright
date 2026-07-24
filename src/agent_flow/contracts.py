@@ -149,6 +149,10 @@ class DialogueClassification(StrictModel):
     urgency: Literal["low", "normal", "high", "critical"]
     language: str = Field(min_length=2, max_length=32)
     emotion: EmotionAssessment
+    # The knowledge_catalog source_id this turn needs, or None when the message
+    # is not covered by the corpus (greetings, chit-chat). Drives whether the
+    # planner retrieves at all.
+    knowledge_topic: str | None = Field(default=None, max_length=128)
 
 
 class RiskDecision(StrictModel):

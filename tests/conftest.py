@@ -38,6 +38,7 @@ def fake_models():
                     "conversation_mode": "transactional_read",
                     "urgency": "normal",
                     "language": "zh-TW",
+                    "knowledge_topic": None,
                     "emotion": {
                         "category": "stress_exhaustion",
                         "dialogue_stage": "surface",

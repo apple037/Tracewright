@@ -576,9 +576,14 @@ class TurnPipeline:
                 lambda: self._load_context(state, retry_of, frozen_artifacts),
                 trace_metadata=frozen_artifacts,
             )
+            knowledge_catalog = getattr(self.rag, "catalog", tuple)() or ()
             state.classification = await self.run_node(
                 state, "dialogue_classifier",
-                lambda: classify_dialogue(self.models, (*state.snapshot.messages, request.message)),
+                lambda: classify_dialogue(
+                    self.models,
+                    (*state.snapshot.messages, request.message),
+                    knowledge_catalog,
+                ),
             )
             state.risk = await self.run_node(
                 state, "risk_precheck", lambda: _risk_or_raise(state.classification, request.message)

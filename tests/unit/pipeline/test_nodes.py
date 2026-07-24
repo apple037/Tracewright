@@ -678,3 +678,48 @@ def test_model_output_reason_codes_dedupe_preserving_order():
     )
     assert judge.failed_criteria == ("CITATION_MISMATCH",)
     assert judge.reason_codes == ("REPAIR_REQUIRED",)
+
+
+def test_planner_retrieves_only_when_classifier_names_a_topic(classification):
+    # Casual/unknown turn: classifier left knowledge_topic None -> no retrieval.
+    casual = classification.model_copy(
+        update={"intent": "greeting", "knowledge_topic": None}
+    )
+    assert plan_evidence(casual).rag_queries == ()
+    # Named a corpus topic -> retrieve it.
+    info = classification.model_copy(
+        update={"intent": "greeting", "knowledge_topic": "policy:refund"}
+    )
+    assert plan_evidence(info).rag_queries == ("policy:refund",)
+
+
+def test_validator_drops_evidence_when_nothing_was_planned(fresh_collected_evidence):
+    from datetime import datetime, timezone
+
+    from agent_flow.contracts import EvidencePlan
+
+    now = datetime.now(timezone.utc)
+    collected = fresh_collected_evidence
+    stray = collected.items[0]
+    # No required facts and no rag_queries: a stray doc must not reach generator.
+    dropped = validate_evidence(EvidencePlan(), collected, now)
+    assert dropped.items == ()
+    # Intentional knowledge lookup: the retrieved doc is forwarded.
+    kept = validate_evidence(EvidencePlan(rag_queries=("policy:refund",)), collected, now)
+    assert kept.items == (stray,)
+
+
+@pytest.mark.asyncio
+async def test_classifier_forwards_knowledge_catalog_to_the_model(fake_models):
+    from agent_flow.pipeline.classify import classify_dialogue
+
+    captured = {}
+    original = fake_models.structured
+
+    async def spy(role, request, response_type):
+        captured["catalog"] = getattr(request, "knowledge_catalog", None)
+        return await original(role, request, response_type)
+
+    fake_models.structured = spy
+    await classify_dialogue(fake_models, ("hi",), ("policy:refund: refunds in 7 days",))
+    assert captured["catalog"] == ("policy:refund: refunds in 7 days",)

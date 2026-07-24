@@ -48,8 +48,14 @@ def plan_evidence(classification: DialogueClassification) -> EvidencePlan:
         return EvidencePlan(
             required_facts=("refund.current_status",),
         )
-    if classification.conversation_mode.value == "informational":
-        return EvidencePlan(rag_queries=(classification.intent,))
+    # Retrieve only when the classifier — having seen the knowledge catalog —
+    # judged the turn to need a specific corpus topic. Greetings and anything
+    # the catalog does not cover leave knowledge_topic None, so no RAG runs and
+    # the generator has no stray doc to parrot.
+    # ponytail: queries by source_id (the mock ignores query text); a real
+    # semantic RAG would query the message — thread it here if that changes.
+    if classification.knowledge_topic:
+        return EvidencePlan(rag_queries=(classification.knowledge_topic,))
     return EvidencePlan()
 
 
@@ -252,8 +258,15 @@ def validate_evidence(
     reason = (
         "REQUIRED_EVIDENCE_PRESENT" if plan.required_facts else "NO_EVIDENCE_REQUIRED"
     )
+    # Only evidence the plan actually asked for reaches the generator: facts
+    # tied to a required_fact, plus hits from an intentional knowledge lookup
+    # (rag_queries). When the plan retrieved nothing (e.g. a greeting), any
+    # stray collected item is dropped so it can never be parroted.
+    items = list(validated_items)
+    if plan.rag_queries:
+        items.extend(evidence.items)
     return ValidatedEvidence(
-        items=(tuple(validated_items) if plan.required_facts else evidence.items),
+        items=tuple(items),
         sufficient=True,
         reason_codes=(reason,),
     )

@@ -133,7 +133,8 @@ async def test_remote_openai_inventory_verifies_role_specific_structured_json(
                     "finish_reason": "stop",
                     "message": {"content": (
                         '{"intent":"answer","conversation_mode":"informational",'
-                        '"urgency":"normal","language":"en","emotion":{'
+                        '"urgency":"normal","language":"en","knowledge_topic":null,'
+                        '"emotion":{'
                         '"category":"neutral","dialogue_stage":"not_applicable",'
                         '"override":"no_emotional_content",'
                         '"response_mode":"business_first","confidence":1,'

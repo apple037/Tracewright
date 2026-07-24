@@ -92,6 +92,17 @@ class BoundedEmotionAssessment(_DedupeCodes, EmotionAssessment):
 
 class DialogueClassificationResult(DialogueClassification):
     emotion: BoundedEmotionAssessment
+    # Required (nullable) so the strict json_schema always asks the model to
+    # judge relevance against the supplied knowledge_catalog.
+    knowledge_topic: str | None = Field(
+        max_length=128,
+        description=(
+            "The exact source_id from knowledge_catalog whose knowledge this "
+            "message needs, or null when the message is a greeting, small talk, "
+            "or anything the catalog does not cover. Do not guess a source_id "
+            "for unrelated messages."
+        ),
+    )
 
 
 class StrategyProposalResult(_DedupeCodes, StrategyProposal):

@@ -30,7 +30,7 @@ async def test_retry_rebinds_immutable_snapshot_for_retry_of_retry(
     def replenish():
         fake_models.responses["dialogue_classifier"].append({
             "intent": "order_status", "conversation_mode": "transactional_read",
-            "urgency": "normal", "language": "zh-TW",
+            "urgency": "normal", "language": "zh-TW", "knowledge_topic": None,
             "emotion": {"category": "neutral", "dialogue_stage": "not_applicable",
                         "override": "none", "response_mode": "business_first",
                         "confidence": 1, "evidence_spans": [], "reason_codes": ["NO_EMOTIONAL_CONTENT"]},

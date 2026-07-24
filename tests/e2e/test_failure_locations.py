@@ -26,7 +26,7 @@ async def test_turn_input_capture_failure_is_traced_at_first_context_node(
 async def test_high_risk_handoffs_before_evidence_and_names_risk_node(pipeline, context, fake_models):
     fake_models.responses["dialogue_classifier"].clear()
     fake_models.responses["dialogue_classifier"].append({
-        "intent": "support", "conversation_mode": "boundary", "urgency": "critical", "language": "zh-TW",
+        "intent": "support", "conversation_mode": "boundary", "urgency": "critical", "language": "zh-TW", "knowledge_topic": None,
         "emotion": {"category": "fear_avoidance", "dialogue_stage": "surface", "override": "boundary", "response_mode": "brief_acknowledgment", "confidence": 1, "evidence_spans": [], "reason_codes": ["EXPLICIT_FEAR_AVOIDANCE"]},
     })
     result = await pipeline.run(context, TurnRequest(session_id="s1", message="我現在有危險"))
@@ -153,7 +153,7 @@ async def test_handoff_finish_retry_does_not_enqueue_twice(
 ):
     fake_models.responses["dialogue_classifier"].clear()
     fake_models.responses["dialogue_classifier"].append({
-        "intent": "support", "conversation_mode": "boundary", "urgency": "critical", "language": "zh-TW",
+        "intent": "support", "conversation_mode": "boundary", "urgency": "critical", "language": "zh-TW", "knowledge_topic": None,
         "emotion": {"category": "fear_avoidance", "dialogue_stage": "surface", "override": "boundary", "response_mode": "brief_acknowledgment", "confidence": 1, "evidence_spans": [], "reason_codes": ["EXPLICIT_FEAR_AVOIDANCE"]},
     })
     original = pipeline.traces.finish_trace
@@ -179,7 +179,7 @@ async def test_handoff_postcommit_ack_loss_replays_without_duplicate(
 ):
     fake_models.responses["dialogue_classifier"].clear()
     fake_models.responses["dialogue_classifier"].append({
-        "intent": "support", "conversation_mode": "boundary", "urgency": "critical", "language": "zh-TW",
+        "intent": "support", "conversation_mode": "boundary", "urgency": "critical", "language": "zh-TW", "knowledge_topic": None,
         "emotion": {"category": "fear_avoidance", "dialogue_stage": "surface", "override": "boundary", "response_mode": "brief_acknowledgment", "confidence": 1, "evidence_spans": [], "reason_codes": ["EXPLICIT_FEAR_AVOIDANCE"]},
     })
     original = pipeline.traces.finish_trace
@@ -202,7 +202,7 @@ async def test_handoff_precommit_enqueue_failure_retries_same_key(
 ):
     fake_models.responses["dialogue_classifier"].clear()
     fake_models.responses["dialogue_classifier"].append({
-        "intent": "support", "conversation_mode": "boundary", "urgency": "critical", "language": "zh-TW",
+        "intent": "support", "conversation_mode": "boundary", "urgency": "critical", "language": "zh-TW", "knowledge_topic": None,
         "emotion": {"category": "fear_avoidance", "dialogue_stage": "surface", "override": "boundary", "response_mode": "brief_acknowledgment", "confidence": 1, "evidence_spans": [], "reason_codes": ["EXPLICIT_FEAR_AVOIDANCE"]},
     })
     original = pipeline.handoffs.enqueue
@@ -225,7 +225,7 @@ async def test_handoff_postcommit_enqueue_ack_loss_is_deduplicated(
 ):
     fake_models.responses["dialogue_classifier"].clear()
     fake_models.responses["dialogue_classifier"].append({
-        "intent": "support", "conversation_mode": "boundary", "urgency": "critical", "language": "zh-TW",
+        "intent": "support", "conversation_mode": "boundary", "urgency": "critical", "language": "zh-TW", "knowledge_topic": None,
         "emotion": {"category": "fear_avoidance", "dialogue_stage": "surface", "override": "boundary", "response_mode": "brief_acknowledgment", "confidence": 1, "evidence_spans": [], "reason_codes": ["EXPLICIT_FEAR_AVOIDANCE"]},
     })
     original = pipeline.handoffs.enqueue

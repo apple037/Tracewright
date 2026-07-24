@@ -148,6 +148,20 @@ class MockRagClient:
             )
         return RagSearchResult(items=items)
 
+    def catalog(self) -> tuple[str, ...]:
+        """Brief 'source_id: snippet' lines describing what the corpus owns.
+
+        Fed to the classifier so it can judge whether a turn needs retrieval.
+        Deduped by source_id and bounded so a large corpus stays a short prompt.
+        """
+        seen: dict[str, str] = {}
+        for record in self._records:
+            if record.source_id in seen:
+                continue
+            snippet = " ".join(record.content.split())[:120]
+            seen[record.source_id] = f"{record.source_id}: {snippet}"
+        return tuple(list(seen.values())[:50])
+
     def _evidence(self, record: _RagFixture) -> EvidenceItem:
         checksum = _checksum(record.content)
         metadata = {
