@@ -6,3 +6,4 @@ workflow.png
 __pycache__/
 *.py[cod]
 .pytest_cache/
+screenshot.png
