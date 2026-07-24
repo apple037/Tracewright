@@ -71,12 +71,12 @@ def test_bootstrap_examples_use_openai_compatible_remote_models():
 
     assert model_config["endpoints"]["remote_models"]["adapter"] == "openai_compatible"
     assert model_config["endpoints"]["remote_models"]["max_concurrency"] == 6
-    assert model_config["profiles"]["remote_structured"]["max_tokens"] == 2048
+    assert model_config["profiles"]["remote_structured"]["max_tokens"] == 8192
     assert (
         model_config["profiles"]["remote_structured"]["request_options"][
-            "enable_thinking"
+            "reasoning_effort"
         ]
-        is False
+        == "low"
     )
     assert model_config["profiles"]["remote_embedding"]["model"] == (
         "qwen3-embedding-0.6b"

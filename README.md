@@ -231,9 +231,12 @@ model names are replaceable, and the remote roles use an OpenAI-compatible remot
 endpoint for structured and embedding calls. Endpoint semaphores are
 authoritative when their cap is lower than the sum of role/profile concurrency.
 
-`response_generator` requires `chat`, `structured_json`, and
-`reasoning_toggle`. A matching model name and `max_model_len=6144` are not enough:
-the `ResponseDraft` structured-output probe must also pass.
+`response_generator` requires `chat` and `structured_json`. A matching model
+name and `max_model_len=6144` are not enough: the `ResponseDraft`
+structured-output probe must also pass. Structured profiles keep reasoning
+enabled (`reasoning_effort: low`) — with the vLLM reasoning parser, disabling
+thinking leaves `message.content` empty, so the answer must flow through the
+reasoning-completed path.
 
 Run the opt-in live local gate only when vLLM is available:
 

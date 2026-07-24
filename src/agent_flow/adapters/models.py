@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -88,6 +89,32 @@ def _request_dict(request: object) -> dict[str, Any]:
     if isinstance(request, dict):
         return dict(request)
     raise TypeError("model request must be a mapping or Pydantic model")
+
+
+def _chat_messages(request_data: dict[str, Any]) -> list[dict[str, Any]]:
+    messages = request_data.get("messages")
+    if (
+        isinstance(messages, list)
+        and messages
+        and all(
+            isinstance(item, dict) and "role" in item and "content" in item
+            for item in messages
+        )
+    ):
+        return messages
+    # Pipeline requests are domain payloads, not chat transcripts; serialize
+    # them into one user message so real OpenAI-compatible endpoints accept
+    # them. The response schema is enforced by response_format.
+    body = json.dumps(request_data, ensure_ascii=False, default=str)
+    return [
+        {
+            "role": "user",
+            "content": (
+                "Handle this request payload and reply with JSON matching "
+                "the required response schema:\n" + body
+            ),
+        }
+    ]
 
 
 class ModelGateway:
@@ -202,14 +229,12 @@ class ModelGateway:
         *,
         response_format: dict[str, object] | None = None,
     ) -> ModelResponse:
-        payload = _request_dict(request)
-        payload.update(
-            {
-                "model": resolved.model,
-                "temperature": resolved.temperature,
-                "max_tokens": resolved.max_tokens,
-            }
-        )
+        payload: dict[str, Any] = {
+            "messages": _chat_messages(_request_dict(request)),
+            "model": resolved.model,
+            "temperature": resolved.temperature,
+            "max_tokens": resolved.max_tokens,
+        }
         if response_format is not None:
             payload["response_format"] = response_format
         if "enable_thinking" in resolved.request_options:

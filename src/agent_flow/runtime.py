@@ -62,7 +62,7 @@ async def build_demo_components(
     artifacts = load_runtime_artifacts(_CONFIG_ROOT)
     traces = PostgresTraceRepository(pool)
     telemetry = OperationTelemetry(traces)
-    models = ModelGateway(registry, telemetry=telemetry)
+    models = ModelGateway(registry, telemetry=telemetry, timeout=90.0)
     rag = MockRagClient.from_fixture(settings.demo_rag_fixture, telemetry=telemetry)
     tools = MockToolClient.from_fixture(settings.demo_tool_fixture, telemetry=telemetry)
     conversations = PostgresConversationRepository(pool)
@@ -89,7 +89,7 @@ async def build_demo_components(
         inbound=inbound,
         pipeline=pipeline,
         authenticate=DemoTokenAuthenticator.from_settings(settings),
-        inventory_probe=inventory_probe or ModelInventoryProbe(registry),
+        inventory_probe=inventory_probe or ModelInventoryProbe(registry, timeout=90.0),
     )
 
 

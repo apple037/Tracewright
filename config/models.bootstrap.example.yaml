@@ -19,20 +19,20 @@ profiles:
     endpoint: local_vllm
     model: Qwen/Qwen3-8B-AWQ
     family: qwen
-    capabilities: [chat, structured_json, reasoning_toggle]
-    request_options: {enable_thinking: false}
+    capabilities: [chat, structured_json]
+    request_options: {reasoning_effort: low}
     temperature: 0.2
-    max_tokens: 1024
+    max_tokens: 2048
     min_context_length: 6144
     max_concurrency: 1
   remote_structured:
     endpoint: remote_models
     model: qwen3.5:9b
     family: qwen
-    capabilities: [chat, structured_json, reasoning_toggle]
-    request_options: {enable_thinking: false}
+    capabilities: [chat, structured_json]
+    request_options: {reasoning_effort: low}
     temperature: 0
-    max_tokens: 2048
+    max_tokens: 8192
     max_concurrency: 2
   remote_embedding:
     endpoint: remote_models

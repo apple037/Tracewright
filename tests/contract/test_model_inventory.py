@@ -86,7 +86,7 @@ async def test_vllm_inventory_requires_exact_model_and_strict_schema(bootstrap_r
     assert result.max_model_len == 6144
     assert result.available is True
     assert result.verified_capabilities == frozenset(
-        {"chat", "structured_json", "reasoning_toggle"}
+        {"chat", "structured_json"}
     )
     request = chat.calls.last.request
     assert request.url == "http://localhost:8000/v1/chat/completions"
@@ -95,7 +95,8 @@ async def test_vllm_inventory_requires_exact_model_and_strict_schema(bootstrap_r
     assert payload["response_format"]["type"] == "json_schema"
     assert payload["response_format"]["json_schema"]["strict"] is True
     assert payload["response_format"]["json_schema"]["schema"] == ResponseDraft.model_json_schema()
-    assert payload["chat_template_kwargs"]["enable_thinking"] is False
+    assert payload["reasoning_effort"] == "low"
+    assert "chat_template_kwargs" not in payload
 
 
 @pytest.mark.asyncio
@@ -150,15 +151,15 @@ async def test_remote_openai_inventory_verifies_role_specific_structured_json(
     assert models.called and chat.called
     assert result.digest == "sha256:structured"
     assert result.verified_capabilities == frozenset(
-        {"chat", "structured_json", "reasoning_toggle"}
+        {"chat", "structured_json"}
     )
     chat_payload = __import__("json").loads(chat.calls.last.request.content)
     assert (
         chat_payload["response_format"]["json_schema"]["schema"]
         == DialogueClassificationResult.model_json_schema()
     )
-    assert chat_payload["chat_template_kwargs"]["enable_thinking"] is False
-    assert chat_payload["max_tokens"] == 2048
+    assert chat_payload["reasoning_effort"] == "low"
+    assert chat_payload["max_tokens"] == 8192
 
 
 @pytest.mark.asyncio

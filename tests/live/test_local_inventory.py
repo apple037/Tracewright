@@ -22,5 +22,5 @@ async def test_local_vllm_inventory_and_capabilities():
     assert registry.resolve("response_generator").min_context_length == 6144
     assert result.max_model_len == 6144
     assert result.verified_capabilities == frozenset(
-        {"chat", "structured_json", "reasoning_toggle"}
+        {"chat", "structured_json"}
     )

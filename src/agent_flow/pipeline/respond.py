@@ -25,6 +25,7 @@ class StrategyRequest(StrictModel):
     risk_decision: RiskDecision
     validated_evidence: ValidatedEvidence
     prompt_ref: ArtifactRef
+    system_rules: tuple[str, ...] = ()
     resolved_persona_ref: ArtifactRef | None = None
     persona_directives: tuple[str, ...] = ()
 
@@ -34,6 +35,7 @@ class GenerationRequest(StrictModel):
     strategy_decision: StrategyDecision
     validated_evidence: ValidatedEvidence
     prompt_ref: ArtifactRef
+    system_rules: tuple[str, ...] = ()
     persona: PersonaArtifact | None = None
 
 
@@ -42,7 +44,17 @@ class RepairRequest(StrictModel):
     failed_criteria: tuple[str, ...]
     evidence: ValidatedEvidence
     prompt_ref: ArtifactRef
+    system_rules: tuple[str, ...] = ()
     persona: PersonaArtifact | None = None
+
+
+def _reconcile_citations(draft: ResponseDraft) -> ResponseDraft:
+    # Models reliably fill evidence_ids but often omit citations. Each
+    # evidence_id is itself a valid citation, so mirror them when the model
+    # claimed evidence yet cited nothing — a format fix, not invented grounding.
+    if draft.evidence_ids and not draft.citations:
+        return draft.model_copy(update={"citations": draft.evidence_ids})
+    return draft
 
 
 def _applicable_persona(
@@ -75,6 +87,7 @@ async def select_strategy(
         risk_decision=risk,
         validated_evidence=evidence,
         prompt_ref=prompt.ref,
+        system_rules=prompt.system_rules,
         resolved_persona_ref=effective.ref if effective else None,
         persona_directives=effective.expression_principles if effective else (),
     )
@@ -106,11 +119,13 @@ async def generate_response(
         strategy_decision=strategy,
         validated_evidence=evidence,
         prompt_ref=prompt.ref,
+        system_rules=prompt.system_rules,
         persona=effective,
     )
-    return await invoke_structured_model(
+    draft = await invoke_structured_model(
         models, "response_generator", request, ResponseDraft
     )
+    return _reconcile_citations(draft)
 
 
 async def repair_response(
@@ -134,8 +149,10 @@ async def repair_response(
         failed_criteria=failed_criteria,
         evidence=evidence,
         prompt_ref=prompt.ref,
+        system_rules=prompt.system_rules,
         persona=effective,
     )
-    return await invoke_structured_model(
+    draft = await invoke_structured_model(
         models, "response_generator", request, ResponseDraft
     )
+    return _reconcile_citations(draft)

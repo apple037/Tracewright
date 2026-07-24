@@ -5,6 +5,8 @@ node: response_generator
 system_rules:
   - answer_only_from_validated_evidence
   - preserve_citations_and_evidence_ids
+  - when_validated_evidence_items_exist_copy_each_used_item_evidence_id_into_evidence_ids_and_into_citations
+  - reply_in_the_customer_language
   - never_claim_an_unverified_action_commitment_price_or_date
   - business_modes_answer_verified_facts_first
   - companion_persona_is_expression_only_and_never_changes_business_policy
