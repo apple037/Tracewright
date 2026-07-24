@@ -1,9 +1,33 @@
+# Secrets — never commit
 .env
+.env.*
+!.env.example
+
+# Agent/tooling scratch dirs
 .superpowers/
 .agents/
+.claude/
 
-workflow.png
+# Python
+.venv/
+venv/
 __pycache__/
 *.py[cod]
+*.egg-info/
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+dist/
+build/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Local scratch images
+workflow.png
 screenshot.png
