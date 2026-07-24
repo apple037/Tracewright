@@ -77,6 +77,19 @@ async def test_demo_authenticator_uses_constant_time_static_tokens(settings):
     assert await auth("wrong") is None
 
 
+async def test_demo_admin_can_submit_and_inspect_as_demo_customer(settings):
+    # Single-page demo: the admin token must both send chat (turn:write, bound to
+    # the demo customer) and read raw reasoning (trace:admin).
+    auth = DemoTokenAuthenticator.from_settings(settings)
+    admin = await auth(settings.demo_admin_token.get_secret_value())
+    assert admin == AuthenticatedPrincipal(
+        subject_id="demo-admin",
+        tenant_id=settings.demo_tenant_id,
+        customer_id=settings.demo_customer_id,
+        scopes=frozenset({"turn:write", "trace:read", "trace:retry", "trace:admin"}),
+    )
+
+
 async def test_production_mode_rejects_demo_tokens(settings):
     production = settings.model_copy(update={"app_runtime_mode": "production"})
     with pytest.raises(RuntimeError, match="demo authentication is disabled"):

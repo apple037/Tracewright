@@ -65,12 +65,16 @@ class DemoTokenAuthenticator:
             customer_id=customer_id,
             scopes=frozenset({"turn:write", "trace:read", "trace:retry"}),
         )
+        # The demo is single-page: the admin both sends chat messages and
+        # inspects traces. Bind the admin to the demo customer and grant
+        # turn:write so one token drives the whole flow — chat submissions land
+        # under the demo customer, and the admin sees exactly those traces.
         self._admin = AuthenticatedPrincipal(
             subject_id="demo-admin",
             tenant_id=tenant_id,
-            customer_id=None,
+            customer_id=customer_id,
             scopes=frozenset(
-                {"customer:act_as", "trace:read", "trace:retry", "trace:admin"}
+                {"turn:write", "trace:read", "trace:retry", "trace:admin"}
             ),
         )
 
