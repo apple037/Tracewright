@@ -4,7 +4,10 @@ import { renderTraceList, renderWorkspace, showAlert } from "./render.js";
 
 const state = createState();
 let eventTimer = null;
+let listTimer = null;
 let submissionActive = false;
+
+const LIST_REFRESH_MS = 5000;
 
 const dom = {};
 
@@ -39,13 +42,29 @@ async function onTokenSubmit(event) {
   dom["token-dialog"].close();
   dom["logout-button"].hidden = false;
   await refreshTraces();
+  startListRefresh();
 }
 
 function logout() {
   clearToken();
   state.authenticated = false;
   stopEventPolling();
+  stopListRefresh();
   requireAuth();
+}
+
+// Keep the trace list current while the operator watches; selection and event
+// polling are untouched by a list refresh.
+function startListRefresh() {
+  stopListRefresh();
+  listTimer = setInterval(() => {
+    if (state.authenticated) refreshTraces();
+  }, LIST_REFRESH_MS);
+}
+
+function stopListRefresh() {
+  if (listTimer) clearInterval(listTimer);
+  listTimer = null;
 }
 
 // --- trace list + workspace ----------------------------------------------
@@ -203,6 +222,8 @@ async function onSimulatorSubmit(event) {
   selectTrace(state, { trace_id: body.trace_id, id: body.trace_id, spans: [], events: [] });
   state.selectedTraceId = body.trace_id;
   renderWorkspace(dom["trace-workspace"], state, onToggleNode);
+  await refreshTraces();
+  startEventPolling();
   await pollSubmission(body.submission_id);
 }
 
