@@ -137,6 +137,39 @@ async def list_traces(
     }
 
 
+async def _admin_conversation(request: Request, trace, authenticated) -> dict[str, Any] | None:
+    # Operators with trace:admin see the real customer message and reply — the
+    # business content, not chain-of-thought. Everyone else gets the redacted
+    # trace only. Sourced straight from the job payload/result, bypassing the
+    # trace-event sanitizer (which deliberately strips message text).
+    if "trace:admin" not in authenticated.scopes:
+        return None
+    submissions = getattr(services(request), "submissions", None)
+    if submissions is None:
+        return None
+    record = await submissions.get_by_trace(
+        trace.id, tenant_id=trace.tenant_id, customer_id=trace.customer_id
+    )
+    if record is None:
+        return None
+    message = (record.payload or {}).get("message") or {}
+    result = record.result
+    return {
+        "input": {
+            "text": message.get("text"),
+            "channel": message.get("channel"),
+            "session_id": message.get("session_id"),
+        },
+        "output": {
+            "status": record.status,
+            "text": (result or {}).get("text"),
+            "citations": (result or {}).get("citations") or [],
+            "handoff": (result or {}).get("handoff"),
+            "error_code": record.last_error_code,
+        },
+    }
+
+
 @router.get("/traces/{trace_id}")
 async def get_trace(
     trace_id: UUID,
@@ -149,6 +182,9 @@ async def get_trace(
     payload["events"] = [_public_values(item) for item in trace.events]
     issue = getattr(trace, "issue_summary", None)
     payload["issue_summary"] = _public_values(issue) if issue is not None else None
+    conversation = await _admin_conversation(request, trace, authenticated)
+    if conversation is not None:
+        payload["conversation"] = conversation
     return payload
 
 

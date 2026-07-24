@@ -205,6 +205,22 @@ class PostgresSubmissionRepository:
             row = await cursor.fetchone()
         return _record(row) if row is not None else None
 
+    async def get_by_trace(
+        self, trace_id: UUID, *, tenant_id: str, customer_id: str
+    ) -> SubmissionRecord | None:
+        async with self._pool.connection() as connection:
+            cursor = await connection.execute(
+                f"""
+                SELECT {_COLUMNS_WITH_LINEAGE}
+                FROM runtime.jobs
+                WHERE trace_id = %s AND tenant_id = %s AND customer_id = %s
+                  AND job_type = 'turn'
+                """,
+                (trace_id, tenant_id, customer_id),
+            )
+            row = await cursor.fetchone()
+        return _record(row) if row is not None else None
+
     async def claim(
         self, *, owner: str, limit: int, lease_seconds: int, max_attempts: int
     ) -> tuple[SubmissionRecord, ...]:

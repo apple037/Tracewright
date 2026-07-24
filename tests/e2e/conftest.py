@@ -358,6 +358,16 @@ class MemorySubmissions:
             return None
         return record
 
+    async def get_by_trace(self, trace_id, *, tenant_id, customer_id):
+        for record in self.records.values():
+            if (
+                record.trace_id == trace_id
+                and record.tenant_id == tenant_id
+                and record.customer_id == customer_id
+            ):
+                return record
+        return None
+
 
 class MemoryHandoffs:
     def __init__(self): self.items, self.keys = [], set()
@@ -431,7 +441,9 @@ def app_factory(pipeline):
         ),
         "admin": AuthenticatedPrincipal(
             subject_id="admin-u1", tenant_id="t1", customer_id=None,
-            scopes=frozenset({"customer:act_as", "trace:read", "trace:retry"}),
+            scopes=frozenset(
+                {"customer:act_as", "trace:read", "trace:retry", "trace:admin"}
+            ),
         ),
         "other-tenant": AuthenticatedPrincipal(
             subject_id="admin-u2", tenant_id="t2", customer_id=None,
@@ -444,6 +456,10 @@ def app_factory(pipeline):
         "trace-only": AuthenticatedPrincipal(
             subject_id="trace-u1", tenant_id="t1", customer_id="c1",
             scopes=frozenset({"trace:read"}),
+        ),
+        "customer-reader": AuthenticatedPrincipal(
+            subject_id="customer-r1", tenant_id="t1", customer_id="c1",
+            scopes=frozenset({"turn:write", "trace:read", "trace:retry"}),
         ),
     }
 

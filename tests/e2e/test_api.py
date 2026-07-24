@@ -87,6 +87,29 @@ async def test_other_customer_cannot_read_submission(app_factory):
 
 
 @pytest.mark.asyncio
+async def test_admin_trace_detail_includes_real_input_and_output(app_factory):
+    app = app_factory()
+    async with client_for(app) as client:
+        created = await create_submission(client, token="customer")
+        admin = await client.get(
+            f"/api/v1/traces/{created['trace_id']}",
+            headers={"Authorization": "Bearer admin"},
+        )
+        retry_reader = await client.get(
+            f"/api/v1/traces/{created['trace_id']}",
+            headers={"Authorization": "Bearer customer-reader"},
+        )
+    assert admin.status_code == 200
+    conversation = admin.json()["conversation"]
+    assert conversation["input"]["text"] == submission_payload()["text"]
+    assert conversation["output"]["status"] == "completed"
+    assert conversation["output"]["text"] or conversation["output"]["handoff"]
+    # A reader without trace:admin never receives raw input/output.
+    assert retry_reader.status_code == 200
+    assert "conversation" not in retry_reader.json()
+
+
+@pytest.mark.asyncio
 async def test_trace_list_is_tenant_and_customer_scoped(app_factory):
     app = app_factory()
     async with client_for(app) as client:
