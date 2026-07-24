@@ -26,6 +26,7 @@ class ModelResponse(BaseModel):
     finish_reason: str
     input_tokens: int | None = None
     output_tokens: int | None = None
+    reasoning: str | None = None
 
 
 @dataclass(frozen=True)

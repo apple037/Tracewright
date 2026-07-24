@@ -137,23 +137,46 @@ async def list_traces(
     }
 
 
+def _admin_reasoning(trace) -> list[dict[str, Any]]:
+    # Raw model chain-of-thought, admin-only. Read straight from the unsanitized
+    # event rows (event_type "model_reasoning"); the public trace/events paths
+    # never emit these because the sanitizer strips the "reasoning" key.
+    steps: list[dict[str, Any]] = []
+    for event in getattr(trace, "events", []) or []:
+        if getattr(event, "event_type", None) != "model_reasoning":
+            continue
+        payload = event.payload or {}
+        text = payload.get("reasoning")
+        if not text:
+            continue
+        steps.append({
+            "node": payload.get("node"),
+            "model_role": payload.get("model_role"),
+            "text": text,
+        })
+    return steps
+
+
 async def _admin_conversation(request: Request, trace, authenticated) -> dict[str, Any] | None:
-    # Operators with trace:admin see the real customer message and reply — the
-    # business content, not chain-of-thought. Everyone else gets the redacted
-    # trace only. Sourced straight from the job payload/result, bypassing the
-    # trace-event sanitizer (which deliberately strips message text).
+    # Operators with trace:admin see the real customer message, the reply, and
+    # the raw model reasoning — the business content and chain-of-thought.
+    # Everyone else gets the redacted trace only. Input/output come from the job
+    # payload/result and reasoning from the raw event rows, both bypassing the
+    # trace-event sanitizer.
     if "trace:admin" not in authenticated.scopes:
         return None
     submissions = getattr(services(request), "submissions", None)
-    if submissions is None:
+    record = None
+    if submissions is not None:
+        record = await submissions.get_by_trace(
+            trace.id, tenant_id=trace.tenant_id, customer_id=trace.customer_id
+        )
+    reasoning = _admin_reasoning(trace)
+    if record is None and not reasoning:
         return None
-    record = await submissions.get_by_trace(
-        trace.id, tenant_id=trace.tenant_id, customer_id=trace.customer_id
-    )
-    if record is None:
-        return None
-    message = (record.payload or {}).get("message") or {}
-    result = record.result
+    message = (record.payload if record else None) or {}
+    message = message.get("message") or {}
+    result = (record.result if record else None) or {}
     return {
         "input": {
             "text": message.get("text"),
@@ -161,12 +184,13 @@ async def _admin_conversation(request: Request, trace, authenticated) -> dict[st
             "session_id": message.get("session_id"),
         },
         "output": {
-            "status": record.status,
-            "text": (result or {}).get("text"),
-            "citations": (result or {}).get("citations") or [],
-            "handoff": (result or {}).get("handoff"),
-            "error_code": record.last_error_code,
+            "status": record.status if record else None,
+            "text": result.get("text"),
+            "citations": result.get("citations") or [],
+            "handoff": result.get("handoff"),
+            "error_code": record.last_error_code if record else None,
         },
+        "reasoning": reasoning,
     }
 
 
@@ -179,7 +203,11 @@ async def get_trace(
     trace = await _scoped_trace(request, trace_id, authenticated)
     payload = _public_values(trace)
     payload["spans"] = [_public_values(item) for item in trace.spans]
-    payload["events"] = [_public_values(item) for item in trace.events]
+    payload["events"] = [
+        _public_values(item)
+        for item in trace.events
+        if getattr(item, "event_type", None) != "model_reasoning"
+    ]
     issue = getattr(trace, "issue_summary", None)
     payload["issue_summary"] = _public_values(issue) if issue is not None else None
     conversation = await _admin_conversation(request, trace, authenticated)
@@ -201,7 +229,14 @@ async def incremental_events(
         customer_id=_trace_customer_scope(authenticated),
         after_sequence=after_sequence,
     )
-    return {"trace_id": trace.id, "events": [_public_values(item) for item in events]}
+    return {
+        "trace_id": trace.id,
+        "events": [
+            _public_values(item)
+            for item in events
+            if getattr(item, "event_type", None) != "model_reasoning"
+        ],
+    }
 
 
 def _artifact_refs(trace) -> dict[str, Any] | None:

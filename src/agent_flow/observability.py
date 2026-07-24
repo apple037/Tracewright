@@ -102,6 +102,38 @@ class OperationTelemetry:
             },
         )
 
+    # Admin-only raw model reasoning. Stored UNSANITIZED (bypassing _append) so
+    # trace:admin operators can inspect it; every normal read path re-runs the
+    # sanitizer, which strips the "reasoning" key, so no other scope sees it.
+    _REASONING_MAX_CHARS = 12000
+
+    async def record_model_reasoning(
+        self, *, role: str, model: str, reasoning: str
+    ) -> None:
+        context = self._current.get()
+        if context is None or not reasoning:
+            return
+        # Best-effort: raw reasoning is auxiliary admin observability, so a
+        # storage hiccup must never fail the customer turn.
+        try:
+            await self.traces.append_event(
+                trace_id=context.trace_id,
+                span_id=context.span_id,
+                tenant_id=context.tenant_id,
+                event_type="model_reasoning",
+                component="model",
+                status="completed",
+                payload={
+                    "node": context.node,
+                    "attempt": context.attempt,
+                    "model_role": role,
+                    "model": model,
+                    "reasoning": reasoning[: self._REASONING_MAX_CHARS],
+                },
+            )
+        except Exception:
+            return
+
     async def record_rag(
         self,
         *,

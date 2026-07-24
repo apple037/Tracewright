@@ -195,6 +195,22 @@ function renderConversation(trace) {
     outRow.appendChild(cites);
   }
   panel.appendChild(outRow);
+
+  const reasoning = Array.isArray(convo.reasoning) ? convo.reasoning : [];
+  if (reasoning.length) {
+    const details = el("details", { class: "io-reasoning" });
+    details.appendChild(el("summary", {
+      text: `${t("io.reasoning")} · ${reasoning.length}`,
+    }));
+    for (const step of reasoning) {
+      const block = el("div", { class: "reasoning-cot" });
+      const label = step.model_role ? `${step.node} · ${step.model_role}` : String(step.node || "");
+      block.appendChild(el("span", { class: "reasoning-cot-node", text: label }));
+      block.appendChild(el("pre", { class: "reasoning-cot-text", text: String(step.text || "") }));
+      details.appendChild(block);
+    }
+    panel.appendChild(details);
+  }
   return panel;
 }
 

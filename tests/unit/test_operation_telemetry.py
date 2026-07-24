@@ -96,6 +96,29 @@ async def test_rag_telemetry_hashes_query_and_records_sources(
     assert "private customer question" not in json.dumps(payload)
 
 
+async def test_model_reasoning_is_stored_raw_and_bounded(telemetry, trace_context):
+    async with telemetry.bind_node(trace_context):
+        await telemetry.record_model_reasoning(
+            role="response_generator",
+            model="Qwen/Qwen3-8B-AWQ",
+            reasoning="step one\nstep two" * 5000,
+        )
+    event = telemetry.traces.events[-1]
+    # Stored unsanitized under its own event type so admins can read it, but
+    # bounded so a runaway reasoning stream cannot blow up the row.
+    assert event.event_type == "model_reasoning"
+    assert event.payload["reasoning"].startswith("step one")
+    assert len(event.payload["reasoning"]) <= 12000
+    assert event.payload["model_role"] == "response_generator"
+
+
+async def test_model_reasoning_without_context_is_a_noop(telemetry):
+    await telemetry.record_model_reasoning(
+        role="r", model="m", reasoning="thinking"
+    )
+    assert telemetry.traces.events == []
+
+
 async def test_missing_active_context_is_a_noop(telemetry):
     await telemetry.record_model(
         role="response_generator",

@@ -676,6 +676,48 @@ body.chat-page { height: 100vh; overflow: hidden; }
   color: var(--text-dim);
 }
 
+/* Raw model chain-of-thought — admin only, collapsed by default. */
+.io-reasoning {
+  margin-top: 0.9rem;
+  border-top: 1px dashed var(--border);
+  padding-top: 0.7rem;
+}
+.io-reasoning > summary {
+  cursor: pointer;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--warn);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  list-style: none;
+}
+.io-reasoning > summary::before { content: "▸ "; }
+.io-reasoning[open] > summary::before { content: "▾ "; }
+
+.reasoning-cot { margin-top: 0.6rem; }
+.reasoning-cot-node {
+  display: block;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  color: var(--accent);
+  margin-bottom: 0.25rem;
+}
+.reasoning-cot-text {
+  margin: 0;
+  max-height: 260px;
+  overflow: auto;
+  padding: 0.6rem 0.75rem;
+  background: var(--surface-0);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-dim);
+}
+
 /* ---------- Alerts ---------- */
 
 #alert-region:not(:empty) {

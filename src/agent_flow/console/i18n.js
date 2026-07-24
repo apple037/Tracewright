@@ -21,6 +21,7 @@ const STRINGS = {
   "io.citations": { "zh-TW": "引用", "en-US": "Citations" },
   "io.handoff": { "zh-TW": "轉真人", "en-US": "Handoff" },
   "io.noReply": { "zh-TW": "尚無回覆。", "en-US": "No reply yet." },
+  "io.reasoning": { "zh-TW": "模型思考過程（僅管理員）", "en-US": "Model reasoning (admin only)" },
   "reasoning.summary": { "zh-TW": "推理摘要", "en-US": "Reasoning summary" },
   "reasoning.steps": { "zh-TW": "步驟", "en-US": "steps" },
   "retry.title": { "zh-TW": "重試追蹤", "en-US": "Retry trace" },

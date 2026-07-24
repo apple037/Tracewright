@@ -150,6 +150,12 @@ class ModelGateway:
             finish_reason=response.finish_reason if response else None,
             status=status,
         )
+        if response is not None and response.reasoning:
+            await self.telemetry.record_model_reasoning(
+                role=resolved.role,
+                model=resolved.model,
+                reasoning=response.reasoning,
+            )
 
     async def complete(self, role: str, request: object) -> str:
         resolved = self.registry.resolve(role)
@@ -279,11 +285,14 @@ class ModelGateway:
             raise RuntimeError(
                 f"model response malformed for role {resolved.role} at openai_chat: {exc}"
             ) from exc
+        message = choice["message"]
+        reasoning = message.get("reasoning_content") or message.get("reasoning")
         return ModelResponse(
             text=content,
             finish_reason=choice.get("finish_reason") or "unknown",
             input_tokens=usage.get("prompt_tokens"),
             output_tokens=usage.get("completion_tokens"),
+            reasoning=reasoning if isinstance(reasoning, str) else None,
         )
 
     async def _ollama_chat(

@@ -110,6 +110,48 @@ async def test_admin_trace_detail_includes_real_input_and_output(app_factory):
 
 
 @pytest.mark.asyncio
+async def test_admin_sees_raw_model_reasoning_and_others_never(app_factory, pipeline):
+    from types import SimpleNamespace
+    from uuid import UUID
+
+    app = app_factory()
+    async with client_for(app) as client:
+        created = await create_submission(client, token="customer")
+        trace_id = UUID(created["trace_id"])
+        pipeline.traces.records[trace_id].events.append(
+            SimpleNamespace(
+                id=99, node="response_generator", kind="captured",
+                sequence=999, event_type="model_reasoning", component="model",
+                metadata={}, error_code=None, operation=None, span_id=None,
+                payload={
+                    "node": "response_generator", "model_role": "response_generator",
+                    "reasoning": "SECRET_CHAIN_OF_THOUGHT step by step",
+                },
+            )
+        )
+        admin = await client.get(
+            f"/api/v1/traces/{created['trace_id']}",
+            headers={"Authorization": "Bearer admin"},
+        )
+        admin_events = await client.get(
+            f"/api/v1/traces/{created['trace_id']}/events?after_sequence=0",
+            headers={"Authorization": "Bearer admin"},
+        )
+        reader = await client.get(
+            f"/api/v1/traces/{created['trace_id']}",
+            headers={"Authorization": "Bearer customer-reader"},
+        )
+    reasoning = admin.json()["conversation"]["reasoning"]
+    assert reasoning and reasoning[0]["text"].startswith("SECRET_CHAIN_OF_THOUGHT")
+    assert reasoning[0]["node"] == "response_generator"
+    # The raw reasoning never leaks through the sanitized event stream...
+    assert "SECRET_CHAIN_OF_THOUGHT" not in admin_events.text
+    # ...nor to any reader without trace:admin.
+    assert "SECRET_CHAIN_OF_THOUGHT" not in reader.text
+    assert "conversation" not in reader.json()
+
+
+@pytest.mark.asyncio
 async def test_trace_list_is_tenant_and_customer_scoped(app_factory):
     app = app_factory()
     async with client_for(app) as client:
