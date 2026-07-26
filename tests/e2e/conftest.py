@@ -394,7 +394,9 @@ class Tool:
             evidence_id="tool-result-1", source_id="tool:order.lookup", version="v1",
             content=content, content_checksum=hashlib.sha256(content.encode()).hexdigest(),
             retrieved_at=datetime(2026, 7, 21, 12, tzinfo=timezone.utc),
-            metadata={"fact": "order.current_status", "tool": "order.lookup", "arguments": {"order_id": "current"}},
+            # Echo the arguments actually requested, as a real tool does — the
+            # validator rejects evidence whose arguments do not match the plan.
+            metadata={"fact": "order.current_status", "tool": "order.lookup", "arguments": dict(request.arguments)},
         )
         return ToolCallResult(tool=request.tool, evidence=item)
 

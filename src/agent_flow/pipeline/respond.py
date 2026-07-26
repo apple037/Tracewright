@@ -86,7 +86,17 @@ def _applicable_persona(
         or classification.conversation_mode not in persona.applies_to
     ):
         return None
+    # A persona is written for one locale. Applying a zh-TW voice to an English
+    # customer made the assistant answer "good morning" in Chinese.
+    if not _locale_matches(persona.locale, classification.language):
+        return None
     return persona
+
+
+def _locale_matches(persona_locale: str, language: str) -> bool:
+    if not language:
+        return True
+    return persona_locale.split("-")[0].casefold() == language.split("-")[0].casefold()
 
 
 async def select_strategy(

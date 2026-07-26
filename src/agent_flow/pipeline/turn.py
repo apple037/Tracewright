@@ -626,7 +626,8 @@ class TurnPipeline:
                 state.classification.conversation_mode, self.artifacts.personas
             )
             state.evidence_plan = await self.run_node(
-                state, "evidence_planner", lambda: plan_evidence(state.classification)
+                state, "evidence_planner",
+                lambda: plan_evidence(state.classification, request.message),
             )
             state.collected_evidence = await self.run_node(
                 state, "evidence_collector",

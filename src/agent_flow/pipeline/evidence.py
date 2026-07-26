@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+import re
 from datetime import datetime
 
 from agent_flow.adapters.evidence import RagClient, ToolClient
@@ -41,14 +42,34 @@ _CASUAL_INTENTS = frozenset(
 _CASUAL_MODES = frozenset({"casual", "unknown"})
 
 
-def plan_evidence(classification: DialogueClassification) -> EvidencePlan:
+# Order references are mechanical, so they are read off the message directly
+# rather than trusted to a small model. Matches "order-1", "order 1", "訂單 o1".
+_ORDER_REFERENCE = re.compile(
+    r"(?:order|訂單|订单)[\s#:_-]*([A-Za-z0-9][A-Za-z0-9_-]{0,63})",
+    re.IGNORECASE,
+)
+
+
+def extract_order_reference(message: str) -> str | None:
+    match = _ORDER_REFERENCE.search(message or "")
+    if match is None:
+        return None
+    return match.group(1).rstrip(".,?!;:，。？！")
+
+
+def plan_evidence(
+    classification: DialogueClassification, message: str = ""
+) -> EvidencePlan:
     if classification.intent == "order_status":
+        # Without the id from the message this asked the tool for the literal
+        # string "current", which matches no order and fails the whole turn.
+        order_id = extract_order_reference(message) or "current"
         return EvidencePlan(
             required_facts=("order.current_status",),
             tool_calls=(
                 EvidenceToolCall(
                     operation="order.lookup",
-                    arguments={"order_id": "current"},
+                    arguments={"order_id": order_id},
                     freshness_seconds=60,
                 ),
             ),

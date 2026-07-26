@@ -67,7 +67,7 @@ async def test_evidence_failure_records_cancelled_sibling_source(
     from agent_flow.contracts import EvidencePlan, EvidenceToolCall
     monkeypatch.setattr(
         "agent_flow.pipeline.turn.plan_evidence",
-        lambda classification: EvidencePlan(
+        lambda classification, message="": EvidencePlan(
             rag_queries=("shipping policy",),
             tool_calls=(EvidenceToolCall(
                 operation="order.lookup", arguments={"order_id": "current"},
@@ -296,7 +296,7 @@ async def test_external_evidence_cancellation_records_each_running_child(
     from agent_flow.contracts import EvidencePlan, EvidenceToolCall
     monkeypatch.setattr(
         "agent_flow.pipeline.turn.plan_evidence",
-        lambda classification: EvidencePlan(
+        lambda classification, message="": EvidencePlan(
             rag_queries=("shipping policy",),
             tool_calls=(EvidenceToolCall(operation="order.lookup", arguments={"order_id": "current"}, freshness_seconds=60),),
         ),
@@ -330,7 +330,7 @@ async def test_external_evidence_cancellation_retains_child_failure_race(
     from agent_flow.contracts import EvidencePlan, EvidenceToolCall
     monkeypatch.setattr(
         "agent_flow.pipeline.turn.plan_evidence",
-        lambda classification: EvidencePlan(
+        lambda classification, message="": EvidencePlan(
             rag_queries=("shipping policy",),
             tool_calls=(EvidenceToolCall(operation="order.lookup", arguments={"order_id": "current"}, freshness_seconds=60),),
         ),

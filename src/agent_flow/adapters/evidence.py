@@ -58,7 +58,11 @@ class _ToolFixture(StrictModel):
     arguments: dict[str, Any]
     result: dict[str, Any]
     version: str = Field(default="v1", min_length=1)
-    retrieved_at: datetime = FIXTURE_RETRIEVED_AT
+    # None means "answer as of now". A tool lookup is a live read, so a fixture
+    # that does not pin a timestamp must not be treated as months old — the
+    # order plan requires 60-second freshness, and a fixed default made every
+    # order lookup fail validation. Freshness tests still pin it explicitly.
+    retrieved_at: datetime | None = None
     effective_at: datetime | None = FIXTURE_EFFECTIVE_AT
     valid_until: datetime | None = FIXTURE_VALID_UNTIL
     score: float | None = 1.0
@@ -234,10 +238,11 @@ class MockToolClient:
 
         content = _canonical_json(record.result)
         checksum = _checksum(content)
+        retrieved_at = record.retrieved_at or datetime.now(timezone.utc)
         freshness_seconds = None
         if record.valid_until is not None:
             freshness_seconds = max(
-                0, int((record.valid_until - record.retrieved_at).total_seconds())
+                0, int((record.valid_until - retrieved_at).total_seconds())
             )
         evidence = EvidenceItem(
             evidence_id=f"tool:{record.tool}:{checksum[:16]}",
@@ -245,7 +250,7 @@ class MockToolClient:
             version=record.version,
             content=content,
             content_checksum=checksum,
-            retrieved_at=record.retrieved_at,
+            retrieved_at=retrieved_at,
             effective_at=record.effective_at,
             valid_until=record.valid_until,
             score=record.score,
