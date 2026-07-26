@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 import re
+from collections.abc import Sequence
 from datetime import datetime
 
 from agent_flow.adapters.evidence import RagClient, ToolClient
@@ -45,25 +46,43 @@ _CASUAL_MODES = frozenset({"casual", "unknown"})
 # Order references are mechanical, so they are read off the message directly
 # rather than trusted to a small model. Matches "order-1", "order 1", "訂單 o1".
 _ORDER_REFERENCE = re.compile(
-    r"(?:order|訂單|订单)[\s#:_-]*([A-Za-z0-9][A-Za-z0-9_-]{0,63})",
+    r"(?:order|訂單|订单)(?P<sep>[\s#:]*[-_]?[\s#:]*)(?P<id>[A-Za-z0-9][A-Za-z0-9_-]{0,63})",
     re.IGNORECASE,
 )
+_TRAILING_PUNCTUATION = ".,?!;:，。？！、"
 
 
 def extract_order_reference(message: str) -> str | None:
+    """The order id a customer named, as they wrote it.
+
+    "order-1" is a single token, while "order order-1" is the word followed by
+    the id — both have to yield "order-1" or the tool lookup misses.
+    """
     match = _ORDER_REFERENCE.search(message or "")
     if match is None:
         return None
-    return match.group(1).rstrip(".,?!;:，。？！")
+    separator = match.group("sep")
+    attached = separator in {"-", "_"}
+    reference = (match.group(0) if attached else match.group("id"))
+    return reference.rstrip(_TRAILING_PUNCTUATION) or None
 
 
 def plan_evidence(
-    classification: DialogueClassification, message: str = ""
+    classification: DialogueClassification,
+    message: str = "",
+    history: Sequence[str] = (),
 ) -> EvidencePlan:
     if classification.intent == "order_status":
         # Without the id from the message this asked the tool for the literal
         # string "current", which matches no order and fails the whole turn.
-        order_id = extract_order_reference(message) or "current"
+        # A follow-up ("is it still on the way?") names no order, so fall back
+        # to the most recent one mentioned earlier in the conversation.
+        order_id = extract_order_reference(message)
+        for earlier in reversed(list(history)):
+            if order_id:
+                break
+            order_id = extract_order_reference(earlier)
+        order_id = order_id or "current"
         return EvidencePlan(
             required_facts=("order.current_status",),
             tool_calls=(

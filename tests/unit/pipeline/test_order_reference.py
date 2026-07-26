@@ -54,3 +54,21 @@ def test_a_persona_is_not_applied_across_languages(classification, companion_per
     assert _applicable_persona(
         casual.model_copy(update={"language": "zh-CN"}), companion_persona
     ) is companion_persona
+
+
+def test_a_follow_up_reuses_the_order_named_earlier(classification):
+    # "is it still on the way?" names no order. Without history it fell back to
+    # the literal "current" and the lookup failed.
+    plan = plan_evidence(
+        classification,
+        "is it still on the way?",
+        ["hello", "where is my order order-7?"],
+    )
+    assert plan.tool_calls[0].arguments["order_id"] == "order-7"
+
+
+def test_the_current_message_wins_over_an_older_order(classification):
+    plan = plan_evidence(
+        classification, "what about order-9?", ["where is my order order-7?"]
+    )
+    assert plan.tool_calls[0].arguments["order_id"] == "order-9"

@@ -627,7 +627,10 @@ class TurnPipeline:
             )
             state.evidence_plan = await self.run_node(
                 state, "evidence_planner",
-                lambda: plan_evidence(state.classification, request.message),
+                lambda: plan_evidence(
+                    state.classification, request.message,
+                    [t.text for t in state.snapshot.messages if t.role == "customer"],
+                ),
             )
             state.collected_evidence = await self.run_node(
                 state, "evidence_collector",
