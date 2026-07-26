@@ -7,9 +7,28 @@ from agent_flow.contracts import CapturedTurnInput, ConversationSnapshot, TurnRe
 from agent_flow.repositories.postgres import PostgresPool
 
 
+def _as_turns(stored: object) -> tuple[dict[str, str], ...]:
+    # ponytail: snapshots written before role tagging are flat strings; recover
+    # the roles by position rather than migrating the table. Drop this when no
+    # pre-1.1 snapshot rows remain (they expire after 30 days).
+    turns: list[dict[str, str]] = []
+    for index, entry in enumerate(stored or ()):
+        if isinstance(entry, dict):
+            turns.append({"role": entry["role"], "text": entry["text"]})
+        else:
+            turns.append(
+                {
+                    "role": "customer" if index % 2 == 0 else "assistant",
+                    "text": str(entry),
+                }
+            )
+    return tuple(turns)
+
+
 class PostgresConversationRepository:
-    def __init__(self, pool: PostgresPool) -> None:
+    def __init__(self, pool: PostgresPool, *, history_turns: int = 8) -> None:
         self._pool = pool
+        self._history_turns = history_turns
 
     async def capture_turn_input(
         self, *, tenant_id: str, customer_id: str, session_id: str,
@@ -127,6 +146,36 @@ class PostgresConversationRepository:
         )
         return (await cursor.fetchone())["id"]
 
+    async def list_turns(
+        self, *, tenant_id: str, customer_id: str, session_id: str, limit: int = 100
+    ) -> tuple[dict[str, object], ...]:
+        """Visible transcript for a session, oldest first.
+
+        Scoped to one tenant+customer so a token can only ever read its own
+        conversation. Used by the console to restore the chat after a reload.
+        """
+        async with self._pool.connection() as connection:
+            cursor = await connection.execute(
+                """
+                SELECT customer_text, assistant_text, citations, created_at
+                FROM runtime.turns
+                WHERE tenant_id = %s AND customer_id = %s AND session_id = %s
+                ORDER BY created_at, id
+                LIMIT %s
+                """,
+                (tenant_id, customer_id, session_id, limit),
+            )
+            rows = await cursor.fetchall()
+        return tuple(
+            {
+                "customer_text": row["customer_text"],
+                "assistant_text": row["assistant_text"],
+                "citations": tuple(row["citations"] or ()),
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        )
+
     async def get_snapshot(
         self,
         *,
@@ -150,21 +199,35 @@ class PostgresConversationRepository:
                 conversation_id = await self._ensure_conversation(
                     connection, tenant_id, customer_id, session_id
                 )
+                # Newest `history_turns` exchanges, oldest-first. Unbounded
+                # history used to blow the classifier's 100-message cap and turn
+                # a long session into a permanent failure. Handed-off turns
+                # ('failed') are included: the customer's message still happened,
+                # and dropping it makes a rephrase start from zero context.
                 cursor = await connection.execute(
                     """
-                    SELECT turn.customer_text, turn.assistant_text
-                    FROM runtime.turns AS turn
-                    JOIN observability.traces AS trace ON trace.id = turn.trace_id
-                    WHERE turn.tenant_id = %s AND turn.customer_id = %s
-                      AND turn.session_id = %s AND trace.status = 'succeeded'
-                    ORDER BY turn.created_at, turn.id
+                    SELECT customer_text, assistant_text FROM (
+                        SELECT turn.customer_text, turn.assistant_text,
+                               turn.created_at, turn.id
+                        FROM runtime.turns AS turn
+                        JOIN observability.traces AS trace ON trace.id = turn.trace_id
+                        WHERE turn.tenant_id = %s AND turn.customer_id = %s
+                          AND turn.session_id = %s
+                          AND trace.status IN ('succeeded', 'failed')
+                        ORDER BY turn.created_at DESC, turn.id DESC
+                        LIMIT %s
+                    ) AS recent
+                    ORDER BY recent.created_at, recent.id
                     """,
-                    (tenant_id, customer_id, session_id),
+                    (tenant_id, customer_id, session_id, self._history_turns),
                 )
                 messages = tuple(
-                    text
+                    entry
                     for row in await cursor.fetchall()
-                    for text in (row["customer_text"], row["assistant_text"])
+                    for entry in (
+                        {"role": "customer", "text": row["customer_text"]},
+                        {"role": "assistant", "text": row["assistant_text"]},
+                    )
                 )
                 snapshot_id = uuid4()
                 await connection.execute(
@@ -196,7 +259,7 @@ class PostgresConversationRepository:
                 row = await cursor.fetchone()
         return ConversationSnapshot(
             session_id=row["session_id"],
-            messages=tuple(row["messages"]),
+            messages=_as_turns(row["messages"]),
             captured_at=row["captured_at"],
         )
 
@@ -248,7 +311,7 @@ class PostgresConversationRepository:
                     )
         return ConversationSnapshot(
             session_id=row["session_id"],
-            messages=tuple(row["messages"]),
+            messages=_as_turns(row["messages"]),
             captured_at=row["captured_at"],
         )
 

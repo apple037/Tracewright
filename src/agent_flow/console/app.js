@@ -3,25 +3,60 @@ import { createState, mergeEvents, toggleNode, selectTrace, isTerminal } from ".
 import { renderTraceList, renderWorkspace, showAlert } from "./render.js";
 import { t, applyStatic, toggleLang } from "./i18n.js";
 import { createChatroom } from "./chatroom.js";
+import { createTunePanel } from "./tune.js";
 
 const state = createState();
 let eventTimer = null;
 let listTimer = null;
 let chatroom = null;
+let tunePanel = null;
 
 const LIST_REFRESH_MS = 5000;
+const THEME_KEY = "tracewright.theme";
 
 const dom = {};
 
 function cacheDom() {
   for (const id of [
     "token-dialog", "token-form", "token-input", "retry-button", "retry-dialog",
-    "retry-form", "retry-reason", "logout-button", "lang-toggle",
-    "trace-list", "trace-workspace", "chat-transcript", "chat-form", "chat-input",
+    "retry-form", "retry-reason", "logout-button", "lang-toggle", "theme-toggle",
+    "tune-button", "tune-dialog", "tune-body", "tune-close",
+    "trace-list", "trace-items", "trace-workspace", "workspace-body",
+    "chat-transcript", "chat-form", "chat-input", "chat-send", "chat-reset",
   ]) {
     dom[id] = document.getElementById(id);
   }
 }
+
+// --- theme ----------------------------------------------------------------
+
+function applyTheme(theme) {
+  if (theme) document.documentElement.setAttribute("data-theme", theme);
+  else document.documentElement.removeAttribute("data-theme");
+}
+
+function storedTheme() {
+  try {
+    return window.localStorage.getItem(THEME_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function onToggleTheme() {
+  const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+  const current = document.documentElement.getAttribute("data-theme")
+    || (prefersDark ? "dark" : "light");
+  const next = current === "dark" ? "light" : "dark";
+  applyTheme(next);
+  try {
+    window.localStorage.setItem(THEME_KEY, next);
+  } catch {
+    /* theme simply will not persist */
+  }
+}
+
+// --- chat -----------------------------------------------------------------
 
 // Sending a chat message from the demo panel selects its trace so the operator
 // watches the pipeline run live in the same view — no page switch.
@@ -30,12 +65,26 @@ async function onChatTrace(traceId) {
   await selectAndLoad(traceId);
 }
 
+// Disabling send while a turn is in flight is what stops a second message
+// being silently swallowed after the textarea has already been cleared.
+function onChatBusy(busy) {
+  dom["chat-send"].disabled = busy;
+  dom["chat-input"].readOnly = busy;
+  dom["chat-transcript"].setAttribute("aria-busy", busy ? "true" : "false");
+}
+
 async function onChatSubmit(event) {
   event.preventDefault();
   const text = dom["chat-input"].value.trim();
-  if (!text || !chatroom) return;
+  if (!text || !chatroom || chatroom.sending()) return;
   dom["chat-input"].value = "";
   await chatroom.submit(text);
+}
+
+function onChatReset() {
+  if (!chatroom || chatroom.sending()) return;
+  chatroom.reset();
+  dom["chat-input"].focus();
 }
 
 function uuid() {
@@ -57,8 +106,11 @@ async function onTokenSubmit(event) {
   state.authenticated = true;
   dom["token-dialog"].close();
   dom["logout-button"].hidden = false;
+  dom["tune-button"].hidden = false;
+  await chatroom.restore();
   await refreshTraces();
   startListRefresh();
+  dom["chat-input"].focus();
 }
 
 function logout() {
@@ -66,6 +118,13 @@ function logout() {
   state.authenticated = false;
   stopEventPolling();
   stopListRefresh();
+  state.traces = [];
+  state.selectedTrace = null;
+  state.selectedTraceId = null;
+  renderTraceList(dom["trace-items"], state, selectAndLoad);
+  renderWorkspace(dom["workspace-body"], state, onToggleNode);
+  dom["tune-button"].hidden = true;
+  dom["retry-button"].hidden = true;
   requireAuth();
 }
 
@@ -92,7 +151,7 @@ async function refreshTraces() {
     return;
   }
   state.traces = body.items || [];
-  renderTraceList(dom["trace-list"], state, selectAndLoad);
+  renderTraceList(dom["trace-items"], state, selectAndLoad);
   if (state.selectedTraceId === null && state.traces.length > 0) {
     await selectAndLoad(state.traces[0].trace_id);
   }
@@ -100,25 +159,30 @@ async function refreshTraces() {
 
 async function selectAndLoad(traceId) {
   stopEventPolling();
+  dom["workspace-body"].setAttribute("aria-busy", "true");
   const { ok, body } = await requestJson(`/api/v1/traces/${traceId}`);
+  dom["workspace-body"].removeAttribute("aria-busy");
+  // A failed fetch and a trace with no spans used to render identically; keep
+  // them distinguishable so an operator is not debugging an empty pipeline.
   const trace = ok && body ? body : { trace_id: traceId, id: traceId, spans: [], events: [] };
   selectTrace(state, trace);
+  state.loadFailed = !(ok && body);
   state.selectedTraceId = traceId;
-  renderTraceList(dom["trace-list"], state, selectAndLoad);
-  renderWorkspace(dom["trace-workspace"], state, onToggleNode);
+  renderTraceList(dom["trace-items"], state, selectAndLoad);
+  renderWorkspace(dom["workspace-body"], state, onToggleNode);
   updateRetryButton();
   startEventPolling();
 }
 
 function onToggleNode(key) {
   toggleNode(state, key);
-  renderWorkspace(dom["trace-workspace"], state, onToggleNode);
+  renderWorkspace(dom["workspace-body"], state, onToggleNode);
   updateRetryButton();
 }
 
 function updateRetryButton() {
   const trace = state.selectedTrace;
-  dom["retry-button"].hidden = !(trace && isTerminal(trace.status));
+  dom["retry-button"].hidden = !(state.authenticated && trace && isTerminal(trace.status));
 }
 
 // --- bounded event polling ------------------------------------------------
@@ -153,7 +217,7 @@ async function pollEventsOnce() {
     const fresh = mergeEvents(state, body.events || []);
     if (fresh.length > 0 && state.selectedTrace) {
       state.selectedTrace.events = state.events;
-      renderWorkspace(dom["trace-workspace"], state, onToggleNode);
+      renderWorkspace(dom["workspace-body"], state, onToggleNode);
     }
     state.polling.failures = 0;
     const terminal = state.selectedTrace && isTerminal(state.selectedTrace.status);
@@ -162,7 +226,7 @@ async function pollEventsOnce() {
       await reloadSelectedDetail();
     }
     schedulePoll(terminal ? 5000 : 1000);
-  } catch (error) {
+  } catch {
     state.polling.stale = true;
     const delay = BACKOFF[Math.min(state.polling.failures, BACKOFF.length - 1)];
     state.polling.failures += 1;
@@ -181,7 +245,7 @@ async function reloadSelectedDetail() {
   if (ok && body && traceId === state.selectedTraceId) {
     body.events = state.events.length ? state.events : body.events;
     state.selectedTrace = body;
-    renderWorkspace(dom["trace-workspace"], state, onToggleNode);
+    renderWorkspace(dom["workspace-body"], state, onToggleNode);
     updateRetryButton();
   }
 }
@@ -226,8 +290,8 @@ async function onRetrySubmit(event) {
 function onToggleLang() {
   toggleLang();
   applyStatic();
-  renderTraceList(dom["trace-list"], state, selectAndLoad);
-  renderWorkspace(dom["trace-workspace"], state, onToggleNode);
+  renderTraceList(dom["trace-items"], state, selectAndLoad);
+  renderWorkspace(dom["workspace-body"], state, onToggleNode);
   if (chatroom) chatroom.render();
 }
 
@@ -235,19 +299,31 @@ function onToggleLang() {
 
 function init() {
   cacheDom();
+  applyTheme(storedTheme());
   applyStatic();
   chatroom = createChatroom({
     transcript: dom["chat-transcript"],
     onTrace: onChatTrace,
+    onBusy: onChatBusy,
     onError: (message) => showAlert(message),
   });
   chatroom.render();
+  tunePanel = createTunePanel({
+    dialog: dom["tune-dialog"],
+    body: dom["tune-body"],
+    onError: (message) => showAlert(message),
+  });
+  renderWorkspace(dom["workspace-body"], state, onToggleNode);
   dom["token-form"].addEventListener("submit", onTokenSubmit);
   dom["logout-button"].addEventListener("click", logout);
   dom["lang-toggle"].addEventListener("click", onToggleLang);
+  dom["theme-toggle"].addEventListener("click", onToggleTheme);
+  dom["tune-button"].addEventListener("click", () => tunePanel.open());
+  dom["tune-close"].addEventListener("click", () => tunePanel.close());
   dom["retry-button"].addEventListener("click", openRetry);
   dom["retry-form"].addEventListener("submit", onRetrySubmit);
   dom["chat-form"].addEventListener("submit", onChatSubmit);
+  dom["chat-reset"].addEventListener("click", onChatReset);
   window.addEventListener("beforeunload", () => { stopEventPolling(); stopListRefresh(); });
   requireAuth();
 }

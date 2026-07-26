@@ -10,9 +10,11 @@ export function createState() {
     events: [],
     eventCursor: 0,
     expandedNodes: new Set(),
-    filters: { status: "", before: null },
+    // <details> the operator opened. Tracked like expandedNodes so a re-render
+    // triggered by an event poll does not collapse what they are reading.
+    openSections: new Set(),
+    loadFailed: false,
     polling: { active: false, stale: false, failures: 0 },
-    simulator: { open: false, sessionId: null, submission: null, messages: [] },
   };
 }
 
@@ -45,6 +47,7 @@ export function selectTrace(state, trace) {
   state.events = [];
   state.eventCursor = 0;
   state.expandedNodes = new Set();
+  state.loadFailed = false;
   for (const span of trace.spans || []) {
     if (span.status === "failed" || span.status === "cancelled") {
       state.expandedNodes.add(nodeKey(span));

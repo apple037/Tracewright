@@ -1,3 +1,24 @@
+# Shared by app and worker — they must agree on every value or they will read
+# and write the same database with different rules.
+x-app-env: &app-env
+  DATABASE_URL: postgresql://agent:agent@postgres:5432/agent
+  MODEL_CONFIG_PATH: ${MODEL_CONFIG_PATH:-config/models.yaml}
+  ASSURANCE_MODE: ${ASSURANCE_MODE:-bootstrap}
+  HISTORY_TURNS: ${HISTORY_TURNS:-8}
+  APP_RUNTIME_MODE: demo
+  DEMO_CUSTOMER_TOKEN: ${DEMO_CUSTOMER_TOKEN}
+  DEMO_ADMIN_TOKEN: ${DEMO_ADMIN_TOKEN}
+  DEMO_TENANT_ID: ${DEMO_TENANT_ID:-t1}
+  DEMO_CUSTOMER_ID: ${DEMO_CUSTOMER_ID:-c1}
+  # host.docker.internal reaches a model server running on this machine; a LAN
+  # address in .env reaches one on another machine.
+  LOCAL_VLLM_BASE_URL: ${LOCAL_VLLM_BASE_URL:-http://host.docker.internal:8000/v1}
+  LOCAL_VLLM_API_KEY: ${LOCAL_VLLM_API_KEY:-EMPTY}
+  REMOTE_MODEL_BASE_URL: ${REMOTE_MODEL_BASE_URL:-http://host.docker.internal:11434/v1}
+  REMOTE_MODEL_API_KEY: ${REMOTE_MODEL_API_KEY:-}
+  WEBHOOK_URL: ${WEBHOOK_URL:-http://mock-handoff-server:9999/mock-handoff}
+  WEBHOOK_SECRET: ${WEBHOOK_SECRET:-replace-for-local-demo-only}
+
 services:
   postgres:
     image: pgvector/pgvector:0.8.5-pg16-bookworm
@@ -27,21 +48,11 @@ services:
   app:
     build: .
     command: ["uv", "run", "--frozen", "--no-dev", "--no-sync", "uvicorn", "--factory", "agent_flow.runtime:create_runtime_app", "--host", "0.0.0.0", "--port", "8080"]
-    environment:
-      DATABASE_URL: postgresql://agent:agent@postgres:5432/agent
-      MODEL_CONFIG_PATH: ${MODEL_CONFIG_PATH:-config/models.bootstrap.example.yaml}
-      ASSURANCE_MODE: ${ASSURANCE_MODE:-bootstrap}
-      APP_RUNTIME_MODE: demo
-      DEMO_CUSTOMER_TOKEN: ${DEMO_CUSTOMER_TOKEN}
-      DEMO_ADMIN_TOKEN: ${DEMO_ADMIN_TOKEN}
-      DEMO_TENANT_ID: ${DEMO_TENANT_ID:-t1}
-      DEMO_CUSTOMER_ID: ${DEMO_CUSTOMER_ID:-c1}
-      LOCAL_VLLM_BASE_URL: http://host.docker.internal:8000/v1
-      LOCAL_VLLM_API_KEY: ${LOCAL_VLLM_API_KEY:-EMPTY}
-      REMOTE_MODEL_BASE_URL: ${REMOTE_MODEL_BASE_URL:-http://remote-model-server:11434}
-      REMOTE_MODEL_API_KEY: ${REMOTE_MODEL_API_KEY:-}
-      WEBHOOK_URL: ${WEBHOOK_URL:-http://mock-handoff-server:9999/mock-handoff}
-      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-replace-for-local-demo-only}
+    environment: *app-env
+    # Console edits to prompts land in config/overrides.json; mounting config/
+    # keeps them (and any YAML you edit by hand) across a rebuild.
+    volumes:
+      - ./config:/app/config
     extra_hosts:
       - host.docker.internal:host-gateway
     ports:
@@ -60,21 +71,10 @@ services:
     build: .
     command: ["uv", "run", "--frozen", "--no-dev", "--no-sync", "python", "-m", "agent_flow.worker", "--run"]
     environment:
-      DATABASE_URL: postgresql://agent:agent@postgres:5432/agent
-      MODEL_CONFIG_PATH: ${MODEL_CONFIG_PATH:-config/models.bootstrap.example.yaml}
-      ASSURANCE_MODE: ${ASSURANCE_MODE:-bootstrap}
-      APP_RUNTIME_MODE: demo
-      DEMO_CUSTOMER_TOKEN: ${DEMO_CUSTOMER_TOKEN}
-      DEMO_ADMIN_TOKEN: ${DEMO_ADMIN_TOKEN}
-      DEMO_TENANT_ID: ${DEMO_TENANT_ID:-t1}
-      DEMO_CUSTOMER_ID: ${DEMO_CUSTOMER_ID:-c1}
-      LOCAL_VLLM_BASE_URL: http://host.docker.internal:8000/v1
-      LOCAL_VLLM_API_KEY: ${LOCAL_VLLM_API_KEY:-EMPTY}
-      REMOTE_MODEL_BASE_URL: ${REMOTE_MODEL_BASE_URL:-http://remote-model-server:11434}
-      REMOTE_MODEL_API_KEY: ${REMOTE_MODEL_API_KEY:-}
-      WEBHOOK_URL: ${WEBHOOK_URL:-http://mock-handoff-server:9999/mock-handoff}
-      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-replace-for-local-demo-only}
+      <<: *app-env
       WORKER_OWNER: ${WORKER_OWNER:-agent-flow-bootstrap}
+    volumes:
+      - ./config:/app/config
     extra_hosts:
       - host.docker.internal:host-gateway
     networks: [agent-net]

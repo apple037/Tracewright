@@ -122,7 +122,15 @@ async def test_second_validation_failure_handoffs_without_persisting_draft(
     validators = [span for span in trace.spans if span.node == "response_validator"]
     assert result.handoff_status == "queued"
     assert result.reply is None
-    assert pipeline.conversations.persisted == []
+    # The rejected draft must never enter the conversation record. The safe
+    # handoff message does, so a customer who rephrases keeps their context.
+    assert all(
+        turn["assistant_text"] != "訂單狀態仍在運送中。"
+        for turn in pipeline.conversations.persisted
+    )
+    assert [turn["customer_text"] for turn in pipeline.conversations.persisted] == [
+        "查詢訂單 o1"
+    ]
     assert trace.issue_summary.error_code == "VALIDATION_EXHAUSTED"
     assert trace.issue_summary.failed_node == "response_validator"
     assert [span.attempt for span in validators] == [1, 2]
@@ -246,7 +254,7 @@ async def test_handoff_postcommit_enqueue_ack_loss_is_deduplicated(
 
 @pytest.mark.asyncio
 async def test_external_cancellation_finalizes_trace_and_reraises(pipeline, context):
-    async def cancel_model(role, request, response_type):
+    async def cancel_model(role, request, response_type, **kwargs):
         raise __import__("asyncio").CancelledError
     pipeline.models.structured = cancel_model
     with pytest.raises(__import__("asyncio").CancelledError):
@@ -261,7 +269,7 @@ async def test_external_cancellation_finalizes_trace_and_reraises(pipeline, cont
 @pytest.mark.asyncio
 async def test_cancellation_during_trace_cleanup_is_retried_bounded(pipeline, context):
     import asyncio
-    async def cancel_model(role, request, response_type):
+    async def cancel_model(role, request, response_type, **kwargs):
         raise asyncio.CancelledError
     pipeline.models.structured = cancel_model
     original = pipeline.traces.finish_trace

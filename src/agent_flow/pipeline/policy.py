@@ -34,6 +34,7 @@ async def invoke_structured_model(
     response_type: type[T],
     *,
     attempted_actions: frozenset[str] = frozenset(),
+    system_prompt: str | None = None,
 ) -> T:
     allowed = MODEL_ALLOWED_ACTIONS.get(role)
     if allowed is None:
@@ -44,4 +45,6 @@ async def invoke_structured_model(
         raise AgentError.validation(
             "MODEL_ACTION_NOT_ALLOWED", retryable=False, component=role
         )
-    return await models.structured(role, request, response_type)
+    return await models.structured(
+        role, request, response_type, system_prompt=system_prompt
+    )

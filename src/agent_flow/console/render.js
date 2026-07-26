@@ -11,8 +11,6 @@ const DETAIL_FIELDS = new Set([
   "intent", "emotion_category",
 ]);
 
-let panelCounter = 0;
-
 export function el(tag, props = {}, children = []) {
   const node = document.createElement(tag);
   for (const [key, value] of Object.entries(props)) {
@@ -37,25 +35,51 @@ function traceLabel(trace) {
   return trace.external_message_id || trace.trace_id || "trace";
 }
 
+/* --------------------------------------------------------------- list ---- */
+
+// Rebuilt in place and keyed by trace id: a 5s list refresh must not steal
+// focus from a button the operator is about to click.
 export function renderTraceList(container, state, onSelect) {
-  container.textContent = "";
-  if (state.traces.length === 0) {
-    container.appendChild(el("p", { text: t("list.empty") }));
+  const wanted = state.traces.map((trace) => trace.trace_id);
+  if (wanted.length === 0) {
+    container.textContent = "";
+    container.appendChild(el("p", { class: "empty-note", text: t("list.empty") }));
     return;
   }
+  const existing = new Map(
+    Array.from(container.querySelectorAll("[data-trace-id]")).map((node) => [
+      node.dataset.traceId,
+      node,
+    ])
+  );
+  for (const [id, node] of existing) {
+    if (!wanted.includes(id)) node.remove();
+  }
+  const placeholder = container.querySelector(".empty-note");
+  if (placeholder) placeholder.remove();
+
+  let previous = null;
   for (const trace of state.traces) {
     const selected = trace.trace_id === state.selectedTraceId;
-    const button = el("button", {
-      type: "button",
-      class: "trace-item",
-      "aria-label": traceLabel(trace),
-      "aria-pressed": selected ? "true" : "false",
-      dataset: { traceId: trace.trace_id },
-    });
-    button.appendChild(el("span", { text: traceLabel(trace) }));
-    button.appendChild(statusBadge(trace.status));
-    button.addEventListener("click", () => onSelect(trace.trace_id));
-    container.appendChild(button);
+    let button = existing.get(trace.trace_id);
+    if (!button) {
+      button = el("button", {
+        type: "button",
+        class: "trace-item",
+        "aria-label": traceLabel(trace),
+        dataset: { traceId: trace.trace_id },
+      });
+      button.appendChild(el("span", {}));
+      button.appendChild(el("span", {}));
+      button.addEventListener("click", () => onSelect(trace.trace_id));
+    }
+    button.setAttribute("aria-pressed", selected ? "true" : "false");
+    button.children[0].textContent = traceLabel(trace);
+    button.replaceChild(statusBadge(trace.status), button.children[1]);
+    // Keep DOM order equal to server order without a full wipe.
+    const anchor = previous ? previous.nextSibling : container.firstChild;
+    if (button !== anchor) container.insertBefore(button, anchor);
+    previous = button;
   }
 }
 
@@ -66,6 +90,8 @@ function statusBadge(status) {
     text: `${icon[status] || "•"} ${statusLabel(status)}`,
   });
 }
+
+/* ------------------------------------------------------------ workspace -- */
 
 function detailPanel(fields, issue, node) {
   const panel = el("div", { class: "node-detail" });
@@ -85,7 +111,7 @@ function detailPanel(fields, issue, node) {
     panel.appendChild(span);
   }
   if (rendered === 0) {
-    panel.appendChild(el("span", { text: "Additional safe metadata unavailable" }));
+    panel.appendChild(el("span", { class: "detail-field", text: t("detail.empty") }));
   }
   return panel;
 }
@@ -132,7 +158,7 @@ function reasoningLine(payload) {
   return parts.join(" — ");
 }
 
-function renderReasoningTrail(trace) {
+function renderReasoningTrail(trace, state) {
   const rows = [];
   for (const event of trace.events || []) {
     const payload = event.payload || {};
@@ -147,7 +173,13 @@ function renderReasoningTrail(trace) {
   }
   if (rows.length === 0) return null;
 
-  const details = el("details", { class: "reasoning-trail", open: "" });
+  const details = el("details", { class: "reasoning-trail" });
+  // Open state is remembered so a 1s event poll cannot collapse it underfoot.
+  if (state.openSections.has("trail")) details.open = true;
+  details.addEventListener("toggle", () => {
+    if (details.open) state.openSections.add("trail");
+    else state.openSections.delete("trail");
+  });
   details.appendChild(el("summary", {
     text: `${t("reasoning.summary")} · ${rows.length} ${t("reasoning.steps")}`,
   }));
@@ -163,7 +195,7 @@ function renderReasoningTrail(trace) {
 }
 
 // Admin-only real input/output — the customer message and the final reply.
-function renderConversation(trace) {
+function renderConversation(trace, state) {
   const convo = trace.conversation;
   if (!convo) return null;
   const panel = el("section", { class: "io-panel", "aria-label": t("workspace.io") });
@@ -199,6 +231,11 @@ function renderConversation(trace) {
   const reasoning = Array.isArray(convo.reasoning) ? convo.reasoning : [];
   if (reasoning.length) {
     const details = el("details", { class: "io-reasoning" });
+    if (state.openSections.has("cot")) details.open = true;
+    details.addEventListener("toggle", () => {
+      if (details.open) state.openSections.add("cot");
+      else state.openSections.delete("cot");
+    });
     details.appendChild(el("summary", {
       text: `${t("io.reasoning")} · ${reasoning.length}`,
     }));
@@ -229,18 +266,30 @@ function renderConversation(trace) {
   return panel;
 }
 
+let panelCounter = 0;
+
 export function renderWorkspace(container, state, onToggle) {
+  // Scroll position is restored because this runs on every 1s event poll.
+  const scrollTop = container.scrollTop;
   container.textContent = "";
   const trace = state.selectedTrace;
   if (!trace) {
-    container.appendChild(el("p", { text: t("workspace.select") }));
+    container.appendChild(el("p", { class: "empty-note", text: t("flow.empty") }));
     return;
   }
-  container.appendChild(el("p", { class: "workspace-heading", dataset: { selectedTrace: "" }, text: traceLabel(trace) }));
-  const conversation = renderConversation(trace);
+  if (state.loadFailed) {
+    container.appendChild(el("p", { class: "empty-note", text: t("alert.traceFailed") }));
+  }
+  container.appendChild(el("p", {
+    class: "workspace-heading",
+    dataset: { selectedTrace: "" },
+    text: traceLabel(trace),
+  }));
+  const conversation = renderConversation(trace, state);
   if (conversation) container.appendChild(conversation);
-  const trail = renderReasoningTrail(trace);
+  const trail = renderReasoningTrail(trace, state);
   if (trail) container.appendChild(trail);
+
   const flow = el("div", { class: "node-flow" });
   for (const span of trace.spans || []) {
     const node = span.node || span.name;
@@ -273,4 +322,5 @@ export function renderWorkspace(container, state, onToggle) {
     flow.appendChild(item);
   }
   container.appendChild(flow);
+  container.scrollTop = scrollTop;
 }

@@ -38,6 +38,10 @@ scenes Tracewright runs a small assembly line:
 Every one of those steps is recorded as a **trace** with timing, decisions, and
 (for admins) the model's raw reasoning. That's what you see in the console.
 
+It also **remembers the conversation**. Step 1 and step 7 both receive the recent
+exchanges of the same session, tagged with who said what, so "how long will that
+take?" resolves against what was already discussed instead of starting over.
+
 ### Why "grounded" matters
 
 The AI is only allowed to state facts it actually retrieved. It can't invent a
@@ -48,74 +52,77 @@ for chit-chat.)
 
 ---
 
-## Quick start (the 5-minute demo)
+## Quick start
 
-You need **Docker Desktop** installed. That's the easy path — it runs everything
-(database, API, background worker) for you.
-
-```bash
-# 1. Copy the example settings file and give yourself demo login tokens
-cp .env.example .env
-```
-
-Open `.env` in any text editor and add two demo tokens at the bottom (any random
-16+ character strings — these are just demo passwords for the console):
-
-```
-DEMO_CUSTOMER_TOKEN=pick-any-random-string-16-chars-min
-DEMO_ADMIN_TOKEN=pick-another-random-string-16-chars
-```
-
-> 🔒 `.env` is **private** and never uploaded to GitHub (it's git-ignored). Never
-> put real passwords or API keys anywhere else.
-
-You also need an AI model endpoint for the AI steps to call. Tracewright expects:
-- a **local** model (vLLM) serving `Qwen/Qwen3-8B-AWQ` on port `8000`, and
-- optionally a **remote** Ollama-style model for the classifier/judge.
-
-Point at yours in `.env` (`LOCAL_VLLM_BASE_URL`, `REMOTE_MODEL_BASE_URL`).
+You need **Docker Desktop** and a running AI model server (Ollama, vLLM, or
+anything OpenAI-compatible).
 
 ```bash
-# 2. Start everything
-docker compose up --build
-
-# 3. (optional) load the demo knowledge base
-docker compose --profile demo run --rm demo-seed
+./run.sh
 ```
 
-When it's ready, open **http://localhost:8080/console/** and paste your
-**admin** token.
+The first run creates `.env` and stops to ask you for two things: a login token
+and your model server's address. Fill them in, run `./run.sh` again, and it
+builds, starts, seeds sample data, and prints the URL.
+
+Then open **http://localhost:8080/console/** and paste your **admin** token.
+
+```bash
+./run.sh logs     # see what it is doing
+./run.sh stop     # stop it
+./run.sh reset    # stop and wipe the database
+make restart      # pick up edits to config/*.yaml
+```
+
+> ⏳ Replies take real time — a 27B model on one GPU is roughly 30–90 seconds per
+> message, because a turn makes several model calls. Watch the steps fill in.
+
+---
+
+## Changing how it behaves
+
+Four files, no Python. See **[TUNING.md](TUNING.md)** for the detail.
+
+| I want to change… | Edit |
+|---|---|
+| How it **sounds** | `config/personas/*.yaml` |
+| What each step **decides** | `config/prompts/*.yaml` |
+| **Which model** does what | `config/models.yaml` |
+| Addresses, passwords, memory length | `.env` |
+| What the AI **knows** | `config/demo/rag.json` |
+
+Or click **Tune** in the console with an admin token: it shows every step's
+current instructions, the voice, and which model runs each step — and lets you
+edit the instructions live, applied to the very next message.
 
 ---
 
 ## Using the console
 
-The console is **one page, three columns** — no page-switching:
-
 ```
-┌───────────────┬───────────────────────────┬──────────────────┐
-│  Trace list   │       Trace workspace      │  Customer chat   │
-│ (every turn,  │  Input & Output            │  (type here,     │
-│  auto-refresh │  Model reasoning (admin)   │   press Send)    │
-│  every 5s)    │  Reasoning summary         │                  │
-│               │  Node flow (the 8 steps)   │                  │
-└───────────────┴───────────────────────────┴──────────────────┘
+┌───────────────┬──────────────────────┬─────────────────────┐
+│  Turns        │   Conversation       │  What happened      │
+│  (this        │   (type here —       │  this turn          │
+│   conversation│    the main event)   │  (steps fill in     │
+│   auto-       │                      │   live; click one   │
+│   refreshes)  │                      │   for its decisions)│
+└───────────────┴──────────────────────┴─────────────────────┘
 ```
 
-1. **Type a message** in the right-hand chat and press Send (try `where is my
-   order order-1?`).
-2. Its trace **auto-selects** in the middle and **streams live** as each step runs.
-3. Click any step card to expand its decisions; click a row on the left to switch
-   traces.
-4. **EN / 中文** toggles language. **Retry trace** re-runs a finished trace.
+1. **Type a message** and press Send (try `where is my order order-1?`).
+2. Its trace **auto-selects** and **streams live** as each step runs.
+3. Click any step to expand what it decided.
+4. Ask a **follow-up** — "how long will that take?" — and it resolves the
+   reference from the conversation so far.
+5. **Refresh the page**: the conversation is still there. **New conversation**
+   starts a clean one.
+6. **EN / 中文** switches language, **◐** switches light/dark, **Retry trace**
+   re-runs a finished turn.
 
 **Admin vs customer token:**
-- **Admin** token sees everything: the real input/output, the model's raw
-  chain-of-thought (collapsible, labeled per step), and full reasoning.
-- **Customer** token sees only the chat — no internal reasoning.
-
-> ⏳ The AI steps use real models, so a full reply can take ~1–2 minutes on the
-> demo setup. Watch the node flow fill in while you wait.
+- **Admin** sees everything: real input/output, the model's raw chain-of-thought
+  (collapsible, labeled per step), and the Tune panel.
+- **Customer** sees only the chat — no internal reasoning.
 
 ---
 
@@ -128,7 +135,7 @@ The console is **one page, three columns** — no page-switching:
 | Data models | **Pydantic 2** | Strict, typed data at every step (no loose dicts). |
 | Database | **PostgreSQL 16 + pgvector** | Stores traces, jobs, and the searchable knowledge base. |
 | DB access | **psycopg 3** + **Alembic** | Queries + versioned schema migrations. |
-| AI models | **vLLM** (local) + **Ollama** (remote), OpenAI-compatible | The actual language models; swappable via config. |
+| AI models | Any **OpenAI-compatible** server (Ollama, vLLM, …) | The actual language models; swappable in `config/models.yaml`. |
 | Frontend | **Plain HTML/CSS/JavaScript** (no framework) | The console — nothing to build, just static files. |
 | Packaging | **uv** + **hatchling** | Fast installs, reproducible builds. |
 | Containers | **Docker Compose** | One command runs DB + API + worker. |
@@ -154,7 +161,7 @@ Customer message
       │                                                                    │
       ▼                                                                    ▼
   Browser console                                                    AI models
-  (live traces)                                                (vLLM local / Ollama remote)
+  (live traces)                                          (any OpenAI-compatible server)
 ```
 
 **Two processes** share one database:
@@ -173,7 +180,8 @@ src/agent_flow/
 ├── contracts.py       # the typed data shapes used everywhere
 ├── observability.py   # how traces/events/reasoning get recorded
 ├── auth.py            # demo bearer-token login
-├── api/               # HTTP endpoints (submissions, traces, health)
+├── api/               # HTTP endpoints (submissions, sessions, traces, config)
+├── runtime_config.py  # live view of the editable config; backs the Tune panel
 ├── pipeline/          # THE BRAIN — the 8 steps, one file each:
 │   ├── classify.py    #   understand the message
 │   ├── risk.py        #   safety check
@@ -187,15 +195,13 @@ src/agent_flow/
 └── console/           # the web UI (HTML/CSS/JS, i18n EN + 中文)
 
 config/                # editable settings, prompts, demo knowledge base
-├── models.bootstrap.example.yaml  # which model powers each step (swap here)
+├── models.yaml        # which model powers each step
 ├── prompts/           # the instructions given to each AI step
+├── personas/          # how the assistant sounds
 └── demo/rag.json      # the demo knowledge base (facts the AI may cite)
 ```
 
-**Want to change what the AI knows?** Edit `config/demo/rag.json`.
-**Want to change which model runs a step?** Edit `config/models.bootstrap.example.yaml`.
-**Want to change how a step behaves?** Edit its prompt in `config/prompts/`.
-You rarely need to touch Python for those.
+See **[TUNING.md](TUNING.md)** — you rarely need to touch Python.
 
 ---
 
@@ -206,7 +212,7 @@ If you'd rather run the pieces by hand (needs Python 3.12 + [uv](https://docs.as
 ```bash
 uv sync --frozen                              # install dependencies
 uv run --frozen alembic upgrade head          # set up the database
-uv run --frozen uvicorn agent_flow.main:app --reload   # start the API
+uv run --frozen uvicorn --factory agent_flow.runtime:create_runtime_app --reload  # API
 uv run --frozen python -m agent_flow.worker --run      # start the worker
 uv run pytest -q                              # run the tests
 ```
@@ -221,8 +227,10 @@ Health checks: `http://localhost:8000/health/live` (alive) and
 - **Demo login only.** The console uses two static tokens set in `.env`. This is
   fine for a demo; a real deployment needs proper authentication
   (`APP_RUNTIME_MODE=production` deliberately refuses the demo tokens).
-- **Small models = variable quality.** The local 8B model can produce weak or
+- **Small models = variable quality.** A small local model can produce weak or
   off replies on open chit-chat. That's expected; a larger model improves it.
+- **Console edits are live.** The Tune panel changes behaviour for the next
+  message without a restart or a code review. Only admin tokens can reach it.
 - **"Reduced assurance."** Fact-checking uses deterministic rules plus one AI
   judge, so the system labels its own confidence as `reduced_assurance` and is
   **not** approved to run unattended in production.
@@ -244,28 +252,41 @@ a demo; this section is the operational contract.
 - Each pipeline step is a **model role** (`dialogue_classifier`,
   `strategy_advisor`, `response_generator`, `response_judge`, `embedding`, …).
   the **role names are stable**; the *profile* and *model* names behind them are
-  replaceable in `config/models.bootstrap.example.yaml`. Swap models there, not
-  in code.
-- The initial local model is **`Qwen/Qwen3-8B-AWQ`**. Start it on the host on
-  `localhost:8000` (OpenAI-compatible) and inspect the launch arguments for
-  `--max-model-len 6144`.
-- The remote roles use an **OpenAI-compatible remote** endpoint
-  (`REMOTE_MODEL_BASE_URL`). For an all-local flow check, point every LLM role
-  at the local profile (see `config/models.local.yaml`) and set
-  `MODEL_CONFIG_PATH` to it.
-- Verify the remote endpoint directly rather than the Ollama CLI's implicit
-  localhost:
+  replaceable in `config/models.yaml`. Swap models there, not in code.
+- The default config points every chat role at one model on one
+  OpenAI-compatible endpoint (`REMOTE_MODEL_BASE_URL`). Split roles across
+  profiles when you want a bigger model for the final reply only.
+- `structured_output` per profile decides how JSON is enforced. Ollama's `/v1`
+  accepts OpenAI's `json_schema` field and **ignores** it, so Ollama profiles
+  must use `json_object`; the schema is always repeated in the system prompt so
+  a backend without grammar enforcement still complies.
+- The `embedding` role is disabled by default: the demo answers from a fixture,
+  and the code requires a 1024-dimension embedding model.
+- Verify the endpoint directly rather than trusting the Ollama CLI's implicit
+  localhost: `curl "${REMOTE_MODEL_BASE_URL%/v1}/api/tags"`. `./run.sh` runs this
+  check for you at startup.
 
-  ```powershell
-  $remoteBase = $env:REMOTE_MODEL_BASE_URL.TrimEnd('/')
-  Invoke-RestMethod "$remoteBase/api/tags" | ConvertTo-Json -Depth 8
-  foreach ($model in @("qwen3.5:9b", "qwen3:embedding:0.6b")) {
-    $body = @{ model = $model } | ConvertTo-Json
-    Invoke-RestMethod "$remoteBase/api/show" `
-      -Method Post -ContentType application/json -Body $body |
-      ConvertTo-Json -Depth 8
-  }
-  ```
+### Conversation memory
+
+- History is per `session_id`, role-tagged, and windowed to `HISTORY_TURNS`
+  (default 8) most recent exchanges — unbounded history used to exceed the
+  classifier's 100-message cap and fail the turn outright.
+- Handed-off turns are recorded too, so a customer who triggers a handoff and
+  then rephrases does not start from zero context.
+- `GET /api/v1/sessions/{session_id}/messages` replays the visible transcript,
+  scoped to the authenticated tenant and customer. The console uses it to
+  restore the chat after a reload.
+
+### Editing prompts at runtime
+
+- `GET /api/v1/config` (admin) reports the live prompts, personas, model roles
+  and settings. `PUT`/`DELETE` on `/api/v1/config/prompts/{node}` and
+  `/api/v1/config/personas/{artifact_id}` set and clear overrides.
+- Overrides live in `config/overrides.json` (git-ignored) and never rewrite the
+  YAML, so the commented config files stay intact and revert always works.
+- Every edit recomputes the artifact checksum, and that checksum is recorded on
+  the spans of each turn that used it — a trace always identifies the exact
+  prompt text that produced it.
 
 ### Demo tokens (demo only)
 

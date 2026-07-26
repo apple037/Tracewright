@@ -88,6 +88,9 @@ class PersonaArtifact(StrictModel):
     locale: str = Field(min_length=2, max_length=32)
     source_reference: str = Field(min_length=1)
     applies_to: tuple[ConversationMode, ...]
+    # Free text sent to the model as part of the system prompt. This is the
+    # knob to turn when you want the assistant to sound different.
+    style_prompt: str = ""
     expression_principles: tuple[str, ...]
     override_order: tuple[EmotionOverride, ...]
     guardrails: PersonaGuardrails
@@ -110,6 +113,9 @@ class PromptArtifact(StrictModel):
     artifact_id: str = Field(min_length=1, max_length=128)
     version: SemanticVersion
     node: str = Field(min_length=1, max_length=128)
+    # Free text sent to the model as its system message. This is the knob to
+    # turn when you want a step to decide differently.
+    system_prompt: str = ""
     system_rules: tuple[str, ...]
     required_inputs: tuple[str, ...]
     output_contract: str = Field(min_length=1, max_length=128)
@@ -312,9 +318,14 @@ class TurnResult(StrictModel):
         return "queued" if self.handoff is not None and self.handoff.required else None
 
 
+class ConversationTurn(StrictModel):
+    role: Literal["customer", "assistant"]
+    text: str
+
+
 class ConversationSnapshot(StrictModel):
     session_id: str
-    messages: tuple[str, ...]
+    messages: tuple[ConversationTurn, ...]
     captured_at: datetime
 
 

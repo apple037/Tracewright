@@ -9,9 +9,13 @@
 <body class="chat-page" data-title-key="chat.title">
   <header id="app-header">
     <h1 data-i18n="chat.header">Customer chat</h1>
-    <a id="trace-link" class="ghost-button" href="index.html" data-i18n="header.openTrace">Trace console</a>
-    <button id="lang-toggle" type="button" data-i18n="lang.toggle">EN</button>
-    <button id="logout-button" type="button" data-i18n="header.signout" hidden>Sign out</button>
+    <div class="header-actions">
+      <a id="trace-link" class="ghost-button" href="index.html" data-i18n="header.openTrace">Trace console</a>
+      <button id="chat-reset" class="ghost-button" type="button" data-i18n="chat.new">New conversation</button>
+      <button id="theme-toggle" class="icon-button" type="button" title="Toggle theme" aria-label="Toggle theme">◐</button>
+      <button id="lang-toggle" class="ghost-button" type="button" data-i18n="lang.toggle">EN</button>
+      <button id="logout-button" class="ghost-button" type="button" data-i18n="header.signout" hidden>Sign out</button>
+    </div>
   </header>
 
   <dialog id="token-dialog" aria-labelledby="token-title">
@@ -29,7 +33,7 @@
       <form id="chat-form">
         <label for="chat-input" class="visually-hidden" data-i18n="chat.placeholder">Message</label>
         <textarea id="chat-input" name="message" rows="2" data-i18n-placeholder="chat.placeholder" required></textarea>
-        <button type="submit" data-i18n="chat.send">Send message</button>
+        <button id="chat-send" type="submit" data-i18n="chat.send">Send message</button>
       </form>
     </div>
   </main>

@@ -242,13 +242,16 @@ class MemoryConversations:
         return value
 
     async def get_snapshot(self, *, tenant_id, customer_id, session_id, trace_id):
-        messages = ["prior"]
+        messages = [{"role": "customer", "text": "prior"}]
         for source_trace, turn in self.turns_by_trace.items():
             record = self.traces.records[source_trace]
             if record.status == "succeeded" and (
                 record.tenant_id, record.customer_id, record.session_id
             ) == (tenant_id, customer_id, session_id):
-                messages.extend((turn["customer_text"], turn["assistant_text"]))
+                messages.extend((
+                    {"role": "customer", "text": turn["customer_text"]},
+                    {"role": "assistant", "text": turn["assistant_text"]},
+                ))
         snapshot = ConversationSnapshot(session_id=session_id, messages=tuple(messages), captured_at=self.now)
         self.snapshots[trace_id] = snapshot
         self.scopes[trace_id] = (tenant_id, customer_id, session_id)

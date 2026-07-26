@@ -75,6 +75,7 @@ async def validate_response(
     draft: ResponseDraft,
     evidence: ValidatedEvidence,
     assurance_mode: str,
+    system_prompt: str | None = None,
 ) -> ValidationResult:
     if assurance_mode not in {"bootstrap", "dual_judge"}:
         raise ValueError("assurance_mode must be 'bootstrap' or 'dual_judge'")
@@ -94,14 +95,16 @@ async def validate_response(
     request = JudgeRequest(draft=draft, verified_evidence=evidence)
     primary = await invoke_structured_model(
         models,
-        "response_judge", request, JudgeVerdictResult
+        "response_judge", request, JudgeVerdictResult,
+        system_prompt=system_prompt,
     )
     if assurance_mode == "bootstrap":
         return _single_result(primary)
 
     secondary = await invoke_structured_model(
         models,
-        "response_judge_zh_verifier", request, JudgeVerdictResult
+        "response_judge_zh_verifier", request, JudgeVerdictResult,
+        system_prompt=system_prompt,
     )
     failed = tuple(dict.fromkeys((*primary.failed_criteria, *secondary.failed_criteria)))
     reasons = tuple(dict.fromkeys((*primary.reason_codes, *secondary.reason_codes)))
@@ -114,4 +117,3 @@ async def validate_response(
         assurance="dual_judge",
         repairable=not passed,
     )
-import re

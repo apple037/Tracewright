@@ -10,11 +10,12 @@ from fastapi import FastAPI
 from agent_flow.adapters.evidence import MockRagClient, MockToolClient
 from agent_flow.adapters.models import ModelGateway
 from agent_flow.api.dependencies import AppServices, Authenticator, ReadinessCheck
+from agent_flow.api.config import router as config_router
 from agent_flow.api.health import router as health_router
+from agent_flow.api.sessions import router as sessions_router
 from agent_flow.api.submissions import router as submissions_router
 from agent_flow.api.traces import router as traces_router
 from agent_flow.api.turns import router as turns_router
-from agent_flow.artifacts import load_runtime_artifacts
 from agent_flow.auth import DemoTokenAuthenticator
 from agent_flow.config import Settings, load_model_config
 from agent_flow.inbound import InboundMessageService
@@ -27,6 +28,7 @@ from agent_flow.repositories.outbox import OutboxRepository
 from agent_flow.repositories.postgres import PostgresPool
 from agent_flow.repositories.submissions import PostgresSubmissionRepository
 from agent_flow.repositories.traces import PostgresTraceRepository
+from agent_flow.runtime_config import RuntimeConfigService
 
 
 _CONFIG_ROOT = Path("config")
@@ -47,6 +49,7 @@ class RuntimeComponents:
     pipeline: TurnPipeline
     authenticate: Authenticator
     inventory_probe: object
+    runtime_config: RuntimeConfigService
 
 
 async def build_demo_components(
@@ -59,13 +62,15 @@ async def build_demo_components(
         raise RuntimeError("unsupported runtime mode: only demo is implemented")
     config = load_model_config(settings.model_config_path)
     registry = ModelRegistry(config, settings)
-    artifacts = load_runtime_artifacts(_CONFIG_ROOT)
+    runtime_config = RuntimeConfigService(_CONFIG_ROOT, config, settings)
     traces = PostgresTraceRepository(pool)
     telemetry = OperationTelemetry(traces)
     models = ModelGateway(registry, telemetry=telemetry, timeout=90.0)
     rag = MockRagClient.from_fixture(settings.demo_rag_fixture, telemetry=telemetry)
     tools = MockToolClient.from_fixture(settings.demo_tool_fixture, telemetry=telemetry)
-    conversations = PostgresConversationRepository(pool)
+    conversations = PostgresConversationRepository(
+        pool, history_turns=settings.history_turns
+    )
     handoffs = OutboxRepository(pool)
     pipeline = TurnPipeline(
         traces=traces,
@@ -74,7 +79,7 @@ async def build_demo_components(
         models=models,
         rag=rag,
         tools=tools,
-        artifacts=artifacts,
+        artifacts=runtime_config.artifacts,
         clock=SystemClock(),
         assurance_mode=settings.assurance_mode,
         telemetry=telemetry,
@@ -90,6 +95,7 @@ async def build_demo_components(
         pipeline=pipeline,
         authenticate=DemoTokenAuthenticator.from_settings(settings),
         inventory_probe=inventory_probe or ModelInventoryProbe(registry, timeout=90.0),
+        runtime_config=runtime_config,
     )
 
 
@@ -123,6 +129,7 @@ def _install_services(
         submissions=components.submissions,
         inbound=components.inbound,
         legacy_turn_timeout_seconds=settings.legacy_turn_timeout_seconds,
+        runtime_config=components.runtime_config,
     )
 
 
@@ -151,7 +158,9 @@ def create_runtime_app(
     app = FastAPI(title="Agent Flow", version="0.1.0", lifespan=demo_lifespan)
     app.include_router(turns_router)
     app.include_router(submissions_router)
+    app.include_router(sessions_router)
     app.include_router(traces_router)
+    app.include_router(config_router)
     app.include_router(health_router)
     mount_console(app)
     return app

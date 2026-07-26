@@ -334,6 +334,7 @@ async def test_repair_rejects_invented_feedback_before_model_call(
         await repair_response(
             models, verified_draft, invented, transactional_strategy,
             validated_evidence, response_prompt, None,
+            customer_message="訂單呢？", snapshot=_snapshot(),
         )
     assert models.calls == []
 
@@ -510,7 +511,8 @@ async def test_generation_suppresses_mismatched_or_forged_persona(
     forged = transactional_strategy.model_copy(update={"persona_ref": companion_persona.ref})
     other = companion_persona.model_copy(update={"checksum": "0" * 64})
     result = await generate_response(
-        fake_models, _snapshot(), forged, validated_evidence, response_prompt, other
+        fake_models, _snapshot(), forged, validated_evidence, response_prompt, other,
+        customer_message="訂單呢？",
     )
     assert result == verified_draft
     assert fake_models.requests[0].persona is None
@@ -633,6 +635,7 @@ async def test_repair_uses_generator_with_only_failed_criteria(
     repaired = await repair_response(
         models, verified_draft, repairable_validation, transactional_strategy,
         validated_evidence, response_prompt, None,
+        customer_message="訂單呢？", snapshot=_snapshot(),
     )
     assert repaired.text != verified_draft.text
     assert models.calls == ["response_generator"]
@@ -646,7 +649,9 @@ def _snapshot():
     from datetime import datetime, timezone
     from agent_flow.contracts import ConversationSnapshot
     return ConversationSnapshot(
-        session_id="s1", messages=("訂單呢？",), captured_at=datetime.now(timezone.utc)
+        session_id="s1",
+        messages=({"role": "customer", "text": "訂單呢？"},),
+        captured_at=datetime.now(timezone.utc),
     )
 
 
@@ -734,9 +739,9 @@ async def test_classifier_forwards_knowledge_catalog_to_the_model(fake_models):
     captured = {}
     original = fake_models.structured
 
-    async def spy(role, request, response_type):
+    async def spy(role, request, response_type, **kwargs):
         captured["catalog"] = getattr(request, "knowledge_catalog", None)
-        return await original(role, request, response_type)
+        return await original(role, request, response_type, **kwargs)
 
     fake_models.structured = spy
     await classify_dialogue(fake_models, ("hi",), ("policy:refund: refunds in 7 days",))

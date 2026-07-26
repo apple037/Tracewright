@@ -9,10 +9,14 @@
 <body class="demo-page" data-title-key="app.title">
   <header id="app-header">
     <h1 data-i18n="app.title">Agent Flow · Trace Console</h1>
-    <a id="chat-link" class="ghost-button" href="chat.html" data-i18n="header.openChat">Customer chat</a>
-    <button id="lang-toggle" type="button" data-i18n="lang.toggle">EN</button>
-    <button id="retry-button" type="button" data-i18n="header.retry" hidden>Retry trace</button>
-    <button id="logout-button" type="button" data-i18n="header.signout" hidden>Sign out</button>
+    <div class="header-actions">
+      <a id="chat-link" class="ghost-button" href="chat.html" data-i18n="header.openChat">Customer chat</a>
+      <button id="tune-button" class="ghost-button" type="button" data-i18n="header.tune" hidden>Tune</button>
+      <button id="theme-toggle" class="icon-button" type="button" data-i18n-title="header.theme" title="Toggle theme" aria-label="Toggle theme">◐</button>
+      <button id="lang-toggle" class="ghost-button" type="button" data-i18n="lang.toggle">EN</button>
+      <button id="retry-button" type="button" data-i18n="header.retry" hidden>Retry trace</button>
+      <button id="logout-button" class="ghost-button" type="button" data-i18n="header.signout" hidden>Sign out</button>
+    </div>
   </header>
 
   <dialog id="token-dialog" aria-labelledby="token-title">
@@ -36,21 +40,38 @@
     </form>
   </dialog>
 
+  <dialog id="tune-dialog" class="tune-dialog" aria-labelledby="tune-title">
+    <header class="tune-header">
+      <h2 id="tune-title" data-i18n="tune.title">Tune the assistant</h2>
+      <button id="tune-close" class="ghost-button" type="button" data-i18n="tune.close">Close</button>
+    </header>
+    <p class="tune-hint" data-i18n="tune.hint"></p>
+    <div id="tune-body" class="tune-body"></div>
+  </dialog>
+
   <main class="demo-grid">
-    <aside id="trace-list" aria-label="Trace records"></aside>
-    <section id="trace-workspace" aria-live="polite"></section>
-    <aside id="chat-panel" aria-label="Customer chat">
-      <header id="chat-panel-header">
-        <span class="sim-title" data-i18n="chat.header">Customer chat</span>
-        <span class="sim-sub" data-i18n="chat.sub">Demo channel · console</span>
+    <aside id="trace-list" class="panel" aria-label="Trace records">
+      <h2 class="panel-title" data-i18n="list.title">Turns in this conversation</h2>
+      <div id="trace-items" class="panel-scroll"></div>
+    </aside>
+
+    <section id="chat-panel" class="panel" aria-label="Customer chat">
+      <header class="panel-head">
+        <h2 class="panel-title" data-i18n="chat.header">Customer chat</h2>
+        <button id="chat-reset" class="ghost-button" type="button" data-i18n="chat.new">New conversation</button>
       </header>
-      <div id="chat-transcript" aria-live="polite" aria-label="Message history"></div>
+      <div id="chat-transcript" class="panel-scroll" aria-live="polite" aria-label="Message history"></div>
       <form id="chat-form">
         <label for="chat-input" class="visually-hidden" data-i18n="chat.placeholder">Message</label>
         <textarea id="chat-input" name="message" rows="2" data-i18n-placeholder="chat.placeholder" required></textarea>
-        <button type="submit" data-i18n="chat.send">Send message</button>
+        <button id="chat-send" type="submit" data-i18n="chat.send">Send message</button>
       </form>
-    </aside>
+    </section>
+
+    <section id="trace-workspace" class="panel" aria-live="polite" aria-label="Pipeline steps">
+      <h2 class="panel-title" data-i18n="flow.title">What happened this turn</h2>
+      <div id="workspace-body" class="panel-scroll"></div>
+    </section>
   </main>
 
   <div id="alert-region" role="alert" aria-live="assertive"></div>

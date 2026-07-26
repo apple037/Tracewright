@@ -12,7 +12,9 @@ mimetypes.add_type("text/javascript", ".js")
 mimetypes.add_type("text/css", ".css")
 
 from agent_flow.api.dependencies import AppServices, ReadinessCheck
+from agent_flow.api.config import router as config_router
 from agent_flow.api.health import router as health_router
+from agent_flow.api.sessions import router as sessions_router
 from agent_flow.api.submissions import router as submissions_router
 from agent_flow.api.traces import router as traces_router
 from agent_flow.api.turns import router as turns_router
@@ -71,6 +73,7 @@ def create_app(
     dependency_checks: dict[str, object] | None = None,
     submissions=None, inbound=None,
     legacy_turn_timeout_seconds: float = 60.0,
+    runtime_config=None,
 ) -> FastAPI:
     if not artifact_root.exists():
         artifact_status = "missing"
@@ -91,10 +94,13 @@ def create_app(
         dependency_checks=_safe_dependency_checks(dependency_checks),
         submissions=submissions, inbound=inbound,
         legacy_turn_timeout_seconds=legacy_turn_timeout_seconds,
+        runtime_config=runtime_config,
     )
     app.include_router(turns_router)
     app.include_router(submissions_router)
+    app.include_router(sessions_router)
     app.include_router(traces_router)
+    app.include_router(config_router)
     app.include_router(health_router)
     mount_console(app)
     return app

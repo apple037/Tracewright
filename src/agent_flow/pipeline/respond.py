@@ -31,6 +31,9 @@ class StrategyRequest(StrictModel):
 
 
 class GenerationRequest(StrictModel):
+    # What the customer just said. Without this the model is drafting a reply to
+    # a message it has never seen.
+    customer_message: str
     conversation_snapshot: ConversationSnapshot
     strategy_decision: StrategyDecision
     validated_evidence: ValidatedEvidence
@@ -40,6 +43,8 @@ class GenerationRequest(StrictModel):
 
 
 class RepairRequest(StrictModel):
+    customer_message: str
+    conversation_snapshot: ConversationSnapshot
     draft: ResponseDraft
     failed_criteria: tuple[str, ...]
     evidence: ValidatedEvidence
@@ -55,6 +60,17 @@ def _reconcile_citations(draft: ResponseDraft) -> ResponseDraft:
     if draft.evidence_ids and not draft.citations:
         return draft.model_copy(update={"citations": draft.evidence_ids})
     return draft
+
+
+def _system_prompt(
+    prompt: PromptArtifact, persona: PersonaArtifact | None
+) -> str | None:
+    # The persona's voice is appended to the node's own instructions, so a
+    # persona edit changes wording without touching the node's rules.
+    parts = [prompt.system_prompt.strip()] if prompt.system_prompt.strip() else []
+    if persona is not None and persona.style_prompt.strip():
+        parts.append("Voice and tone:\n" + persona.style_prompt.strip())
+    return "\n\n".join(parts) if parts else None
 
 
 def _applicable_persona(
@@ -93,7 +109,8 @@ async def select_strategy(
     )
     proposed = await invoke_structured_model(
         models,
-        "strategy_advisor", request, StrategyProposalResult
+        "strategy_advisor", request, StrategyProposalResult,
+        system_prompt=_system_prompt(prompt, effective),
     )
     return StrategyDecision(
         **proposed.model_dump(), persona_ref=effective.ref if effective else None
@@ -107,6 +124,7 @@ async def generate_response(
     evidence: ValidatedEvidence,
     prompt: PromptArtifact,
     persona: PersonaArtifact | None,
+    customer_message: str,
 ) -> ResponseDraft:
     """Internal node; Task 8's controller owns caller and persona provenance."""
     effective = (
@@ -115,6 +133,7 @@ async def generate_response(
         else None
     )
     request = GenerationRequest(
+        customer_message=customer_message,
         conversation_snapshot=snapshot,
         strategy_decision=strategy,
         validated_evidence=evidence,
@@ -123,7 +142,8 @@ async def generate_response(
         persona=effective,
     )
     draft = await invoke_structured_model(
-        models, "response_generator", request, ResponseDraft
+        models, "response_generator", request, ResponseDraft,
+        system_prompt=_system_prompt(prompt, effective),
     )
     return _reconcile_citations(draft)
 
@@ -136,6 +156,8 @@ async def repair_response(
     evidence: ValidatedEvidence,
     prompt: PromptArtifact,
     persona: PersonaArtifact | None,
+    customer_message: str,
+    snapshot: ConversationSnapshot,
 ) -> ResponseDraft:
     """Internal node; Task 8's controller owns caller and persona provenance."""
     effective = (
@@ -145,6 +167,8 @@ async def repair_response(
     )
     failed_criteria = validate_failed_criteria(validation.failed_criteria)
     request = RepairRequest(
+        customer_message=customer_message,
+        conversation_snapshot=snapshot,
         draft=draft,
         failed_criteria=failed_criteria,
         evidence=evidence,
@@ -153,6 +177,7 @@ async def repair_response(
         persona=effective,
     )
     draft = await invoke_structured_model(
-        models, "response_generator", request, ResponseDraft
+        models, "response_generator", request, ResponseDraft,
+        system_prompt=_system_prompt(prompt, effective),
     )
     return _reconcile_citations(draft)

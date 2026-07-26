@@ -11,7 +11,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
     database_url: str
-    model_config_path: Path = Path("config/models.bootstrap.example.yaml")
+    model_config_path: Path = Path("config/models.yaml")
     assurance_mode: Literal["bootstrap", "dual_judge"] = "bootstrap"
     local_vllm_base_url: str = "http://localhost:8000/v1"
     local_vllm_api_key: str = "EMPTY"
@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     demo_rag_fixture: Path = Path("config/demo/rag.json")
     demo_tool_fixture: Path = Path("config/demo/tools.json")
     legacy_turn_timeout_seconds: float = Field(default=60.0, gt=0, le=300)
+    # How many earlier exchanges the assistant is shown. Higher remembers more
+    # and costs more tokens; too high and small models lose the plot.
+    history_turns: int = Field(default=8, ge=0, le=40)
 
 
 class EndpointConfig(BaseModel):
@@ -48,6 +51,9 @@ class ProfileConfig(BaseModel):
     max_tokens: int = Field(default=512, ge=1)
     min_context_length: int | None = Field(default=None, ge=1)
     request_options: dict[str, object] = Field(default_factory=dict)
+    # How this endpoint enforces JSON output. Ollama's OpenAI-compatible /v1
+    # accepts json_schema and ignores it, so those profiles use json_object.
+    structured_output: Literal["json_schema", "json_object", "none"] = "json_schema"
 
 
 class ModelConfig(BaseModel):

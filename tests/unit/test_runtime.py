@@ -112,10 +112,13 @@ async def test_runtime_builds_real_pipeline_and_mock_evidence_adapters(
     assert isinstance(components.pipeline, TurnPipeline)
     assert isinstance(components.pipeline.rag, MockRagClient)
     assert isinstance(components.pipeline.tools, MockToolClient)
-    assert (
-        components.pipeline.models.registry.resolve("response_generator").model
-        == "Qwen/Qwen3-8B-AWQ"
-    )
+    # The model name is operator config; assert the role resolves through the
+    # configured profile rather than pinning whichever model is in the file.
+    registry = components.pipeline.models.registry
+    resolved = registry.resolve("response_generator")
+    profile = registry.config.profiles[registry.config.roles["response_generator"]]
+    assert resolved.model == profile.model
+    assert resolved.base_url.endswith("/v1")
 
 
 async def test_required_probe_failure_marks_models_not_ready_without_content(

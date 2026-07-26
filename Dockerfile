@@ -20,4 +20,6 @@ RUN uv sync --frozen --no-dev \
 USER agent
 EXPOSE 8080
 
-CMD ["uv", "run", "--frozen", "--no-dev", "--no-sync", "uvicorn", "agent_flow.main:app", "--host", "0.0.0.0", "--port", "8080"]
+# The runtime factory, not agent_flow.main:app — main:app has no pipeline, no
+# database and no auth wired in, so a bare `docker run` on it answers 503.
+CMD ["uv", "run", "--frozen", "--no-dev", "--no-sync", "uvicorn", "--factory", "agent_flow.runtime:create_runtime_app", "--host", "0.0.0.0", "--port", "8080"]

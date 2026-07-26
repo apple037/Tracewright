@@ -1,0 +1,70 @@
+# WHICH AI MODEL DOES WHAT.
+#
+# This is the file to edit when you want to swap models. Three sections matter:
+#
+#   endpoints  - where the models live (a server URL)
+#   profiles   - a named model setup (which model, how creative, how long)
+#   roles      - which profile each step of the pipeline uses
+#
+# Default below: one Ollama server, one model, every step. That is the simplest
+# thing that works. To use a bigger model for the final reply only, add a second
+# profile and point the `response_generator` role at it.
+#
+# The server URL itself is NOT here — it is `REMOTE_MODEL_BASE_URL` in .env, so
+# this file is safe to commit.
+
+mode: bootstrap
+promotion_semantic_mode: human_only
+
+# Steps that are switched off. Disabled steps are never called and are skipped
+# by the startup health check.
+disabled_roles:
+  # Semantic-equivalence judges: a second opinion pass, off in the demo.
+  - response_judge_zh_verifier
+  - promotion_judge_secondary
+  # Vector search embeddings. The demo answers from a fixture file instead of a
+  # live vector DB, so nothing calls this. Turn it on only if you also have an
+  # embedding model that returns 1024 values.
+  - embedding
+
+endpoints:
+  ollama:
+    # OpenAI-compatible. Ollama serves this at /v1 — the trailing /v1 is added
+    # automatically if you leave it off the URL in .env.
+    adapter: openai_compatible
+    base_url_env: REMOTE_MODEL_BASE_URL
+    api_key_env: REMOTE_MODEL_API_KEY
+    # How many requests may hit this server at once. One 27B model on one GPU
+    # does not go faster with more; raise it only if you have the VRAM.
+    max_concurrency: 2
+
+profiles:
+  # The single model that runs every step.
+  local_qwen:
+    endpoint: ollama
+    model: qwen3.6:27b
+    family: qwen
+    capabilities: [chat, structured_json]
+    # Ollama's /v1 accepts OpenAI's json_schema field and then ignores it, so
+    # ask only for "valid JSON" and let the schema in the system prompt do the
+    # rest. Set this to json_schema for vLLM, TGI, or the OpenAI API.
+    structured_output: json_object
+    # Turn thinking off: it triples latency and this model burns the whole
+    # token budget reasoning before it answers. Set to "low" or "medium" if you
+    # want to trade speed for better judgement.
+    request_options: {reasoning_effort: none}
+    # 0 = same answer every time. Raise toward 0.7 for more varied wording.
+    temperature: 0
+    max_tokens: 2048
+    max_concurrency: 2
+
+roles:
+  # Step 1 — works out what the customer wants.
+  dialogue_classifier: local_qwen
+  # Step 6 — picks the shape of the reply.
+  strategy_advisor: local_qwen
+  # Step 7 — writes the reply.
+  response_generator: local_qwen
+  # Step 8 — fact-checks the reply before it is sent.
+  response_judge: local_qwen
+  promotion_judge_primary: local_qwen

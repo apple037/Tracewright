@@ -117,6 +117,19 @@ def _error_details(error: BaseException, node: str) -> tuple[str, str, str | Non
     return "UNEXPECTED_ERROR", node, None
 
 
+def _history_lines(snapshot) -> tuple[str, ...]:
+    # The classifier takes a flat list of strings; tag each line with who said
+    # it so the model does not have to guess speaker by position.
+    return tuple(f"{turn.role}: {turn.text}" for turn in snapshot.messages)
+
+
+def _prompt_metadata(prompt) -> dict[str, JSONValue] | None:
+    # Recorded on the span so a trace says exactly which prompt version ran.
+    if prompt is None:
+        return None
+    return {"prompt_ref": prompt.ref.model_dump(mode="json")}
+
+
 def _risk_or_raise(classification, message):
     decision = risk_precheck(classification, message)
     if decision.requires_handoff:
@@ -126,8 +139,12 @@ def _risk_or_raise(classification, message):
     return decision
 
 
-async def _validate_or_raise(models, draft, evidence, assurance_mode, *, final: bool):
-    result = await validate_response(models, draft, evidence, assurance_mode)
+async def _validate_or_raise(
+    models, draft, evidence, assurance_mode, *, final: bool, system_prompt=None
+):
+    result = await validate_response(
+        models, draft, evidence, assurance_mode, system_prompt=system_prompt
+    )
     if not result.passed and (final or not result.repairable):
         raise AgentError.validation(
             "VALIDATION_EXHAUSTED", failure_stage="response_validator"
@@ -138,7 +155,8 @@ async def _validate_or_raise(models, draft, evidence, assurance_mode, *, final: 
 class TurnPipeline:
     def __init__(
         self, *, traces, conversations, handoffs, models, rag, tools,
-        artifacts: RuntimeArtifacts | None, clock, assurance_mode: str,
+        artifacts: "RuntimeArtifacts | Callable[[], RuntimeArtifacts] | None",
+        clock, assurance_mode: str,
         telemetry: "OperationTelemetry | None" = None,
     ) -> None:
         if assurance_mode not in {"bootstrap", "dual_judge"}:
@@ -149,11 +167,23 @@ class TurnPipeline:
         self.models = models
         self.rag = rag
         self.tools = tools
-        self.artifacts = artifacts
+        # A callable lets the console edit a prompt and have the next turn use
+        # it, without a restart. A plain RuntimeArtifacts still works.
+        self._artifacts = artifacts
         self.clock = clock
         self.assurance_mode = assurance_mode
         self.telemetry = telemetry
         self._cleanup_tasks: set[asyncio.Task] = set()
+
+    @property
+    def artifacts(self) -> RuntimeArtifacts | None:
+        if callable(self._artifacts):
+            return self._artifacts()
+        return self._artifacts
+
+    @artifacts.setter
+    def artifacts(self, value) -> None:
+        self._artifacts = value
 
     async def _event(
         self, state: TurnState, span_id: UUID, node: str, status: str, *,
@@ -581,8 +611,12 @@ class TurnPipeline:
                 state, "dialogue_classifier",
                 lambda: classify_dialogue(
                     self.models,
-                    (*state.snapshot.messages, request.message),
+                    (*_history_lines(state.snapshot), request.message),
                     knowledge_catalog,
+                    system_prompt=self.artifacts.system_prompt_for("dialogue_classifier"),
+                ),
+                trace_metadata=_prompt_metadata(
+                    self.artifacts.prompt_for("dialogue_classifier")
                 ),
             )
             state.risk = await self.run_node(
@@ -623,6 +657,7 @@ class TurnPipeline:
                 lambda: generate_response(
                     self.models, state.snapshot, state.strategy, state.evidence,
                     self.artifacts.response_prompt, state.persona,
+                    customer_message=request.message,
                 ),
                 trace_metadata={
                     "prompt_ref": self.artifacts.response_prompt.ref.model_dump(mode="json"),
@@ -633,7 +668,11 @@ class TurnPipeline:
                 state, "response_validator",
                 lambda: _validate_or_raise(
                     self.models, state.draft, state.evidence, self.assurance_mode,
+                    system_prompt=self.artifacts.system_prompt_for("response_judge"),
                     final=False,
+                ),
+                trace_metadata=_prompt_metadata(
+                    self.artifacts.prompt_for("response_judge")
                 ),
             )
             if not state.validation.passed and state.validation.repairable:
@@ -642,6 +681,7 @@ class TurnPipeline:
                     lambda: repair_response(
                         self.models, state.draft, state.validation, state.strategy,
                         state.evidence, self.artifacts.response_prompt, state.persona,
+                        customer_message=request.message, snapshot=state.snapshot,
                     ),
                     trace_metadata={
                         "prompt_ref": self.artifacts.response_prompt.ref.model_dump(mode="json"),
@@ -652,9 +692,13 @@ class TurnPipeline:
                     state, "response_validator",
                     lambda: _validate_or_raise(
                         self.models, state.draft, state.evidence, self.assurance_mode,
+                        system_prompt=self.artifacts.system_prompt_for("response_judge"),
                         final=True,
                     ),
                     attempt=2,
+                    trace_metadata=_prompt_metadata(
+                        self.artifacts.prompt_for("response_judge")
+                    ),
                 )
             return await self._finalize(state)
         except asyncio.CancelledError:
@@ -720,6 +764,22 @@ class TurnPipeline:
                 )
             )
             state.handoff_enqueued = True
+        # Record the exchange before the trace goes terminal: append_turn only
+        # accepts a running or succeeded trace. Without this the customer's
+        # message vanishes from history and a rephrase starts from zero context.
+        if state.delivery_disposition != "review_required":
+            await self._bounded_cleanup(
+                self._retry_idempotent(
+                    lambda: self.conversations.append_turn(
+                        tenant_id=state.context.tenant_id,
+                        customer_id=state.context.customer_id,
+                        session_id=state.request.session_id,
+                        trace_id=state.trace_id,
+                        customer_text=state.request.message,
+                        assistant_text=safe_message,
+                    )
+                )
+            )
         await self._retry_idempotent(
             lambda: self.traces.finish_trace(
                 state.trace_id, "failed", tenant_id=state.context.tenant_id,

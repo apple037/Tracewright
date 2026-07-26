@@ -1,4 +1,5 @@
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -9,14 +10,19 @@ from agent_flow.artifacts import ArtifactRegistry, resolve_persona
 from agent_flow.contracts import ArtifactRef, ConversationMode
 
 
+SEMVER = re.compile(r"\d+\.\d+\.\d+")
+
+
 def test_persona_artifact_is_versioned_and_checksum_is_stable():
     registry = ArtifactRegistry(Path("config/personas"))
     first = registry.load_persona("familiar_companion.zh-TW.v1.yaml")
     second = registry.load_persona("familiar_companion.zh-TW.v1.yaml")
 
+    # Version is config the operator is expected to bump; assert the identity
+    # and the checksum contract, not a frozen version number.
     assert first.ref == ArtifactRef(
         artifact_id="familiar_companion.zh-TW",
-        version="1.0.0",
+        version=first.version,
         checksum=first.ref.checksum,
     )
     assert first.ref.checksum == second.ref.checksum
@@ -29,7 +35,8 @@ def test_prompt_artifacts_are_versioned_and_node_scoped():
     response = registry.load_prompt("response_generator.v1.yaml")
     assert strategy.artifact_id == strategy.node == "strategy_selector"
     assert response.artifact_id == response.node == "response_generator"
-    assert strategy.version == response.version == "1.0.0"
+    assert SEMVER.fullmatch(strategy.version)
+    assert SEMVER.fullmatch(response.version)
     assert strategy.ref.checksum != response.ref.checksum
 
 
@@ -71,7 +78,7 @@ def test_artifact_contract_rejects_non_semantic_version(tmp_path):
     )
     artifact = tmp_path / "persona.yaml"
     artifact.write_text(
-        source.replace("version: 1.0.0", "version: latest"),
+        re.sub(r"(?m)^version: .*$", "version: latest", source),
         encoding="utf-8",
     )
 

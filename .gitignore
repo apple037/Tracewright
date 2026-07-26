@@ -34,3 +34,7 @@ screenshot.png
 
 # Local flow-check model config
 config/models.local.yaml
+
+# Live prompt/persona edits made from the admin console. The YAML files stay
+# the committed source of truth; make a change permanent by editing them.
+config/overrides.json

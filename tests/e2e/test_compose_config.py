@@ -43,9 +43,13 @@ def test_compose_declares_bounded_runtime_services_and_dependencies():
 def test_compose_uses_host_gateway_and_frozen_non_dev_uv_runtime():
     services = _compose_config()["services"]
     for name in ("app", "worker"):
-        assert (
-            services[name]["environment"]["LOCAL_VLLM_BASE_URL"]
-            == "http://host.docker.internal:8000/v1"
+        # Overridable, but host.docker.internal is the default so a model
+        # server on the host machine is reachable from the container.
+        assert services[name]["environment"]["LOCAL_VLLM_BASE_URL"] == (
+            "${LOCAL_VLLM_BASE_URL:-http://host.docker.internal:8000/v1}"
+        )
+        assert "host.docker.internal" in (
+            services[name]["environment"]["REMOTE_MODEL_BASE_URL"]
         )
         assert "host.docker.internal:host-gateway" in services[name]["extra_hosts"]
         command = services[name]["command"]
@@ -61,27 +65,32 @@ def test_compose_uses_host_gateway_and_frozen_non_dev_uv_runtime():
     ]
 
 
-def test_bootstrap_examples_use_openai_compatible_remote_models():
-    model_config = yaml.safe_load(
-        (ROOT / "config" / "models.bootstrap.example.yaml").read_text(
-            encoding="utf-8"
-        )
-    )
+def test_default_model_config_is_loadable_and_endpoint_agnostic():
+    from agent_flow.config import load_model_config
+
+    config = load_model_config(ROOT / "config" / "models.yaml")
     env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
 
-    assert model_config["endpoints"]["remote_models"]["adapter"] == "openai_compatible"
-    assert model_config["endpoints"]["remote_models"]["max_concurrency"] == 6
-    assert model_config["profiles"]["remote_structured"]["max_tokens"] == 8192
-    assert (
-        model_config["profiles"]["remote_structured"]["request_options"][
-            "reasoning_effort"
-        ]
-        == "low"
-    )
-    assert model_config["profiles"]["remote_embedding"]["model"] == (
-        "qwen3-embedding-0.6b"
-    )
-    assert "OpenAI-compatible remote endpoint" in env_example
+    # Every enabled role must resolve to a profile, or the app fails at boot
+    # rather than at the first message.
+    enabled = set(config.roles) - config.disabled_roles
+    assert enabled
+    for role in enabled:
+        assert config.roles[role] in config.profiles
+
+    for profile in config.profiles.values():
+        assert config.endpoints[profile.endpoint].adapter in {
+            "openai_compatible", "ollama_compatible",
+        }
+        # Ollama's /v1 ignores json_schema, so a profile pointed at it must ask
+        # for json_object instead.
+        assert profile.structured_output in {"json_schema", "json_object", "none"}
+
+    # The server address lives in .env, never in the committed model config.
+    for endpoint in config.endpoints.values():
+        assert endpoint.base_url_env.isupper()
+    assert "REMOTE_MODEL_BASE_URL" in env_example
+    assert "OpenAI-compatible" in env_example
 
 
 def test_container_policy_is_pinned_non_root_and_excludes_local_state():
@@ -205,9 +214,7 @@ def test_demo_seeder_upserts_database_rows_idempotently():
 def test_readme_remote_ollama_and_outbox_checks_are_endpoint_and_tenant_scoped():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
-    assert "$remoteBase = $env:REMOTE_MODEL_BASE_URL.TrimEnd('/')" in readme
-    assert 'Invoke-RestMethod \"$remoteBase/api/tags\"' in readme
-    assert 'Invoke-RestMethod \"$remoteBase/api/show\"' in readme
+    assert 'curl "${REMOTE_MODEL_BASE_URL%/v1}/api/tags"' in readme
     assert "tenant_id = '<tenant-id>'" in readme
 
 
@@ -216,14 +223,13 @@ def test_readme_documents_live_trace_console_demo():
 
     required = [
         "uv sync --frozen",
-        "Qwen/Qwen3-8B-AWQ",
-        "--max-model-len 6144",
-        "localhost:8000",
-        "OpenAI-compatible remote",
+        "OpenAI-compatible",
         "role names are stable",
         "DEMO_CUSTOMER_TOKEN",
         "demo only",
-        "docker compose up --build",
+        "./run.sh",
+        "TUNING.md",
+        "HISTORY_TURNS",
         "/health/ready",
         "/api/v1/submissions",
         "/console/",

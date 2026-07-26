@@ -17,12 +17,14 @@ async def classify_dialogue(
     models: ModelGateway,
     messages: list[str] | tuple[str, ...],
     knowledge_catalog: tuple[str, ...] = (),
+    system_prompt: str | None = None,
 ) -> DialogueClassification:
     request = ClassificationRequest(
         messages=tuple(messages), knowledge_catalog=tuple(knowledge_catalog)
     )
     result = await invoke_structured_model(
         models,
-        "dialogue_classifier", request, DialogueClassificationResult
+        "dialogue_classifier", request, DialogueClassificationResult,
+        system_prompt=system_prompt,
     )
     return DialogueClassification.model_validate(result.model_dump())

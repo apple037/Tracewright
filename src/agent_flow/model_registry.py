@@ -56,6 +56,7 @@ class ResolvedModel:
     max_tokens: int
     min_context_length: int | None
     request_options: dict[str, object]
+    structured_output: str
     _api_key: str = field(repr=False, compare=False)
 
 
@@ -118,6 +119,7 @@ class ModelRegistry:
             max_tokens=profile.max_tokens,
             min_context_length=profile.min_context_length,
             request_options=dict(profile.request_options),
+            structured_output=profile.structured_output,
             _api_key=api_key,
         )
 

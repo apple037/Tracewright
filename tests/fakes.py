@@ -6,10 +6,19 @@ class FakeModelGateway:
         self.responses = {role: deque(values) for role, values in responses.items()}
         self.calls: list[str] = []
         self.requests: list[object] = []
+        self.system_prompts: list[str | None] = []
 
-    async def structured(self, role: str, request: object, response_type: type):
+    async def structured(
+        self,
+        role: str,
+        request: object,
+        response_type: type,
+        *,
+        system_prompt: str | None = None,
+    ):
         self.calls.append(role)
         self.requests.append(request)
+        self.system_prompts.append(system_prompt)
         return response_type.model_validate(self.responses[role].popleft())
 
     async def complete(self, role: str, request: object) -> str:

@@ -91,7 +91,46 @@ def _request_dict(request: object) -> dict[str, Any]:
     raise TypeError("model request must be a mapping or Pydantic model")
 
 
-def _chat_messages(request_data: dict[str, Any]) -> list[dict[str, Any]]:
+def _system_content(
+    system_prompt: str | None, schema: dict[str, Any] | None
+) -> str | None:
+    # The schema is repeated in the system message, not only in response_format:
+    # several local backends (Ollama's /v1 among them) silently ignore
+    # response_format, and a model that has never seen the schema cannot comply.
+    parts: list[str] = []
+    if system_prompt and system_prompt.strip():
+        parts.append(system_prompt.strip())
+    if schema is not None:
+        parts.append(
+            "Reply with a single JSON object matching this schema. "
+            "No prose, no explanation, no markdown fences.\n"
+            + json.dumps(schema, ensure_ascii=False, sort_keys=True)
+        )
+    return "\n\n".join(parts) if parts else None
+
+
+def _openai_response_format(
+    mode: str, name: str, schema: dict[str, Any]
+) -> dict[str, object] | None:
+    # json_schema is grammar-enforced where supported. Ollama's /v1 accepts the
+    # field and ignores it, so those profiles declare json_object instead and
+    # lean on the schema copy in the system message.
+    if mode == "json_schema":
+        return {
+            "type": "json_schema",
+            "json_schema": {"name": name, "strict": True, "schema": schema},
+        }
+    if mode == "json_object":
+        return {"type": "json_object"}
+    return None
+
+
+def _chat_messages(
+    request_data: dict[str, Any],
+    *,
+    system_prompt: str | None = None,
+    schema: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     messages = request_data.get("messages")
     if (
         isinstance(messages, list)
@@ -104,9 +143,13 @@ def _chat_messages(request_data: dict[str, Any]) -> list[dict[str, Any]]:
         return messages
     # Pipeline requests are domain payloads, not chat transcripts; serialize
     # them into one user message so real OpenAI-compatible endpoints accept
-    # them. The response schema is enforced by response_format.
+    # them. Instructions and the response schema go in the system message.
     body = json.dumps(request_data, ensure_ascii=False, default=str)
-    return [
+    system = _system_content(system_prompt, schema)
+    chat: list[dict[str, Any]] = []
+    if system is not None:
+        chat.append({"role": "system", "content": system})
+    chat.append(
         {
             "role": "user",
             "content": (
@@ -114,7 +157,8 @@ def _chat_messages(request_data: dict[str, Any]) -> list[dict[str, Any]]:
                 "the required response schema:\n" + body
             ),
         }
-    ]
+    )
+    return chat
 
 
 class ModelGateway:
@@ -179,13 +223,25 @@ class ModelGateway:
         return response.text
 
     async def structured(
-        self, role: str, request: object, response_type: type[T]
+        self,
+        role: str,
+        request: object,
+        response_type: type[T],
+        *,
+        system_prompt: str | None = None,
     ) -> T:
-        parsed, _ = await self.structured_response(role, request, response_type)
+        parsed, _ = await self.structured_response(
+            role, request, response_type, system_prompt=system_prompt
+        )
         return parsed
 
     async def structured_response(
-        self, role: str, request: object, response_type: type[T]
+        self,
+        role: str,
+        request: object,
+        response_type: type[T],
+        *,
+        system_prompt: str | None = None,
     ) -> tuple[T, ModelResponse]:
         resolved = self.registry.resolve(role)
         required = {"chat", "structured_json"}
@@ -200,18 +256,21 @@ class ModelGateway:
                 response = await self._openai_chat(
                     resolved,
                     request,
-                    response_format={
-                        "type": "json_schema",
-                        "json_schema": {
-                            "name": response_type.__name__,
-                            "strict": True,
-                            "schema": schema,
-                        },
-                    },
+                    response_format=_openai_response_format(
+                        resolved.structured_output, response_type.__name__, schema
+                    ),
+                    system_prompt=system_prompt,
+                    schema=schema,
                 )
             elif resolved.adapter == "ollama_compatible":
                 content = await self._ollama_chat(
-                    resolved, request, response_format=schema
+                    resolved,
+                    request,
+                    response_format=schema
+                    if resolved.structured_output != "none"
+                    else None,
+                    system_prompt=system_prompt,
+                    schema=schema,
                 )
                 response = ModelResponse(text=content, finish_reason="stop")
             else:
@@ -234,9 +293,15 @@ class ModelGateway:
         request: object,
         *,
         response_format: dict[str, object] | None = None,
+        system_prompt: str | None = None,
+        schema: dict[str, Any] | None = None,
     ) -> ModelResponse:
         payload: dict[str, Any] = {
-            "messages": _chat_messages(_request_dict(request)),
+            "messages": _chat_messages(
+                _request_dict(request),
+                system_prompt=system_prompt,
+                schema=schema,
+            ),
             "model": resolved.model,
             "temperature": resolved.temperature,
             "max_tokens": resolved.max_tokens,
@@ -301,8 +366,15 @@ class ModelGateway:
         request: object,
         *,
         response_format: dict[str, object] | None = None,
+        system_prompt: str | None = None,
+        schema: dict[str, Any] | None = None,
     ) -> str:
-        payload = _request_dict(request)
+        request_data = _request_dict(request)
+        payload: dict[str, Any] = {
+            "messages": _chat_messages(
+                request_data, system_prompt=system_prompt, schema=schema
+            )
+        }
         payload["model"] = resolved.model
         payload["stream"] = False
         payload["options"] = {

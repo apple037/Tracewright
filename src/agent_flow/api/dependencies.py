@@ -33,6 +33,7 @@ class AppServices:
     submissions: object | None = None
     inbound: object | None = None
     legacy_turn_timeout_seconds: float = 60.0
+    runtime_config: object | None = None
 
 
 def services(request: Request) -> AppServices:
