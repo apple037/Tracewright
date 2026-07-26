@@ -10,6 +10,24 @@ from agent_flow.contracts import (
 )
 
 
+# `plan_evidence` matches these exactly to decide what gets looked up, so the
+# model must choose from the same vocabulary. Left free-form, a model answers
+# "Check the status of a specific refund", nothing matches, nothing is
+# retrieved, and every business reply comes back ungrounded.
+Intent = Literal[
+    "order_status",
+    "refund_status",
+    "refund_request",
+    "policy_question",
+    "account_question",
+    "complaint",
+    "greeting",
+    "thanks",
+    "smalltalk",
+    "farewell",
+    "other",
+]
+
 EmotionReasonCode = Literal[
     "EXPLICIT_EXHAUSTION",
     "EXPLICIT_SELF_DOUBT",
@@ -92,6 +110,14 @@ class BoundedEmotionAssessment(_DedupeCodes, EmotionAssessment):
 
 class DialogueClassificationResult(DialogueClassification):
     emotion: BoundedEmotionAssessment
+    intent: Intent = Field(
+        description=(
+            "What the customer is trying to do. Use order_status or "
+            "refund_status when they ask where a specific order or refund is; "
+            "policy_question when they ask how something works in general; "
+            "greeting, thanks, smalltalk or farewell for chat with no request."
+        ),
+    )
     # Required (nullable) so the strict json_schema always asks the model to
     # judge relevance against the supplied knowledge_catalog.
     knowledge_topic: str | None = Field(

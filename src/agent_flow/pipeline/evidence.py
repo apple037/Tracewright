@@ -33,6 +33,8 @@ class EvidenceCollectionCancelled(asyncio.CancelledError):
 
 
 # Casual/unclear turns never retrieve, whatever topic the model also emitted.
+# Kept a superset of the Intent vocabulary in model_outputs: older traces and
+# any hand-built classification may still carry the looser spellings.
 _CASUAL_INTENTS = frozenset(
     {"greeting", "farewell", "goodbye", "smalltalk", "chitchat", "thanks", "hello"}
 )

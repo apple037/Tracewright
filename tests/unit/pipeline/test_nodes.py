@@ -696,7 +696,7 @@ def test_planner_retrieves_only_when_classifier_names_a_topic(classification):
     # Casual/unclear mode overrides a stray topic too.
     casual_mode = classification.model_copy(
         update={
-            "intent": "answer",
+            "intent": "policy_question",
             "conversation_mode": ConversationMode.CASUAL,
             "knowledge_topic": "policy:refund",
         }
@@ -705,7 +705,7 @@ def test_planner_retrieves_only_when_classifier_names_a_topic(classification):
     # Genuine info-seeking turn with a named topic -> retrieve it.
     info = classification.model_copy(
         update={
-            "intent": "answer",
+            "intent": "policy_question",
             "conversation_mode": ConversationMode.INFORMATIONAL,
             "knowledge_topic": "policy:refund",
         }
