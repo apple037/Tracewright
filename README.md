@@ -109,14 +109,21 @@ edit the instructions live, applied to the very next message.
 └───────────────┴──────────────────────┴─────────────────────┘
 ```
 
-1. **Type a message** and press Send (try `where is my order order-1?`).
+1. **Type a message** and press Send. Things worth trying, and what each shows:
+
+   | Say | What happens |
+   |---|---|
+   | `good morning` | Answers, retrieves **nothing**, cites nothing |
+   | `where is my order order-1?` | Looks the order up and cites the tool result |
+   | `is it still on the way?` | Reuses the order from the previous turn — **memory** |
+   | `how long do refunds take?` | Answers from the knowledge base with a citation |
+   | `where is my refund?` | **Hands off to a human** — there is no verified refund source, so it refuses to guess |
+
 2. Its trace **auto-selects** and **streams live** as each step runs.
 3. Click any step to expand what it decided.
-4. Ask a **follow-up** — "how long will that take?" — and it resolves the
-   reference from the conversation so far.
-5. **Refresh the page**: the conversation is still there. **New conversation**
+4. **Refresh the page**: the conversation is still there. **New conversation**
    starts a clean one.
-6. **EN / 中文** switches language, **◐** switches light/dark, **Retry trace**
+5. **EN / 中文** switches language, **◐** switches light/dark, **Retry trace**
    re-runs a finished turn.
 
 **Admin vs customer token:**
