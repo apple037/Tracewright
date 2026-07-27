@@ -51,6 +51,7 @@ class RuntimeComponents:
     authenticate: Authenticator
     inventory_probe: object
     runtime_config: RuntimeConfigService
+    knowledge: object | None = None
 
 
 async def build_demo_components(
@@ -105,6 +106,7 @@ async def build_demo_components(
         authenticate=DemoTokenAuthenticator.from_settings(settings),
         inventory_probe=inventory_probe or ModelInventoryProbe(registry, timeout=90.0),
         runtime_config=runtime_config,
+        knowledge=rag if isinstance(rag, KnowledgeSources) else None,
     )
 
 
@@ -139,6 +141,7 @@ def _install_services(
         inbound=components.inbound,
         legacy_turn_timeout_seconds=settings.legacy_turn_timeout_seconds,
         runtime_config=components.runtime_config,
+        knowledge=components.knowledge,
         recheck_models=lambda: _probe_models_check(components),
     )
 

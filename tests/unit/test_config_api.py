@@ -110,3 +110,91 @@ def test_unexpected_fields_are_rejected():
         json={"system_prompt": "x", "guardrails": "off"},
     )
     assert response.status_code == 422
+
+
+class FakeKnowledge:
+    """Records writes; the corpus itself is exercised in test_knowledge_sources."""
+
+    def __init__(self):
+        self.written = []
+
+    def sources(self, tenant_id):
+        return [{"source": "demo", "tenant": tenant_id, "documents": []}]
+
+    def put_document(self, source, source_id, content, tenant_id, version):
+        if source == "no_such_source":
+            raise KeyError(source)
+        self.written.append((source, source_id, content, tenant_id, version))
+        return {"source": source, "source_id": source_id, "replaced": False}
+
+    def delete_document(self, source, source_id, tenant_id):
+        raise KeyError(source_id)
+
+
+def _knowledge_client(knowledge):
+    async def authenticate(token):
+        return {"admin": ADMIN, "customer": CUSTOMER}.get(token)
+
+    return TestClient(
+        create_app(
+            authenticate=authenticate,
+            runtime_config=FakeConfigService(),
+            knowledge=knowledge,
+        )
+    )
+
+
+def test_an_admin_can_add_a_document_and_the_tenant_comes_from_the_token():
+    knowledge = FakeKnowledge()
+    response = _knowledge_client(knowledge).put(
+        "/api/v1/config/knowledge/demo/groupbuy:tea",
+        headers={"Authorization": "Bearer admin"},
+        json={"content": "九月茶葉團購：烏龍 NT$500。"},
+    )
+
+    assert response.status_code == 200
+    # The body never carries a tenant_id; it is bound from the credential.
+    assert knowledge.written == [
+        ("demo", "groupbuy:tea", "九月茶葉團購：烏龍 NT$500。", "t1", "v1")
+    ]
+
+
+@pytest.mark.parametrize(
+    "method,path,payload",
+    [
+        ("get", "/api/v1/config/knowledge", None),
+        ("put", "/api/v1/config/knowledge/demo/x", {"content": "the moon is cheese"}),
+        ("delete", "/api/v1/config/knowledge/demo/x", None),
+    ],
+)
+def test_a_customer_token_cannot_read_or_change_the_knowledge(method, path, payload):
+    # Whatever is in the corpus is stated to customers as fact and cited, so
+    # this scope check is the boundary that keeps the assistant honest.
+    knowledge = FakeKnowledge()
+    kwargs = {"headers": {"Authorization": "Bearer customer"}}
+    if payload is not None:
+        kwargs["json"] = payload
+    response = getattr(_knowledge_client(knowledge), method)(path, **kwargs)
+
+    assert response.status_code == 403
+    assert knowledge.written == []
+
+
+def test_an_unknown_source_is_a_404_and_a_missing_document_is_too():
+    client = _knowledge_client(FakeKnowledge())
+    headers = {"Authorization": "Bearer admin"}
+
+    assert client.put(
+        "/api/v1/config/knowledge/no_such_source/x", headers=headers,
+        json={"content": "x"},
+    ).status_code == 404
+    assert client.delete(
+        "/api/v1/config/knowledge/demo/x", headers=headers
+    ).status_code == 404
+
+
+def test_knowledge_editing_is_unavailable_rather_than_crashing_without_a_corpus():
+    response = _knowledge_client(None).get(
+        "/api/v1/config/knowledge", headers={"Authorization": "Bearer admin"}
+    )
+    assert response.status_code == 503

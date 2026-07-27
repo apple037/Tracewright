@@ -22,6 +22,7 @@ from agent_flow.contracts import ConversationMode, ResponseMode
 router = APIRouter(prefix="/api/v1")
 
 MAX_PROMPT_CHARS = 20000
+MAX_DOCUMENT_CHARS = 20000
 
 
 class PromptEdit(BaseModel):
@@ -32,6 +33,12 @@ class PromptEdit(BaseModel):
 class PersonaEdit(BaseModel):
     model_config = ConfigDict(extra="forbid")
     style_prompt: str = Field(max_length=MAX_PROMPT_CHARS)
+
+
+class DocumentEdit(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    content: str = Field(min_length=1, max_length=MAX_DOCUMENT_CHARS)
+    version: str = Field(default="v1", min_length=1, max_length=64)
 
 
 def _admin(request: Request, authenticated: AuthenticatedPrincipal):
@@ -145,3 +152,57 @@ async def revert_persona(
         return service.clear_persona(artifact_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="unknown persona") from None
+
+
+def _knowledge(request: Request, authenticated: AuthenticatedPrincipal):
+    app_services = _admin(request, authenticated)
+    knowledge = getattr(app_services, "knowledge", None)
+    if knowledge is None:
+        raise HTTPException(status_code=503, detail="knowledge unavailable")
+    return knowledge
+
+
+@router.get("/config/knowledge")
+async def read_knowledge(
+    request: Request,
+    authenticated: AuthenticatedPrincipal = Depends(principal),
+):
+    """Every declared knowledge source and the documents this tenant owns."""
+    knowledge = _knowledge(request, authenticated)
+    return {"sources": knowledge.sources(authenticated.tenant_id)}
+
+
+@router.put("/config/knowledge/{source}/{source_id}")
+async def upsert_document(
+    source: str,
+    source_id: str,
+    edit: DocumentEdit,
+    request: Request,
+    authenticated: AuthenticatedPrincipal = Depends(principal),
+):
+    """Add or replace one document the assistant may cite as fact."""
+    knowledge = _knowledge(request, authenticated)
+    try:
+        return knowledge.put_document(
+            source, source_id, edit.content, authenticated.tenant_id, edit.version
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="unknown knowledge source") from None
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from None
+
+
+@router.delete("/config/knowledge/{source}/{source_id}")
+async def delete_document(
+    source: str,
+    source_id: str,
+    request: Request,
+    authenticated: AuthenticatedPrincipal = Depends(principal),
+):
+    knowledge = _knowledge(request, authenticated)
+    try:
+        return knowledge.delete_document(source, source_id, authenticated.tenant_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="unknown document") from None
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from None

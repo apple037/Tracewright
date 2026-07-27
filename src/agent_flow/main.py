@@ -73,7 +73,7 @@ def create_app(
     dependency_checks: dict[str, object] | None = None,
     submissions=None, inbound=None,
     legacy_turn_timeout_seconds: float = 60.0,
-    runtime_config=None,
+    runtime_config=None, knowledge=None,
 ) -> FastAPI:
     if not artifact_root.exists():
         artifact_status = "missing"
@@ -94,7 +94,7 @@ def create_app(
         dependency_checks=_safe_dependency_checks(dependency_checks),
         submissions=submissions, inbound=inbound,
         legacy_turn_timeout_seconds=legacy_turn_timeout_seconds,
-        runtime_config=runtime_config,
+        runtime_config=runtime_config, knowledge=knowledge,
     )
     app.include_router(turns_router)
     app.include_router(submissions_router)
