@@ -1,5 +1,7 @@
 # Tuning guide
 
+[English](TUNING.md) | [繁體中文](TUNING.zh-TW.md)
+
 For the person who shapes how the assistant behaves. **No Python.** Most of it
 you can do from the console; the rest is editing a text file.
 

@@ -1,26 +1,42 @@
 # Developing Tracewright
 
+[English](DEVELOPING.md) | [繁體中文](DEVELOPING.zh-TW.md)
+
 For whoever picks this up next. It assumes you have read the README and can run
 the demo. Everything here is what the code will not tell you by itself.
 
 ---
 
-## Run it
+## Run it without Docker
+
+Needs Python 3.12, [uv](https://docs.astral.sh/uv/), a reachable PostgreSQL, and
+a model server. `./run.sh` is the Docker version and what the demo runs on.
 
 ```bash
-uv sync --frozen                              # dependencies
-uv run --frozen alembic upgrade head          # database schema
+cp .env.example .env      # then edit DATABASE_URL to a host-reachable address
+uv sync --frozen
+uv run --frozen alembic upgrade head
+uv run --frozen python -m agent_flow.seed_demo
+
+export KNOWLEDGE_BASE_URL=http://localhost:8000/mock-kb   # in BOTH terminals
 uv run --frozen uvicorn --factory agent_flow.runtime:create_runtime_app --reload
-uv run --frozen python -m agent_flow.worker --run
+uv run --frozen python -m agent_flow.worker --run         # second terminal
 ```
 
-Or `./run.sh` for the Docker version, which is what the demo runs on.
+`KNOWLEDGE_BASE_URL` matters because the demo knowledge base is served by the app
+itself: on Compose that is `http://app:8080/mock-kb`, on the host it is port
+8000. Get it wrong and retrieval silently returns nothing. The console is then at
+`http://localhost:8000/console/`.
 
 **One thing that will waste an hour if nobody tells you:** `src/` is baked into
 the image, `config/` is bind-mounted. So a code change needs
 `docker compose up -d --build app worker`, but a config change only needs
 `docker compose restart app worker` — and artifacts load at startup, so a config
 change does need that restart.
+
+`compose.yaml` owns `DATABASE_URL` (it must be the container hostname
+`postgres`) and pins `APP_RUNTIME_MODE=demo`. Setting those in `.env` affects
+host startup only.
 
 ## The tests
 
@@ -173,6 +189,53 @@ Not omissions — decisions. Reopen them with your eyes open.
 | Semantic RAG over the customer's words | Retrieval is bounded to catalog source ids on purpose — see the invariant above. Changing this needs a new answer to "how does the classifier not invent a document". |
 | Embeddings / pgvector retrieval | Wired but disabled: the demo answers from fixtures, and the code expects 1024 dimensions. |
 | CI | Nobody set it up. `tests/unit tests/contract` need no services and would be a five-minute workflow. |
+
+## Operational details worth knowing
+
+**The API.** Scope is always bound from the bearer token, so no request body
+carries a `customer_id`.
+
+| Endpoint | Does |
+|---|---|
+| `POST /api/v1/submissions` | Queue a turn: `{channel, external_message_id, session_id, text, idempotency_key}`. Returns 202. |
+| `GET /api/v1/submissions/{id}` | Poll until terminal. |
+| `GET /api/v1/traces/{id}` | The whole trace, node by node. |
+| `GET /api/v1/sessions` | Chats this token may see, newest first. |
+| `GET /api/v1/sessions/{id}/messages` | Replay a transcript — the console's reload path. |
+| `GET/PUT/DELETE /api/v1/config/...` | Live prompts, personas, knowledge (admin). |
+
+`/docs` is the full interactive reference, with an Authorize button.
+
+**Memory** is per `session_id`, role-tagged, and windowed to `HISTORY_TURNS`
+(default 8). Unbounded history used to exceed the classifier's 100-message cap
+and fail the turn outright. Handed-off turns are kept too, so a customer who
+rephrases after a handoff does not start from zero.
+
+**Failures surface as safe codes**, never raw internals: a stalled lease finishes
+the trace with `WORKER_LEASE_EXPIRED` and reserves a retry trace; a tool timeout
+is `TOOL_TIMEOUT` on component `order_api`. The full chain is
+`readiness check → model role → probe stage → trace node → component → operation
+→ error code → retry disposition`.
+
+**`structured_output` per model profile** decides how JSON is enforced. Ollama's
+`/v1` accepts OpenAI's `json_schema` field and then ignores it, so Ollama
+profiles must use `json_object`; vLLM, TGI and the OpenAI API support
+`json_schema`. The schema is repeated in the system prompt either way.
+
+## Before you hand this to someone else
+
+- [ ] `.env` is still git-ignored, and no token, key or internal address leaked
+      into a tracked file, screenshot or log.
+- [ ] The next maintainer knows where the model server is and which model names
+      `MODEL_CONFIG_PATH` selects — and can actually reach that file (it may be a
+      git-ignored local one).
+- [ ] `docker compose config --quiet` is clean, the demo starts from an empty
+      database, and `/health/ready` passes.
+- [ ] One real message goes end to end with an admin token — API, worker, model,
+      knowledge, tool, trace.
+- [ ] Say whether `config/overrides.json` exists and which console edits still
+      need writing back into YAML.
+- [ ] Say that `./run.sh reset` and `docker compose down -v` are irreversible.
 
 ## Where to start reading
 

@@ -1,106 +1,109 @@
 # Tracewright
 
+[English](README.md) | [繁體中文](README.zh-TW.md)
+
 **A customer-service AI that answers safely — and shows its work.**
 
 Tracewright takes a customer message, runs it through a chain of small AI steps
 (understand → check risk → look up facts → write reply → fact-check the reply),
-and then lets an operator **watch every step happen live** in a web console. If
-the AI isn't sure, or a message looks risky, it hands off to a human instead of
+and lets an operator **watch every step happen live** in a web console. If the AI
+isn't sure, or a message looks risky, it hands off to a human instead of
 guessing.
 
-The headline feature is the word in the name: **traces**. Every message becomes
-a fully recorded, click-through trace so you can see exactly *why* the AI said
-what it said — which is normally the scariest black box in an AI product.
+The headline feature is the word in the name: **traces**. Every message becomes a
+fully recorded, click-through trace so you can see exactly *why* the AI said what
+it said — normally the scariest black box in an AI product.
 
-> ⚠️ **This is a demo / bootstrap, not a locked-down production system.** It uses
-> small open models and simple demo login tokens. Great for learning, demos, and
-> building on top of — not for handling real customers unattended. See
-> [Safety & limits](#safety--limits).
+> ⚠️ **A demo, not a production system.** Small open models, two static demo
+> tokens. Good for learning, demos, and building on — not for real customers
+> unattended. See [Safety & limits](#safety--limits).
+
+**Where to go next:** [TUNING.md](TUNING.md) to change how it behaves (no
+Python). [DEVELOPING.md](DEVELOPING.md) to take the code over.
 
 ---
 
-## What it does, in plain words
+## What it does
 
-Imagine a support chat. A customer types *"Where's my refund?"*. Behind the
-scenes Tracewright runs a small assembly line:
+A customer types *"Where's my refund?"*. Behind the scenes:
 
-| Step | Node name | What it decides |
-|------|-----------|-----------------|
-| 1. Understand | `dialogue_classifier` | What does the customer want? What's their mood? Is this just chit-chat? |
-| 2. Safety check | `risk_precheck` | Is this dangerous or sensitive? If so, **stop and hand to a human**. |
-| 3. Plan facts | `evidence_planner` | Do we need to look anything up (order status, policy)? |
-| 4. Gather facts | `evidence_collector` | Fetch those facts from the knowledge base / tools. |
-| 5. Verify facts | `evidence_validator` | Only keep facts we actually asked for. |
-| 6. Pick a style | `strategy_selector` | How should we answer — brief, business-first, supportive? |
-| 7. Write reply | `response_generator` | Draft the actual answer, citing its sources. |
-| 8. Fact-check | `response_validator` | A second AI checks the draft is grounded and safe. If not → repair or hand off. |
+| Step | Node | What it decides |
+|---|---|---|
+| 1. Understand | `dialogue_classifier` | What does the customer want? What's their mood? Just chit-chat? |
+| 2. Safety check | `risk_precheck` | Dangerous or sensitive? If so, **stop and hand to a human**. |
+| 3. Plan facts | `evidence_planner` | Does anything need looking up (order status, policy)? |
+| 4. Gather facts | `evidence_collector` | Fetch them from the knowledge base and tools. |
+| 5. Verify facts | `evidence_validator` | Keep only what was actually asked for. |
+| 6. Pick a style | `strategy_selector` | Brief, business-first, supportive? |
+| 7. Write reply | `response_generator` | Draft the answer, citing its sources. |
+| 8. Fact-check | `response_validator` | A second AI checks the draft is grounded. If not → repair or hand off. |
 
-Every one of those steps is recorded as a **trace** with timing, decisions, and
-(for admins) the model's raw reasoning. That's what you see in the console.
+Every step is recorded as a **trace** with timing, decisions, and (for admins)
+the model's raw reasoning. That is what the console shows.
 
-It also **remembers the conversation**. Step 1 and step 7 both receive the recent
-exchanges of the same session, tagged with who said what, so "how long will that
-take?" resolves against what was already discussed instead of starting over.
+It also **remembers the conversation**: steps 1 and 7 see the recent exchanges of
+the same session, so "how long will that take?" resolves against what was already
+discussed.
 
-### Why "grounded" matters
+**The one rule everything else serves:**
 
-The AI is only allowed to state facts it actually retrieved. It can't invent a
-refund policy — if it has no evidence, it shouldn't cite one. Step 5 and step 8
-exist to enforce that. (A real bug we fixed: a plain "good morning" was pulling
-the refund policy into the answer — the pipeline now correctly retrieves nothing
-for chit-chat.)
+> The assistant may only state facts it actually retrieved this turn.
+
+It cannot invent a refund policy. Steps 5 and 8 exist to enforce that, and a
+handoff is the designed outcome when they can't — not a failure.
 
 ---
 
 ## Quick start
 
-You need **Docker Desktop** and a running AI model server (Ollama, vLLM, or
-anything OpenAI-compatible).
+You need **Docker Desktop**, and an OpenAI-compatible model server (Ollama, vLLM,
+…) already serving the model named in the file `MODEL_CONFIG_PATH` points at
+(the committed demo expects `qwen3.6:27b`).
 
 ```bash
 ./run.sh
 ```
 
-The first run creates `.env` and stops to ask you for two things: a login token
-and your model server's address. Fill them in, run `./run.sh` again, and it
-builds, starts, seeds sample data, and prints the URL.
+The first run copies `.env.example` to `.env` and stops. Fill in three values:
 
-Then open **http://localhost:8080/console/** and paste your **admin** token.
+```dotenv
+REMOTE_MODEL_BASE_URL=http://host.docker.internal:11434/v1
+DEMO_CUSTOMER_TOKEN=any-random-string-at-least-16-characters
+DEMO_ADMIN_TOKEN=another-random-string-at-least-16-characters
+```
+
+Use the model server's LAN address instead of `host.docker.internal` if it runs
+on another machine, and set `REMOTE_MODEL_API_KEY` if it needs one. **Never
+commit `.env`.**
+
+Run `./run.sh` again: it builds, starts PostgreSQL + API + worker, migrates,
+seeds demo data, and prints the URL. Open
+**http://localhost:8080/console/** and paste the **admin** token.
 
 ```bash
-./run.sh logs     # see what it is doing
-./run.sh stop     # stop it
-./run.sh reset    # stop and wipe the database
-make restart      # pick up edits to config/*.yaml
+./run.sh logs     # follow API and worker logs
+./run.sh stop     # stop the services
+./run.sh reset    # stop AND permanently delete the demo database
+make restart      # reload edits under config/*.yaml
+curl http://localhost:8080/health/ready   # every dependency, including model roles
 ```
+
+Without Bash, run the same steps by hand:
+
+```powershell
+Copy-Item .env.example .env
+# Edit .env, then:
+docker compose up --build -d
+docker compose --profile demo run --rm demo-seed
+```
+
+`down`, `down -v` and `restart app worker` are the compose equivalents of stop,
+reset and `make restart`.
 
 > ⏳ Replies take real time — a 27B model on one GPU is roughly 30–90 seconds per
 > message, because a turn makes several model calls. Watch the steps fill in.
 
----
-
-## Changing how it behaves
-
-No Python. See **[TUNING.md](TUNING.md)** for the detail — that guide is written
-for whoever shapes the assistant, not for a programmer.
-
-| I want to change… | Edit |
-|---|---|
-| What the AI **knows** | Console → **Tune** → Knowledge, or `config/demo/*.json` |
-| How it **sounds** | Console → **Tune** → Voice, or `config/personas/*.yaml` |
-| What each step **decides** | Console → **Tune** → Instructions, or `config/prompts/*.yaml` |
-| Where knowledge **comes from** | `config/knowledge.yaml` |
-| Where lookups **go** (ERP, CRM) | `config/tools.yaml` |
-| **Which model** does what | the file `MODEL_CONFIG_PATH` points at |
-| Addresses, passwords, memory length | `.env` |
-
-Click **Tune** in the console with an admin token: it shows every step's current
-instructions, the voice, the documents the assistant may cite, and which model
-runs each step — and lets you edit them live, applied to the very next message.
-
-Taking this project over? **[DEVELOPING.md](DEVELOPING.md)** — how to run the
-tests, the one invariant the design exists to protect, and what was deliberately
-left unbuilt.
+Running without Docker: see [DEVELOPING.md](DEVELOPING.md).
 
 ---
 
@@ -121,66 +124,69 @@ left unbuilt.
 └───────────────┴──────────────────────┴─────────────────────┘
 ```
 
-1. **Type a message** and press Send. Things worth trying, and what each shows:
+Type a message and press Send. Its trace auto-selects and fills in live; click
+any step to see what it decided. Things worth trying:
 
-   | Say | What happens |
-   |---|---|
-   | `good morning` | Answers, retrieves **nothing**, cites nothing |
-   | `where is my order order-1?` | Looks the order up and cites the tool result (in transit) |
-   | `is it still on the way?` | Reuses the order from the previous turn — **memory** |
-   | `where is my order order-2?` | A different order, a different status (delivered) |
-   | `how about order-3?` | Still preparing — and the order id came from this message alone |
-   | `how long do refunds take?` | Answers from the knowledge base with a citation |
-   | `how long does shipping take?` | A different document answers — not the refund policy |
-   | `八月團購有哪些咖啡可以選？` | Reads the group-buy list and quotes the items and prices |
-   | `這些品項的特色有啥？` | A **different document** answers — flavour notes, not the prices again |
-   | `七月零食團購的取貨時間是幾點到幾點？` | The document has no pickup hours, so it **says so** instead of answering with the nearest fact it does have |
-   | `會員等級有哪些？點數怎麼算？` | Tiers, thresholds and the points rule, from one document |
-   | `我有什麼折扣碼可以用嗎？` | A document bound to **this customer only** — another customer gets nothing |
-   | `夏季特賣還有嗎？` | The promotion **expired in 2025**, so it is invisible: no stale quote, just "I don't have that" |
-   | `where is my refund?` | **Hands off to a human** — there is no verified refund source, so it refuses to guess |
+| Say | What it shows |
+|---|---|
+| `good morning` | Answers, retrieves **nothing**, cites nothing |
+| `where is my order order-1?` | Looks the order up and cites the tool result (in transit) |
+| `is it still on the way?` | Reuses the order from the previous turn — **memory** |
+| `where is my order order-2?` | A different order, a different status (delivered) |
+| `how about order-3?` | Still preparing — the order id came from this message alone |
+| `how long do refunds take?` | Answers from the knowledge base with a citation |
+| `how long does shipping take?` | A different document answers — not the refund policy |
+| `八月團購有哪些咖啡可以選？` | Reads the group-buy list, quotes items and prices |
+| `這些品項的特色有啥？` | A **different document** answers — flavour notes, not the prices again |
+| `七月零食團購的取貨時間是幾點到幾點？` | The document has no pickup hours, so it **says so** |
+| `會員等級有哪些？點數怎麼算？` | Tiers, thresholds and the points rule, from one document |
+| `我有什麼折扣碼可以用嗎？` | A document bound to **this customer only** |
+| `夏季特賣還有嗎？` | The promotion **expired in 2025**, so it is invisible — no stale quote |
+| `where is my refund?` | **Hands off to a human** — no verified source, so it refuses to guess |
 
-   Try `/docs` too: **http://localhost:8080/docs** is the API, with an
-   Authorize button — paste the same admin token and call any endpoint.
+Also worth knowing:
 
-2. Its trace **auto-selects** and **streams live** as each step runs.
-3. Click any step to expand what it decided.
-4. **Chats** (top left) is one row per chat id — the same id a LINE webhook
-   supplies for a conversation. Click one to read its history and keep talking
-   in it; the turn list below narrows to that chat.
-5. **Refresh the page**: the conversation is still there. **New conversation**
-   starts a clean one.
-6. **EN / 中文** switches language, **◐** switches light/dark, **Retry trace**
-   re-runs a finished turn.
+- **Chats** (top left) is one row per chat id — the same id a LINE webhook
+  supplies. Click one to read its history and keep talking in it.
+- Refresh the page and the conversation is still there. **New conversation**
+  starts a clean one.
+- **EN / 中文** switches language, **◐** light/dark, **Retry trace** re-runs a
+  finished turn.
+- **http://localhost:8080/docs** is the API with an Authorize button — paste the
+  same admin token and call any endpoint.
 
-**Admin vs customer token:**
-- **Admin** sees everything: real input/output, the model's raw chain-of-thought
-  (collapsible, labeled per step), and the Tune panel.
-- **Customer** sees only the chat — no internal reasoning.
+**Admin** sees everything: real input/output, the model's raw chain-of-thought,
+and the Tune panel. **Customer** sees only the chat.
 
 ---
 
-## Tech stack
+## Changing how it behaves
 
-| Layer | Choice | Why |
-|-------|--------|-----|
-| Language | **Python 3.12** | The whole backend. |
-| Web API | **FastAPI** | Serves the API + the console. |
-| Data models | **Pydantic 2** | Strict, typed data at every step (no loose dicts). |
-| Database | **PostgreSQL 16 + pgvector** | Stores traces, jobs, and the searchable knowledge base. |
-| DB access | **psycopg 3** + **Alembic** | Queries + versioned schema migrations. |
-| AI models | Any **OpenAI-compatible** server (Ollama, vLLM, …) | The actual language models; swappable in the models file. |
-| Frontend | **Plain HTML/CSS/JavaScript** (no framework) | The console — nothing to build, just static files. |
-| Packaging | **uv** + **hatchling** | Fast installs, reproducible builds. |
-| Containers | **Docker Compose** | One command runs DB + API + worker. |
-| Tests | **pytest** + **Playwright** | Unit, integration, and browser tests. |
+No Python. **[TUNING.md](TUNING.md)** is the guide, written for whoever shapes
+the assistant rather than for a programmer.
 
-**No message queue, no Redis, no Kafka.** The job queue is just a
-PostgreSQL table — simpler to run and reason about.
+| I want to change… | Edit |
+|---|---|
+| What the AI **knows** | Console → **Tune** → Knowledge, or the knowledge base itself |
+| How it **sounds** | Console → **Tune** → Voice, or `config/personas/*.yaml` |
+| What each step **decides** | Console → **Tune** → Instructions, or `config/prompts/*.yaml` |
+| Where knowledge **comes from** | `config/knowledge.yaml` |
+| Where lookups **go** (ERP, CRM) | `config/tools.yaml` |
+| **Which model** does what | the file `MODEL_CONFIG_PATH` points at |
+| Addresses, tokens, memory length | `.env` |
+
+The rule of thumb: **behaviour lives in `config/`, secrets and machine addresses
+live in `.env`, service topology lives in `compose.yaml`.** Nothing
+machine-specific belongs in the `Dockerfile`.
+
+Tune (admin token) shows every step's current instructions, the voice, the
+documents the assistant may cite, and which model runs each step — editable live,
+applied to the very next message. Edits land in `config/overrides.json`
+(git-ignored) and never rewrite your YAML, so **Revert to file** always works.
 
 ---
 
-## How it's built (system structure)
+## How it's built
 
 ```
 Customer message
@@ -198,13 +204,10 @@ Customer message
   (live traces)                                          (any OpenAI-compatible server)
 ```
 
-**Two processes** share one database:
-- **`app`** — the web server. Takes messages in, serves the console, reads traces
-  out. Does *not* call the AI itself.
-- **`worker`** — the background engine. Pulls queued jobs, runs the pipeline,
-  writes every step as a trace.
-
-### Where things live in the code
+**Two processes, one database.** `app` takes messages in, serves the console and
+reads traces out — it never calls the AI. `worker` pulls queued jobs, runs the
+pipeline, and writes every step as a trace. **No message queue, no Redis, no
+Kafka** — the job queue is a PostgreSQL table.
 
 ```
 src/agent_flow/
@@ -222,174 +225,55 @@ src/agent_flow/
 │   ├── evidence.py    #   plan / gather / verify facts
 │   ├── respond.py     #   pick style, write reply, repair
 │   ├── validate.py    #   fact-check the reply
-│   ├── model_outputs.py #  strict shapes for what models may return
 │   └── turn.py        #   the conductor that runs steps 1→8 in order
-├── adapters/          # talk to the outside: models, RAG search, tools
+├── adapters/          # talk to the outside: models, knowledge, tools
 ├── repositories/      # read/write the database
 └── console/           # the web UI (HTML/CSS/JS, i18n EN + 中文)
 
-config/                # editable settings, prompts, demo knowledge base
-├── models.local.yaml  # which model powers each step (MODEL_CONFIG_PATH picks)
-├── tools.yaml         # where lookups go: demo fixture, or a real ERP/CRM
+config/                # editable settings — no rebuild, just `make restart`
+├── models*.yaml       # which model powers each step (MODEL_CONFIG_PATH picks one)
 ├── knowledge.yaml     # every knowledge source the AI may retrieve from
+├── tools.yaml         # where lookups go: demo fixture, or a real ERP/CRM
 ├── prompts/           # the instructions given to each AI step
 ├── personas/          # how the assistant sounds
-└── demo/              # the demo corpus those sources point at
-    ├── rag.json       #   policies (refund, shipping)
-    ├── groupbuy.json  #   group-buy lists
-    └── tools.json     #   what order.lookup answers
+└── demo/              # the demo corpus and canned tool answers
 ```
 
-See **[TUNING.md](TUNING.md)** — you rarely need to touch Python.
-
----
-
-## Running without Docker (developers)
-
-If you'd rather run the pieces by hand (needs Python 3.12 + [uv](https://docs.astral.sh/uv/)):
-
-```bash
-uv sync --frozen                              # install dependencies
-uv run --frozen alembic upgrade head          # set up the database
-uv run --frozen uvicorn --factory agent_flow.runtime:create_runtime_app --reload  # API
-uv run --frozen python -m agent_flow.worker --run      # start the worker
-uv run pytest -q                              # run the tests
-```
-
-Health checks: `http://localhost:8000/health/live` (alive) and
-`/health/ready` (all models verified).
+Built on **Python 3.12**, FastAPI, Pydantic 2, PostgreSQL 16 + pgvector,
+psycopg 3 + Alembic, uv, Docker Compose, pytest + Playwright. The console is
+plain HTML/CSS/JS — nothing to build.
 
 ---
 
 ## Safety & limits
 
-- **Demo login only.** The console uses two static tokens set in `.env`. This is
-  fine for a demo; a real deployment needs proper authentication
-  (`APP_RUNTIME_MODE=production` deliberately refuses the demo tokens).
-- **Small models = variable quality.** A small local model can produce weak or
-  off replies on open chit-chat. That's expected; a larger model improves it.
-- **Console edits are live.** The Tune panel changes behaviour for the next
-  message without a restart or a code review. Only admin tokens can reach it.
-- **"Reduced assurance."** Fact-checking uses deterministic rules plus one AI
-  judge, so the system labels its own confidence as `reduced_assurance` and is
-  **not** approved to run unattended in production.
-- **Admin reasoning is stored.** Admin tokens can view the models' raw
-  chain-of-thought; it's recorded in the trace and filtered out for everyone
-  else. Turn it off if that's not acceptable for your use.
-- **Never commit secrets.** `.env`, real tokens, and API keys stay local. The
-  repo is regularly checked to ensure none leak in.
+- **Demo login only.** Two static tokens in `.env`. A real deployment needs
+  proper authentication (`APP_RUNTIME_MODE=production` deliberately refuses the
+  demo tokens).
+- **"Reduced assurance."** Fact-checking is deterministic rules plus one AI
+  judge, so the system labels its own confidence `reduced_assurance` and is
+  **not** approved to run unattended.
+- **Small models = variable quality.** Weak or off replies on open chit-chat are
+  expected; a larger model improves it.
+- **Console edits are live.** Tune changes behaviour for the next message with no
+  restart and no code review. Admin tokens only.
+- **Admin reasoning is stored.** Raw chain-of-thought is recorded in the trace
+  and filtered out for everyone else. Re-check that before using real data.
+- **External services are required.** If the model server is down, the API may
+  still be alive but `/health/ready` and real replies fail.
+- **Handoff is a boundary, not an integration.** The webhook receiver is a stub;
+  a real ticketing system, alerting and retry operations are still to build.
+- **No LINE adapter, no CI.** Both are deliberate gaps — see
+  [DEVELOPING.md](DEVELOPING.md).
+- **Reset is irreversible.** `./run.sh reset` and `docker compose down -v`
+  permanently delete the demo database.
+- **Never commit secrets.** `.env`, real tokens and API keys stay local.
 
 ---
 
-## Operations reference
-
-Detail for whoever runs or extends this. The friendly guide above is enough for
-a demo; this section is the operational contract.
-
-### Models & configuration
-
-- Each pipeline step is a **model role** (`dialogue_classifier`,
-  `strategy_advisor`, `response_generator`, `response_judge`, `embedding`, …).
-  the **role names are stable**; the *profile* and *model* names behind them are
-  replaceable in the models file `MODEL_CONFIG_PATH` names — there are
-  several in `config/`, and editing the one that is not live changes nothing.
-  Tune → Models shows the live path.
-- The default config points every chat role at one model on one
-  OpenAI-compatible endpoint (`REMOTE_MODEL_BASE_URL`). Split roles across
-  profiles when you want a bigger model for the final reply only.
-- `structured_output` per profile decides how JSON is enforced. Ollama's `/v1`
-  accepts OpenAI's `json_schema` field and **ignores** it, so Ollama profiles
-  must use `json_object`; the schema is always repeated in the system prompt so
-  a backend without grammar enforcement still complies.
-- The `embedding` role is disabled by default: the demo answers from a fixture,
-  and the code requires a 1024-dimension embedding model.
-- Verify the endpoint directly rather than trusting the Ollama CLI's implicit
-  localhost: `curl "${REMOTE_MODEL_BASE_URL%/v1}/api/tags"`. `./run.sh` runs this
-  check for you at startup.
-
-### Conversation memory
-
-- History is per `session_id`, role-tagged, and windowed to `HISTORY_TURNS`
-  (default 8) most recent exchanges — unbounded history used to exceed the
-  classifier's 100-message cap and fail the turn outright.
-- Handed-off turns are recorded too, so a customer who triggers a handoff and
-  then rephrases does not start from zero context.
-- `GET /api/v1/sessions/{session_id}/messages` replays the visible transcript,
-  scoped to the authenticated tenant and customer. The console uses it to
-  restore the chat after a reload.
-- `GET /api/v1/sessions` lists the chats that token may see — session id, turn
-  count, last activity, and the last customer message — newest first. One
-  session id is one chat, which is what a channel adapter supplies (a LINE
-  webhook passes its own chat id straight through), so the console groups turns
-  the way the channel does rather than showing one flat stream.
-
-### Knowledge sources
-
-- `config/knowledge.yaml` lists every source the pipeline may retrieve from.
-  Sources are searched together and each answer cites the source it came from,
-  so adding knowledge is a config edit. `enabled: false` parks a source.
-- Only `type: fixture` (a JSON file) ships today. A new kind — a live vector
-  DB, an HTTP search service — is one entry in `_BUILDERS` in
-  `src/agent_flow/adapters/knowledge.py`; the pipeline does not change.
-- The classifier is shown a catalog of `source_id: snippet` lines and may only
-  name a source_id it saw there, so retrieval cannot invent a document.
-
-### Editing prompts at runtime
-
-- `GET /api/v1/config` (admin) reports the live prompts, personas, model roles
-  and settings. `PUT`/`DELETE` on `/api/v1/config/prompts/{node}` and
-  `/api/v1/config/personas/{artifact_id}` set and clear overrides.
-- Overrides live in `config/overrides.json` (git-ignored) and never rewrite the
-  YAML, so the commented config files stay intact and revert always works.
-- Every edit recomputes the artifact checksum, and that checksum is recorded on
-  the spans of each turn that used it — a trace always identifies the exact
-  prompt text that produced it.
-
-### Demo tokens (demo only)
-
-The console authenticates with two static bearer tokens that exist for the
-**demo only** and must never gate a real deployment. Set `DEMO_CUSTOMER_TOKEN`
-and `DEMO_ADMIN_TOKEN` (≥ 16 chars each) in the Git-ignored `.env`; never commit
-them. `APP_RUNTIME_MODE=demo` enables this authenticator; `production` rejects
-it.
-
-### Running & submitting
-
-- `docker compose up --build` starts postgres + app + worker. The app serves the
-  console at `/console/` and reports `/health/ready` only after every model role
-  passes its **readiness check**.
-- Drive the queue directly (same path the console uses); scope is bound from the
-  bearer token, so the body carries no `customer_id`:
-
-  ```
-  POST /api/v1/submissions
-  { "channel": "console", "external_message_id": "...", "session_id": "...",
-    "text": "...", "idempotency_key": "..." }
-  ```
-
-### Failure & retry model
-
-- Every failure maps through one chain:
-  `readiness check -> model role -> probe stage -> trace node -> component ->
-  operation -> safe error code -> automatic/manual retry disposition`.
-- Failures surface as a **safe error code**, never raw internals — e.g. a stalled
-  worker lease finishes the trace with `WORKER_LEASE_EXPIRED` and reserves a
-  retry trace; a tool timeout surfaces as `TOOL_TIMEOUT` on component
-  `order_api`, operation `order.lookup`.
-- Inspect a failed handoff outbox for one authorized tenant only:
-  `select tenant_id,id,status,attempts,last_error_code,last_http_status,next_attempt_at from notification.outbox where tenant_id = '<tenant-id>' and status='failed' order by created_at desc;`
-
-### Extending: the future LINE adapter boundary
-
-The submission API is channel-neutral. A future **LINE adapter** (or any
-channel) plugs in by translating inbound webhooks into the same
-`POST /api/v1/submissions` shape and mapping replies back — no pipeline changes.
-
----
-
-## License / status
+## License
 
 **[MIT](LICENSE).** Use it, fork it, build on it.
 
-Bootstrap demo runtime — validate and harden before trusting it with anything
+A bootstrap demo runtime — validate and harden before trusting it with anything
 real.
