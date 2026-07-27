@@ -118,6 +118,51 @@ Running without Docker: see [DEVELOPING.md](DEVELOPING.md).
 
 ---
 
+## Settings
+
+### Set these three, or it will not start
+
+`./run.sh` refuses to start without them, so a mistake here is loud rather than
+mysterious.
+
+| Setting | What to put | Rules |
+|---|---|---|
+| `REMOTE_MODEL_BASE_URL` | Your model server, including `/v1` | `host.docker.internal` reaches the host from a container; use the LAN address if the server is on another machine. `localhost` inside a container means the container. |
+| `DEMO_CUSTOMER_TOKEN` | Any random string | 16 characters or more |
+| `DEMO_ADMIN_TOKEN` | A **different** random string | 16 characters or more. If it matches the customer token, that one wins and you can never reach the Tune panel. |
+
+One more thing has to be true, and nothing checks it for you: **the model named
+in your models file must already exist on that server.** The committed
+`config/models.yaml` asks for `qwen3.6:27b`. `/health/ready` is what tells you —
+it fails if a model role cannot be reached.
+
+### Set these only if your situation calls for it
+
+| Setting | When |
+|---|---|
+| `REMOTE_MODEL_API_KEY` | Your model server requires a key. Empty is fine otherwise. |
+| `MODEL_CONFIG_PATH` | You keep more than one models file. Editing the one that is *not* live changes nothing and reports no error — Tune → Models shows the live path. |
+| `DATABASE_URL` | You run without Docker. Compose supplies its own and ignores this. |
+| `KNOWLEDGE_BASE_URL` | You point at a real knowledge base, or run without Docker (then it is port 8000, not 8080). |
+| `LOCAL_VLLM_BASE_URL`, `LOCAL_VLLM_API_KEY` | A profile in your models file points at a local vLLM server. |
+
+### Leave these alone unless you have a reason
+
+| Setting | Default | Effect |
+|---|---|---|
+| `HISTORY_TURNS` | `8` | Earlier exchanges the assistant is shown (0–40). Higher remembers more and costs more tokens; too high and small models lose the plot. |
+| `ASSURANCE_MODE` | `bootstrap` | `bootstrap` = one fact-checker, `dual_judge` = two that must agree. |
+| `APP_RUNTIME_MODE` | `demo` | `production` rejects the demo tokens, which leaves no way in until real authentication exists. Compose pins this to `demo`. |
+| `WEBHOOK_URL`, `WEBHOOK_SECRET` | a stub | Where a handed-off conversation is posted. Nothing is listening in the demo. |
+| `DEMO_TENANT_ID`, `DEMO_CUSTOMER_ID` | `t1`, `c1` | Who the demo tokens act as. `config/demo/account.json` binds a document to `c1`. |
+| `WORKER_OWNER` | `agent-flow-bootstrap` | Names the worker in the job queue. |
+
+**Behaviour is not in `.env`.** Which model does what, what the assistant knows,
+how it sounds, what each step decides — all of that is `config/*.yaml`, and
+[TUNING.md](TUNING.md) covers it.
+
+---
+
 ## Using the console
 
 ```

@@ -112,6 +112,48 @@ docker compose --profile demo run --rm demo-seed
 
 ---
 
+## 設定值
+
+### 這三個沒設就啟動不了
+
+`./run.sh` 缺少它們就會直接拒絕啟動，所以設錯會很明顯，不會變成難查的問題。
+
+| 設定 | 要填什麼 | 規則 |
+|---|---|---|
+| `REMOTE_MODEL_BASE_URL` | 你的模型服務位址，含 `/v1` | `host.docker.internal` 是從 container 連回主機；模型在別台機器就填 LAN 位址。在 container 裡的 `localhost` 指的是 container 自己。 |
+| `DEMO_CUSTOMER_TOKEN` | 任意隨機字串 | 至少 16 字元 |
+| `DEMO_ADMIN_TOKEN` | **另一組**隨機字串 | 至少 16 字元。跟 customer token 相同的話，會被當成 customer，你永遠進不了 Tune 面板。 |
+
+還有一件事必須成立，但**沒有任何程式會幫你檢查**：模型設定檔裡指定的模型必須
+已經存在於那台伺服器上。目前提交的 `config/models.yaml` 要的是
+`qwen3.6:27b`。用 `/health/ready` 確認——任何一個模型角色連不上，它就會失敗。
+
+### 視情況才需要設
+
+| 設定 | 什麼時候 |
+|---|---|
+| `REMOTE_MODEL_API_KEY` | 模型服務需要金鑰時。不需要就留空。 |
+| `MODEL_CONFIG_PATH` | 你有多份模型設定檔時。改到**不是**生效中的那一份，什麼都不會變，也不會報錯——Tune → Models 會顯示目前生效的路徑。 |
+| `DATABASE_URL` | 不用 Docker 直接跑時。Compose 會自己提供，並忽略這個值。 |
+| `KNOWLEDGE_BASE_URL` | 要接真的知識庫，或不用 Docker 直接跑時（那時是 8000 port，不是 8080）。 |
+| `LOCAL_VLLM_BASE_URL`、`LOCAL_VLLM_API_KEY` | 模型設定檔裡有 profile 指向本機 vLLM 時。 |
+
+### 沒有特別理由就別動
+
+| 設定 | 預設 | 作用 |
+|---|---|---|
+| `HISTORY_TURNS` | `8` | 助理看得到前面幾輪對話（0–40）。調高記得更多、也更耗 token；太高的話小模型會失焦。 |
+| `ASSURANCE_MODE` | `bootstrap` | `bootstrap` = 一個查核者，`dual_judge` = 兩個且必須一致。 |
+| `APP_RUNTIME_MODE` | `demo` | `production` 會拒絕 Demo Token，而在真正的驗證機制實作之前，那等於沒有任何入口。Compose 固定為 `demo`。 |
+| `WEBHOOK_URL`、`WEBHOOK_SECRET` | stub | 轉人工的對話要送去哪。Demo 裡沒有任何服務在接。 |
+| `DEMO_TENANT_ID`、`DEMO_CUSTOMER_ID` | `t1`、`c1` | Demo Token 以誰的身分行動。`config/demo/account.json` 有一份文件綁定 `c1`。 |
+| `WORKER_OWNER` | `agent-flow-bootstrap` | Worker 在 job queue 裡的名字。 |
+
+**行為不在 `.env` 裡。** 哪個模型做哪件事、助理知道什麼、語氣如何、每一步怎麼
+判斷——全都在 `config/*.yaml`，由 [TUNING.md](TUNING.md) 說明。
+
+---
+
 ## 使用 Console
 
 ```
