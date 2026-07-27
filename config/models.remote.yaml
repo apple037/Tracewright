@@ -1,0 +1,58 @@
+# Hybrid flow-check config: the remote MoE writes and judges the reply, the
+# local vLLM 8B does the cheap labelling steps, embeddings stay remote.
+# Select it with MODEL_CONFIG_PATH=config/models.remote.yaml. Not committed.
+mode: bootstrap
+promotion_semantic_mode: human_only
+disabled_roles:
+  - response_judge_zh_verifier
+  - promotion_judge_secondary
+endpoints:
+  remote_models:
+    adapter: openai_compatible
+    base_url_env: REMOTE_MODEL_BASE_URL
+    api_key_env: REMOTE_MODEL_API_KEY
+    max_concurrency: 6
+  local_vllm:
+    adapter: openai_compatible
+    base_url_env: LOCAL_VLLM_BASE_URL
+    api_key_env: LOCAL_VLLM_API_KEY
+    max_concurrency: 1
+profiles:
+  # Steps 7/8 — writes the reply and fact-checks it.
+  remote_large:
+    endpoint: remote_models
+    model: qwen3.6:35b-a3b
+    family: qwen
+    capabilities: [chat, structured_json]
+    # Gateway fronts Ollama, which accepts json_schema and then ignores it.
+    structured_output: json_object
+    request_options: {reasoning_effort: none}
+    temperature: 0.6
+    max_tokens: 2560
+    max_concurrency: 4
+  # Steps 1/6 — labelling and strategy. qwen3.5:9b was meant to sit here, but
+  # served by Ollama it keeps thinking: 100-280s per structured call and the
+  # answer still truncates. The local 8B on vLLM does the same job in ~9s.
+  local_generator:
+    endpoint: local_vllm
+    model: Qwen/Qwen3-8B-AWQ
+    family: qwen
+    capabilities: [chat, structured_json]
+    request_options: {reasoning_effort: low}
+    temperature: 0.2
+    max_tokens: 2560
+    min_context_length: 6144
+    max_concurrency: 1
+  remote_embedding:
+    endpoint: remote_models
+    model: qwen3-embedding-0.6b
+    family: qwen
+    capabilities: [embedding]
+    max_concurrency: 4
+roles:
+  dialogue_classifier: local_generator
+  strategy_advisor: local_generator
+  response_generator: remote_large
+  response_judge: remote_large
+  promotion_judge_primary: remote_large
+  embedding: remote_embedding

@@ -41,6 +41,17 @@ def test_probe_style_transcripts_are_passed_through_untouched():
     assert _chat_messages(transcript) == transcript["messages"]
 
 
+def test_a_transcript_still_gets_the_schema_prepended():
+    # A backend that ignores response_format (Ollama) answered the capability
+    # probe with arbitrary JSON, because the transcript path dropped the schema.
+    schema = {"type": "object", "properties": {"text": {"type": "string"}}}
+    messages = _chat_messages(
+        {"messages": [{"role": "user", "content": "ping"}]}, schema=schema
+    )
+    assert [m["role"] for m in messages] == ["system", "user"]
+    assert json.dumps(schema, ensure_ascii=False, sort_keys=True) in messages[0]["content"]
+
+
 @pytest.mark.parametrize(
     ("mode", "expected_type"),
     [("json_schema", "json_schema"), ("json_object", "json_object"), ("none", None)],

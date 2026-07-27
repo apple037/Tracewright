@@ -140,7 +140,12 @@ def _chat_messages(
             for item in messages
         )
     ):
-        return messages
+        # A ready-made transcript still needs the instructions and the schema:
+        # a backend that ignores response_format has nothing else to go on.
+        system = _system_content(system_prompt, schema)
+        if system is None:
+            return messages
+        return [{"role": "system", "content": system}, *messages]
     # Pipeline requests are domain payloads, not chat transcripts; serialize
     # them into one user message so real OpenAI-compatible endpoints accept
     # them. Instructions and the response schema go in the system message.
