@@ -10,6 +10,7 @@ from fastapi import FastAPI
 from agent_flow.adapters.evidence import MockRagClient, MockToolClient
 from agent_flow.adapters.knowledge import KnowledgeSources
 from agent_flow.adapters.models import ModelGateway
+from agent_flow.adapters.tools import ToolSources
 from agent_flow.api.dependencies import AppServices, Authenticator, ReadinessCheck
 from agent_flow.api.config import router as config_router
 from agent_flow.api.health import router as health_router
@@ -77,7 +78,13 @@ async def build_demo_components(
             settings.demo_rag_fixture, telemetry=telemetry
         )
     )
-    tools = MockToolClient.from_fixture(settings.demo_tool_fixture, telemetry=telemetry)
+    tools = (
+        ToolSources.from_config(settings.tool_config_path, telemetry=telemetry)
+        if settings.tool_config_path.exists()
+        else MockToolClient.from_fixture(
+            settings.demo_tool_fixture, telemetry=telemetry
+        )
+    )
     conversations = PostgresConversationRepository(
         pool, history_turns=settings.history_turns
     )

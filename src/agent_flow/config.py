@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     knowledge_config_path: Path = Path("config/knowledge.yaml")
     demo_rag_fixture: Path = Path("config/demo/rag.json")
     demo_tool_fixture: Path = Path("config/demo/tools.json")
+    # Every tool, in one file. demo_tool_fixture is the fallback for a checkout
+    # without it.
+    tool_config_path: Path = Path("config/tools.yaml")
     legacy_turn_timeout_seconds: float = Field(default=60.0, gt=0, le=300)
     # How many earlier exchanges the assistant is shown. Higher remembers more
     # and costs more tokens; too high and small models lose the plot.

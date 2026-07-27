@@ -68,6 +68,52 @@ class _ToolFixture(StrictModel):
     score: float | None = 1.0
 
 
+def tool_evidence(
+    *,
+    tool: str,
+    arguments: dict[str, Any],
+    result: dict[str, Any],
+    version: str,
+    tenant_id: str,
+    customer_id: str,
+    retrieved_at: datetime | None = None,
+    effective_at: datetime | None = FIXTURE_EFFECTIVE_AT,
+    valid_until: datetime | None = None,
+    score: float | None = 1.0,
+) -> EvidenceItem:
+    """The evidence shape every tool answer takes, fixture or live service.
+
+    Shared so a real ERP call and a demo fixture are indistinguishable to the
+    validator — the same id scheme, the same freshness arithmetic, the same
+    citation. A second implementation that drifted here would be a grounding
+    bug that only appears in production.
+    """
+    content = _canonical_json(result)
+    checksum = _checksum(content)
+    fetched = retrieved_at or datetime.now(timezone.utc)
+    freshness_seconds = None
+    if valid_until is not None:
+        freshness_seconds = max(0, int((valid_until - fetched).total_seconds()))
+    return EvidenceItem(
+        evidence_id=f"tool:{tool}:{checksum[:16]}",
+        source_id=f"tool:{tool}",
+        version=version,
+        content=content,
+        content_checksum=checksum,
+        retrieved_at=fetched,
+        effective_at=effective_at,
+        valid_until=valid_until,
+        score=score,
+        metadata={
+            "tenant_id": tenant_id,
+            "customer_id": customer_id,
+            "tool": tool,
+            "arguments": arguments,
+            "freshness_seconds": freshness_seconds,
+        },
+    )
+
+
 def _require_context(context: AuthorizedCustomerContext) -> None:
     if not isinstance(context, AuthorizedCustomerContext):
         raise TypeError("context must be an AuthorizedCustomerContext")
@@ -208,6 +254,11 @@ class MockToolClient:
         self._records = records
         self.telemetry = telemetry
 
+    @property
+    def tools(self) -> frozenset[str]:
+        """Which tool names this fixture answers for, so a router can pick it."""
+        return frozenset(record.tool for record in self._records)
+
     @classmethod
     def from_fixture(
         cls,
@@ -247,31 +298,17 @@ class MockToolClient:
                 )
             raise LookupError("tool fixture not found in authorized scope")
 
-        content = _canonical_json(record.result)
-        checksum = _checksum(content)
-        retrieved_at = record.retrieved_at or datetime.now(timezone.utc)
-        freshness_seconds = None
-        if record.valid_until is not None:
-            freshness_seconds = max(
-                0, int((record.valid_until - retrieved_at).total_seconds())
-            )
-        evidence = EvidenceItem(
-            evidence_id=f"tool:{record.tool}:{checksum[:16]}",
-            source_id=f"tool:{record.tool}",
+        evidence = tool_evidence(
+            tool=record.tool,
+            arguments=record.arguments,
+            result=record.result,
             version=record.version,
-            content=content,
-            content_checksum=checksum,
-            retrieved_at=retrieved_at,
+            tenant_id=record.tenant_id,
+            customer_id=record.customer_id,
+            retrieved_at=record.retrieved_at,
             effective_at=record.effective_at,
             valid_until=record.valid_until,
             score=record.score,
-            metadata={
-                "tenant_id": record.tenant_id,
-                "customer_id": record.customer_id,
-                "tool": record.tool,
-                "arguments": record.arguments,
-                "freshness_seconds": freshness_seconds,
-            },
         )
         if self.telemetry is not None:
             await self.telemetry.record_tool(
@@ -280,6 +317,6 @@ class MockToolClient:
                 duration_ms=int((time.monotonic() - started) * 1000),
                 status="completed",
                 result_source_id=evidence.source_id,
-                freshness_seconds=freshness_seconds,
+                freshness_seconds=evidence.metadata["freshness_seconds"],
             )
         return ToolCallResult(tool=request.tool, evidence=evidence)

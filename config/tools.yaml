@@ -1,0 +1,45 @@
+# WHAT THE AI CAN LOOK UP ABOUT ONE CUSTOMER.
+#
+# A tool answers a question about a specific customer and takes arguments —
+# "where is order-3". That is different from config/knowledge.yaml, which holds
+# documents everyone shares. Tool answers carry the customer they were fetched
+# for and how fresh they are, so a stale reply can be rejected.
+#
+#   name    - the tool name the pipeline calls, e.g. order.lookup
+#   type    - how to answer it (see below)
+#   enabled - false parks a tool without deleting it
+#
+# Types available today:
+#   fixture - canned answers from a JSON file in this repo. What the demo runs
+#             on: no ERP needed, and the answers never change under you.
+#   http    - a real service: your ERP, CRM, or any internal API.
+#
+# To add another kind, register it in src/agent_flow/adapters/tools.py —
+# `_BUILDERS` maps a type name to the thing that builds it. Nothing else
+# changes: the pipeline, the validator and the citations stay identical, which
+# is the point. Swapping the demo fixture for a live ERP is an edit to this
+# file, not a code change.
+
+tools:
+  order.lookup:
+    type: fixture
+    path: config/demo/tools.json
+
+# A live ERP looks like this. Copy it over the fixture above when you have one.
+#
+#  order.lookup:
+#    type: http
+#    url: https://erp.example.com/orders/{order_id}   # {name} takes an argument
+#    method: GET
+#    auth_header_env: ERP_API_KEY   # the env var holding the key, never the key
+#    auth_header: Authorization     # header name, if the service wants another
+#    auth_prefix: "Bearer "         # "" if the service wants a bare key
+#    timeout_seconds: 5
+#    version: v1
+#    # Which fields of the response the assistant may quote, and where they live
+#    # in the JSON body. Everything not listed here is dropped — the reply can
+#    # only state what you map, so this is also the place you keep internal
+#    # fields out of a customer-facing answer.
+#    map:
+#      status: data.state
+#      ships_on: data.estimated_delivery
