@@ -20,7 +20,7 @@ from agent_flow.api.turns import router as turns_router
 from agent_flow.auth import DemoTokenAuthenticator
 from agent_flow.config import Settings, load_model_config
 from agent_flow.inbound import InboundMessageService
-from agent_flow.main import mount_console
+from agent_flow.main import API_DESCRIPTION, mount_console
 from agent_flow.model_registry import ModelInventoryProbe, ModelRegistry
 from agent_flow.observability import OperationTelemetry
 from agent_flow.pipeline.turn import TurnPipeline
@@ -168,7 +168,10 @@ def create_runtime_app(
         finally:
             await runtime_pool.close()
 
-    app = FastAPI(title="Agent Flow", version="0.1.0", lifespan=demo_lifespan)
+    app = FastAPI(
+        title="Agent Flow", version="0.1.0",
+        description=API_DESCRIPTION, lifespan=demo_lifespan,
+    )
     app.include_router(turns_router)
     app.include_router(submissions_router)
     app.include_router(sessions_router)

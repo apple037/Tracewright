@@ -19,7 +19,7 @@ from agent_flow.auth import AuthenticatedPrincipal
 from agent_flow.contracts import ConversationMode, ResponseMode
 
 
-router = APIRouter(prefix="/api/v1")
+router = APIRouter(prefix="/api/v1", tags=["Configuration"])
 
 MAX_PROMPT_CHARS = 20000
 MAX_DOCUMENT_CHARS = 20000

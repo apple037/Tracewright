@@ -4,16 +4,22 @@ from fastapi.responses import JSONResponse
 from agent_flow.api.dependencies import ReadinessCheck, services
 
 
-router = APIRouter(prefix="/health")
+router = APIRouter(prefix="/health", tags=["Health"])
 
 
 @router.get("/live")
 async def live():
+    """The process is up. Says nothing about whether it can answer."""
     return {"status": "ok"}
 
 
 @router.get("/ready")
 async def ready(request: Request):
+    """Everything a turn needs is reachable: config, database, every model role.
+
+    503 until all of them pass. A failed model probe is retried on each call,
+    so a model server that starts late recovers without a restart.
+    """
     app_services = services(request)
     await _recheck_models(app_services)
     checks: dict[str, ReadinessCheck] = {

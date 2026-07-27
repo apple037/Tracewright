@@ -10,7 +10,7 @@ from agent_flow.contracts import InboundMessage
 from agent_flow.errors import AgentError
 
 
-router = APIRouter(prefix="/api/v1")
+router = APIRouter(prefix="/api/v1", tags=["Messages"])
 
 
 def _customer_context(authenticated: AuthenticatedPrincipal):
@@ -26,6 +26,17 @@ async def create_submission(
     request: Request,
     authenticated: AuthenticatedPrincipal = Depends(principal),
 ):
+    """Queue a customer message. Returns at once with a submission id.
+
+    The pipeline runs in a background worker, so a reply takes tens of seconds.
+    Poll `GET /submissions/{id}` until its status is `completed` or `failed`,
+    then read the reply from `GET /sessions/{session_id}/messages`.
+
+    `session_id` is the chat this message belongs to and is how history is
+    grouped — a channel adapter passes its own chat id straight through.
+    `idempotency_key` makes a retried send safe: the same key returns the
+    original submission instead of asking the model twice.
+    """
     require_scope(authenticated, "turn:write")
     context = _customer_context(authenticated)
     inbound = services(request).inbound
@@ -43,6 +54,7 @@ async def get_submission(
     request: Request,
     authenticated: AuthenticatedPrincipal = Depends(principal),
 ):
+    """Whether a queued message is done, and the trace it produced."""
     require_scope(authenticated, "turn:write", "trace:read", "trace:internal")
     context = _customer_context(authenticated)
     inbound = services(request).inbound

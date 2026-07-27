@@ -7,7 +7,7 @@ from agent_flow.auth import AuthenticatedPrincipal, bind_customer_context
 from agent_flow.errors import AgentError
 
 
-router = APIRouter(prefix="/api/v1")
+router = APIRouter(prefix="/api/v1", tags=["Conversations"])
 
 
 def _customer_context(authenticated: AuthenticatedPrincipal):

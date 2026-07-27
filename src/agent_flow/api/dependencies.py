@@ -5,7 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from fastapi import Header, HTTPException, Request
+from fastapi import Depends, HTTPException, Request
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
 from agent_flow.auth import AuthenticatedPrincipal
@@ -46,16 +47,30 @@ def services(request: Request) -> AppServices:
     return request.app.state.services
 
 
+# Declared as a security scheme rather than a plain header so /docs renders one
+# Authorize button for the whole API, instead of an authorization box to paste
+# a token into on each of sixteen endpoints. auto_error=False keeps the 401
+# body ours.
+bearer_scheme = HTTPBearer(
+    auto_error=False,
+    description="A demo token from .env — DEMO_ADMIN_TOKEN or DEMO_CUSTOMER_TOKEN.",
+)
+
+
 async def principal(
-    request: Request, authorization: str | None = Header(default=None)
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
 ) -> AuthenticatedPrincipal:
-    values = authorization.split(" ", 1) if authorization else []
-    if len(values) != 2 or values[0].lower() != "bearer" or not values[1]:
+    if (
+        credentials is None
+        or credentials.scheme.lower() != "bearer"
+        or not credentials.credentials
+    ):
         raise HTTPException(status_code=401, detail="authentication required")
     app_services = services(request)
     if app_services.authenticate is None:
         raise HTTPException(status_code=401, detail="authentication unavailable")
-    authenticated = await app_services.authenticate(values[1])
+    authenticated = await app_services.authenticate(credentials.credentials)
     if authenticated is None:
         raise HTTPException(status_code=401, detail="authentication failed")
     return authenticated

@@ -12,7 +12,7 @@ from agent_flow.contracts import AssuranceMetadata, InboundMessage, TurnResult
 from agent_flow.errors import AgentError
 
 
-router = APIRouter(prefix="/api/v1")
+router = APIRouter(prefix="/api/v1", tags=["Messages"])
 
 
 class SubmitTurn(BaseModel):

@@ -21,6 +21,27 @@ from agent_flow.api.turns import router as turns_router
 from agent_flow.artifacts import load_runtime_artifacts
 
 
+# Shown at the top of /docs. The first thing a newcomer to this API reads, so
+# it answers "how do I get a reply out of it" before anything else.
+API_DESCRIPTION = """
+Tracewright turns one customer message into a recorded, inspectable turn.
+
+**Getting a reply.** `POST /api/v1/submissions` queues a message; a background
+worker runs the pipeline, and `GET /api/v1/submissions/{id}` reports progress
+until it reaches `completed` or `failed`. The reply, and the rest of the
+conversation, comes from `GET /api/v1/sessions/{session_id}/messages`.
+
+**Seeing why.** Every turn writes a trace: `GET /api/v1/traces/{trace_id}` for
+the steps and their decisions, `/events` for what happened inside them.
+
+**Changing behaviour.** `/api/v1/config` reports and edits the live prompts, the
+voice, and the knowledge the assistant may cite — no restart, no redeploy.
+
+**Authorising.** Click **Authorize** and paste a demo token from `.env`. The
+admin token reaches everything; the customer token is limited to the chat it
+owns. Tenant and customer are bound from the token, never from a request body.
+"""
+
 _READINESS_CHECKS = ("database", "models")
 _READINESS_STATUSES = frozenset({"ok", "missing", "invalid", "unavailable"})
 
@@ -86,7 +107,9 @@ def create_app(
             artifact_status = "invalid"
         else:
             artifact_status = "ok"
-    app = FastAPI(title="Agent Flow", version="0.1.0")
+    app = FastAPI(
+        title="Agent Flow", version="0.1.0", description=API_DESCRIPTION
+    )
     app.state.services = AppServices(
         pipeline=pipeline, traces=traces, conversations=conversations,
         authenticate=authenticate, artifact_root=artifact_root,

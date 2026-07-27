@@ -17,7 +17,7 @@ from agent_flow.contracts import InboundMessage
 from agent_flow.errors import AgentError
 
 
-router = APIRouter(prefix="/api/v1")
+router = APIRouter(prefix="/api/v1", tags=["Traces"])
 
 
 class ManualRetryRequest(BaseModel):
@@ -205,6 +205,11 @@ async def get_trace(
     request: Request,
     authenticated: AuthenticatedPrincipal = Depends(principal),
 ):
+    """One turn in full: every step, its decision, and how it ended.
+
+    The model's raw reasoning is stripped unless the token carries
+    `trace:internal`.
+    """
     trace = await _scoped_trace(request, trace_id, authenticated)
     payload = _public_values(trace)
     payload["spans"] = [_public_values(item) for item in trace.spans]
@@ -228,6 +233,11 @@ async def incremental_events(
     after_sequence: Annotated[int, Query(ge=0)] = 0,
     authenticated: AuthenticatedPrincipal = Depends(principal),
 ):
+    """Events recorded since `after_sequence`, for following a live turn.
+
+    `sequence` is monotonic per trace: pass back the highest one you have seen
+    and you get only what is new.
+    """
     trace = await _scoped_trace(request, trace_id, authenticated)
     events = await services(request).traces.events_after(
         trace.id, tenant_id=authenticated.tenant_id,
@@ -273,6 +283,10 @@ async def manual_retry(
     request: Request,
     authenticated: AuthenticatedPrincipal = Depends(principal),
 ):
+    """Run a finished turn again, as a new trace linked to the original.
+
+    A running turn is a 409, and a lineage stops after three retries.
+    """
     require_scope(authenticated, "trace:retry")
     trace = await _scoped_trace(request, trace_id, authenticated)
     if trace.status == "running" or trace.finished_at is None:
