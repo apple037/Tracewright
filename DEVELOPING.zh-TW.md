@@ -23,14 +23,20 @@ uv run --frozen uvicorn --factory agent_flow.runtime:create_runtime_app --reload
 uv run --frozen python -m agent_flow.worker --run         # 第二個終端
 ```
 
-`KNOWLEDGE_BASE_URL` 很重要，因為 Demo 的知識庫是 app 自己提供的：在 Compose
-上是 `http://app:8080/mock-kb`，在本機是 8000 port。設錯的話，檢索會**安靜地**
-什麼都查不到。本機 Console 在 `http://localhost:8000/console/`。
+別漏掉 `KNOWLEDGE_BASE_URL`：Demo 的知識庫由 app 自己提供，位址在 Compose 上是
+`http://app:8080/mock-kb`，在本機則是 8000 port。設錯不會有錯誤訊息，只會讓每
+一次檢索都查不到東西，看起來像模型變笨了。本機 Console 在
+`http://localhost:8000/console/`。
 
-**沒人告訴你就會浪費一小時的一件事：** `src/` 是烤進 image 的，`config/` 是
-bind-mount。所以改程式碼要 `docker compose up -d --build app worker`，改設定只
-要 `docker compose restart app worker`——而 artifact 在啟動時載入，所以改設定
-確實需要那個 restart。
+**該重建還是該重啟——弄錯的話，你會花一小時去除錯一個根本沒進到 container 的
+修改。** `src/` 是打包進 image 的，`config/` 是 bind-mount：
+
+| 你改了 | 執行 |
+|---|---|
+| `src/` 底下任何東西 | `docker compose up -d --build app worker` |
+| `config/` 底下任何東西 | `docker compose restart app worker` |
+
+改設定仍然需要那個 restart：artifact 只在啟動時載入一次。
 
 `DATABASE_URL`（必須是 container 主機名稱 `postgres`）與
 `APP_RUNTIME_MODE=demo` 由 `compose.yaml` 掌握。在 `.env` 設這兩個值只會影響
@@ -55,10 +61,10 @@ bind-mount。所以改程式碼要 `docker compose up -d --build app worker`，�
 uv run pytest tests/unit tests/contract -q      # 約 300 個測試，不需要任何服務
 ```
 
-`uv run pytest` 不帶參數會嘗試跑全部六個，在沒有 Postgres 和模型服務的機器上
-一定會失敗。那不是 checkout 壞掉。
+`uv run pytest` 不帶參數會收集全部六個目錄，在沒有 Postgres 和模型服務的機器上
+一定會紅。看到那種紅字，先確認自己跑的範圍，不要以為 checkout 壞了。
 
-**新增 browser 測試時，請使用 `authenticate()` helper，不要自己重寫一份。**
+**新增 browser 測試時一律用 `authenticate()` helper，不要自己重寫一份。**
 登入會還原對話、載入 trace，然後把游標放進輸入框——這些發生在點擊回傳之後好幾
 個 await。測試如果在這之前就開始操作頁面，focus 會在中途被搶走。Helper 會等
 輸入框取得 focus，那是 app 自己「登入已穩定」的訊號；跳過這個等待，正是先前
@@ -73,8 +79,8 @@ POST /api/v1/submissions
              └─ console 輪詢 /submissions/{id} 直到終態
 ```
 
-兩個程序、一個資料庫、沒有 message broker。**這件事對程式碼的影響大於其他任何
-決定**——見下面的「兩個程序，一個資料庫」。
+兩個程序、一個資料庫、沒有 message broker。**這個決定對程式碼的影響大於其他
+任何一項**——見下面的「兩個程序，一個資料庫」。
 
 Pipeline 在 `src/agent_flow/pipeline/turn.py`，那是第一個該讀的檔案。它依序
 呼叫：`classify` → `risk` → `evidence`（規劃、取得、驗證）→ `respond`（策略、
@@ -121,8 +127,8 @@ Tune 面板在 `app` 寫入 prompt override，`worker` 卻抱著開機時載入�
 出現過的來源——所以「有什麼」由知識庫決定，上面那條不變式依然成立。
 
 `api/mock_kb.py` 是替代品，用同一個介面提供已提交的 Demo 語料，所以 Demo 不需
-要任何外部服務。它是假的，不是功能：把 `KNOWLEDGE_BASE_URL` 指向真的知識庫，
-然後刪掉那個 router。
+要任何外部服務。它是替身，不是產品功能：要接真的知識庫，把
+`KNOWLEDGE_BASE_URL` 指過去，然後刪掉那個 router。
 
 知識庫不該持有的東西——綁定單一客戶的文件、tuner 從 Console 編輯的項目——留在
 本地 `fixture` 來源。過期與客戶範圍屬於語料擁有者的責任，所以 mock 兩者都實作
@@ -150,8 +156,8 @@ contract 加到 `pipeline/model_outputs.py`。節點就是接受型別化輸入�
 ## 值得保留的慣例
 
 - **每一個模型輸出都是 Pydantic contract**（`contracts.py`、
-  `pipeline/model_outputs.py`）。不讓鬆散的 dict 跨越節點邊界。小模型回傳垃圾
-  的頻率高到讓這件事是承重的。
+  `pipeline/model_outputs.py`）。不讓鬆散的 dict 跨越節點邊界。小模型回傳無效
+  內容的頻率夠高，這層檢查是承重結構，不要為了省事拆掉。
 - **錯誤以安全代碼呈現，絕不外露內部細節。** `WORKER_LEASE_EXPIRED`、
   `TOOL_TIMEOUT`、`MODEL_CAPABILITY_FAILED`。Readiness 的輸出絕不能帶模型輸出
   或例外內容——上游 URL 的 query string 裡可能藏著金鑰。
@@ -164,13 +170,13 @@ contract 加到 `pipeline/model_outputs.py`。節點就是接受型別化輸入�
 
 ## 刻意沒做的東西
 
-不是遺漏，是決定。要重開這些議題，請睜大眼睛。
+這些不是遺漏，是決定。要推翻其中任何一項之前，先讀完右欄的理由。
 
 | 沒做 | 為什麼 |
 |---|---|
 | 用 SSE 或 WebSocket 推 trace | Console 是除錯工具，輪詢沒有造成可量測的傷害，而且 `EventSource` 無法送 `Authorization` header——那會需要一個 ticket 端點。 |
 | Message broker | Job queue 就是一張 Postgres 表。少跑一個服務，而且 trace 存在同一個資料庫。 |
-| 真正的驗證機制 | 兩組靜態 Demo Token。`APP_RUNTIME_MODE=production` 會拒絕它們，那就是把這件事做對的掛勾點。 |
+| 真正的驗證機制 | 兩組靜態 Demo Token。`APP_RUNTIME_MODE=production` 會拒絕它們，要正式實作驗證就從那裡接上去。 |
 | 用 API 改模型設定 | 它帶有 endpoint URL 並選擇憑證；不該讓一組 admin token 就能把模型角色指向它自己選的伺服器。 |
 | 對客戶原句做語意 RAG | 檢索被刻意限制在 catalog 的 source id——見上面的不變式。要改這個，得先回答「分類器要如何才不會發明文件」。 |
 | Embedding／pgvector 檢索 | 接好但停用：Demo 從 fixture 回答，而且程式碼預期 1024 維。 |
@@ -193,8 +199,8 @@ contract 加到 `pipeline/model_outputs.py`。節點就是接受型別化輸入�
 `/docs` 是完整的互動式文件，有 Authorize 按鈕。
 
 **記憶**以 `session_id` 為單位、標註角色，並限制在 `HISTORY_TURNS`（預設 8）
-輪。不設上限的歷史曾經超過分類器的 100 則訊息上限，直接讓整個回合失敗。轉人工
-的回合也會保留，所以客戶在轉人工之後換句話問，不會從零開始。
+輪。這個上限是必要的：曾經因為不限制長度，超過分類器 100 則訊息的上限，整個
+回合直接失敗。轉人工的回合也會保留，所以客戶轉人工後換句話再問，不會從零開始。
 
 **失敗以安全代碼呈現**，絕不外露內部細節：租約逾時會以
 `WORKER_LEASE_EXPIRED` 結束 trace 並保留一個重試 trace；工具逾時則是元件
@@ -229,5 +235,5 @@ operation → error code → retry disposition`。
 4. `pipeline/validate.py` — 什麼擋下了錯誤答案
 5. `runtime.py` — 真實物件如何被接起來
 
-然後在 Console 挑一份 trace，跟著它走過這五個檔案。那是把整個系統裝進腦袋最快
-的方法。
+讀完之後，在 Console 挑一份 trace，跟著它走過這五個檔案一次。那是建立全貌最快
+的方式。

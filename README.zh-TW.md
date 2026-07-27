@@ -9,7 +9,7 @@ Tracewright 把一則客戶訊息交給一連串小型 AI 步驟處理（理解�
 發生**。模型沒把握、或訊息看起來有風險時，它會轉交人工，而不是猜。
 
 專案名字裡的重點就是 **trace**：每則訊息都會留下一份可點開的完整紀錄，讓你
-知道 AI 為什麼這樣回答——那通常是 AI 產品裡最可怕的黑箱。
+知道 AI 為什麼這樣回答——那通常是 AI 產品裡最難交代的一段。
 
 > ⚠️ **這是 Demo，不是正式系統。** 使用小型開源模型與兩組靜態 Demo Token。
 > 適合展示、學習與後續開發，不適合無人監督地面對真實客戶。見
@@ -52,15 +52,17 @@ Tracewright 把一則客戶訊息交給一連串小型 AI 步驟處理（理解�
 
 ## 快速啟動
 
-需要 **Docker Desktop**，以及一個 OpenAI-compatible 模型服務（Ollama、vLLM
-等），且該服務已載入 `MODEL_CONFIG_PATH` 指向的檔案所指定的模型（目前 Demo
-設定是 `qwen3.6:27b`）。
+開始之前，先確認 **Docker Desktop** 已啟動，而且有一個 OpenAI-compatible 模型
+服務（Ollama、vLLM 等）已經載入 `MODEL_CONFIG_PATH` 指向的檔案所指定的模型
+（目前 Demo 設定是 `qwen3.6:27b`）。
+
+**1. 執行腳本。** 第一次會把 `.env.example` 複製成 `.env`，然後停下來：
 
 ```bash
 ./run.sh
 ```
 
-第一次執行會把 `.env.example` 複製成 `.env` 然後停下來。填三個值：
+**2. 在 `.env` 填三個值：**
 
 ```dotenv
 REMOTE_MODEL_BASE_URL=http://host.docker.internal:11434/v1
@@ -69,21 +71,29 @@ DEMO_ADMIN_TOKEN=另一組至少16字元的隨機字串
 ```
 
 模型跑在另一台機器時，把 `host.docker.internal` 換成該機器的 LAN 位址；模型
-服務需要驗證時再設 `REMOTE_MODEL_API_KEY`。**絕對不要提交 `.env`。**
+服務需要驗證時再加上 `REMOTE_MODEL_API_KEY`。**絕對不要提交 `.env`。**
 
-再執行一次 `./run.sh`：它會建置、啟動 PostgreSQL + API + Worker、跑 migration、
-載入 Demo 資料，並印出網址。打開 **http://localhost:8080/console/**，貼上
-**Admin** Token。
+**3. 再執行一次 `./run.sh`。** 它會建置 image、啟動 PostgreSQL + API + Worker、
+跑 migration、載入 Demo 資料，並印出網址。
+
+**4. 打開 http://localhost:8080/console/，貼上 *Admin* Token。** 送出
+`good morning`，你應該會收到回覆，右側 trace 會一步一步填滿。如果沒有動靜，
+先檢查相依服務：
 
 ```bash
-./run.sh logs     # 追蹤 API 與 Worker log
+curl http://localhost:8080/health/ready   # 檢查所有相依，含模型角色
+./run.sh logs                             # 追蹤 API 與 Worker log
+```
+
+日常操作：
+
+```bash
 ./run.sh stop     # 停止服務
 ./run.sh reset    # 停止服務，並永久刪除 Demo 資料庫
 make restart      # 重新載入 config/*.yaml 的修改
-curl http://localhost:8080/health/ready   # 檢查所有相依，含模型角色
 ```
 
-沒有 Bash 時，同樣的步驟手動做一次：
+沒有 Bash？把第 1、3 步手動做一次，其餘完全相同：
 
 ```powershell
 Copy-Item .env.example .env
@@ -92,11 +102,11 @@ docker compose up --build -d
 docker compose --profile demo run --rm demo-seed
 ```
 
-`down`、`down -v`、`restart app worker` 分別對應上面的 stop、reset 與
+`docker compose down`、`down -v`、`restart app worker` 分別取代 stop、reset 與
 `make restart`。
 
 > ⏳ 回覆需要真實時間——單張 GPU 跑 27B 模型時，一則訊息大約 30 到 90 秒，因為
-> 一個回合會呼叫模型好幾次。看著步驟一格一格長出來。
+> 一個回合會呼叫模型好幾次。等待時看右側的步驟逐一完成，不要重送訊息。
 
 不使用 Docker 直接在本機跑：見 [DEVELOPING.md](DEVELOPING.md)。
 
@@ -259,6 +269,6 @@ HTML/CSS/JS，不需要建置。
 
 ## 授權
 
-**[MIT](LICENSE)。** 隨意使用、fork、往上蓋。
+**[MIT](LICENSE)。** 可自由使用、fork，並在上面繼續開發。
 
 目前是 bootstrap demo runtime——用在任何真實場景之前，請先驗證與強化。

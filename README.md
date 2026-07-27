@@ -56,15 +56,18 @@ handoff is the designed outcome when they can't — not a failure.
 
 ## Quick start
 
-You need **Docker Desktop**, and an OpenAI-compatible model server (Ollama, vLLM,
-…) already serving the model named in the file `MODEL_CONFIG_PATH` points at
-(the committed demo expects `qwen3.6:27b`).
+Before you start, have **Docker Desktop** running, and an OpenAI-compatible model
+server (Ollama, vLLM, …) already serving the model named in the file
+`MODEL_CONFIG_PATH` points at — the committed demo expects `qwen3.6:27b`.
+
+**1. Run the script.** It stops on the first run, after copying `.env.example`
+to `.env`:
 
 ```bash
 ./run.sh
 ```
 
-The first run copies `.env.example` to `.env` and stops. Fill in three values:
+**2. Fill in three values in `.env`:**
 
 ```dotenv
 REMOTE_MODEL_BASE_URL=http://host.docker.internal:11434/v1
@@ -72,23 +75,31 @@ DEMO_CUSTOMER_TOKEN=any-random-string-at-least-16-characters
 DEMO_ADMIN_TOKEN=another-random-string-at-least-16-characters
 ```
 
-Use the model server's LAN address instead of `host.docker.internal` if it runs
-on another machine, and set `REMOTE_MODEL_API_KEY` if it needs one. **Never
+If the model server runs on another machine, use its LAN address instead of
+`host.docker.internal`; add `REMOTE_MODEL_API_KEY` if it needs one. **Never
 commit `.env`.**
 
-Run `./run.sh` again: it builds, starts PostgreSQL + API + worker, migrates,
-seeds demo data, and prints the URL. Open
-**http://localhost:8080/console/** and paste the **admin** token.
+**3. Run `./run.sh` again.** It builds the images, starts PostgreSQL + API +
+worker, migrates, seeds demo data, and prints the URL.
+
+**4. Open http://localhost:8080/console/ and paste the *admin* token.** Send
+`good morning`. You should get a reply and a trace that fills in step by step.
+If nothing happens, check the dependencies first:
 
 ```bash
-./run.sh logs     # follow API and worker logs
+curl http://localhost:8080/health/ready   # every dependency, including model roles
+./run.sh logs                             # follow API and worker logs
+```
+
+Day to day:
+
+```bash
 ./run.sh stop     # stop the services
 ./run.sh reset    # stop AND permanently delete the demo database
 make restart      # reload edits under config/*.yaml
-curl http://localhost:8080/health/ready   # every dependency, including model roles
 ```
 
-Without Bash, run the same steps by hand:
+No Bash? Do steps 1 and 3 by hand — everything else is the same:
 
 ```powershell
 Copy-Item .env.example .env
@@ -97,8 +108,8 @@ docker compose up --build -d
 docker compose --profile demo run --rm demo-seed
 ```
 
-`down`, `down -v` and `restart app worker` are the compose equivalents of stop,
-reset and `make restart`.
+`docker compose down`, `down -v` and `restart app worker` replace stop, reset and
+`make restart`.
 
 > ⏳ Replies take real time — a 27B model on one GPU is roughly 30–90 seconds per
 > message, because a turn makes several model calls. Watch the steps fill in.

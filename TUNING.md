@@ -61,12 +61,11 @@ The `source_id` is a label. Group related ones with a prefix — `policy:`,
 `groupbuy:`, `account:` — because it is what you will scan when the corpus
 grows, and it is what appears in the citation.
 
-**Splitting documents matters more than you would think.** If one document
-holds a price list and a customer asks about flavour, the assistant has to
-either say it does not know or hand you back the prices under the wrong
-heading. The demo has `groupbuy:coffee-2026-08` and a separate
-`groupbuy:coffee-2026-08:notes` for exactly this reason. **One question, one
-document.**
+**Split your documents.** If one document holds a price list and a customer asks
+about flavour, the assistant can only say it does not know, or answer with the
+prices — the one thing that document has. The demo keeps
+`groupbuy:coffee-2026-08` and `groupbuy:coffee-2026-08:notes` apart for exactly
+this reason. **One question, one document.**
 
 **Two things you can only do in the file** (`config/demo/*.json`):
 

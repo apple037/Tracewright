@@ -28,11 +28,16 @@ itself: on Compose that is `http://app:8080/mock-kb`, on the host it is port
 8000. Get it wrong and retrieval silently returns nothing. The console is then at
 `http://localhost:8000/console/`.
 
-**One thing that will waste an hour if nobody tells you:** `src/` is baked into
-the image, `config/` is bind-mounted. So a code change needs
-`docker compose up -d --build app worker`, but a config change only needs
-`docker compose restart app worker` — and artifacts load at startup, so a config
-change does need that restart.
+**Rebuild or restart — get this wrong and you will spend an hour debugging a
+change that never reached the container.** `src/` is baked into the image,
+`config/` is bind-mounted:
+
+| You changed | Run |
+|---|---|
+| anything under `src/` | `docker compose up -d --build app worker` |
+| anything under `config/` | `docker compose restart app worker` |
+
+A config change still needs that restart: artifacts are loaded once, at startup.
 
 `compose.yaml` owns `DATABASE_URL` (it must be the container hostname
 `postgres`) and pins `APP_RUNTIME_MODE=demo`. Setting those in `.env` affects
