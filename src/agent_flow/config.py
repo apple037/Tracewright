@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     demo_admin_token: SecretStr = SecretStr("demo-admin-token-change-me")
     demo_tenant_id: str = "t1"
     demo_customer_id: str = "c1"
+    # Every knowledge source, in one file. demo_rag_fixture is the fallback for
+    # a checkout without it.
+    knowledge_config_path: Path = Path("config/knowledge.yaml")
     demo_rag_fixture: Path = Path("config/demo/rag.json")
     demo_tool_fixture: Path = Path("config/demo/tools.json")
     legacy_turn_timeout_seconds: float = Field(default=60.0, gt=0, le=300)

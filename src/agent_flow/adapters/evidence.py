@@ -125,14 +125,21 @@ class MockRagClient:
     ) -> RagSearchResult:
         _require_context(context)
         started = time.monotonic()
-        eligible = (
+        eligible = [
             record
             for record in self._records
             if record.tenant_id == context.tenant_id
             and record.customer_id in (None, context.customer_id)
             and (record.effective_at is None or record.effective_at <= self._as_of)
             and (record.valid_until is None or record.valid_until > self._as_of)
-        )
+        ]
+        # The pipeline queries by a source_id taken from catalog(), so an exact
+        # hit is the whole answer. Without this a second document would ride
+        # along on every retrieval and the generator could cite the wrong one.
+        # There is no embedding here, so anything else still returns the corpus.
+        named = [record for record in eligible if record.source_id == request.query]
+        if named:
+            eligible = named
         ordered = sorted(
             eligible,
             key=lambda record: (
@@ -151,6 +158,10 @@ class MockRagClient:
                 status="completed",
             )
         return RagSearchResult(items=items)
+
+    @property
+    def source_ids(self) -> frozenset[str]:
+        return frozenset(record.source_id for record in self._records)
 
     def catalog(self) -> tuple[str, ...]:
         """Brief 'source_id: snippet' lines describing what the corpus owns.

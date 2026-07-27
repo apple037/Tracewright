@@ -5,5 +5,19 @@
     "tool": "order.lookup",
     "arguments": {"order_id": "order-1"},
     "result": {"status": "in_transit"}
+  },
+  {
+    "tenant_id": "t1",
+    "customer_id": "c1",
+    "tool": "order.lookup",
+    "arguments": {"order_id": "order-2"},
+    "result": {"status": "delivered", "delivered_on": "2026-07-20"}
+  },
+  {
+    "tenant_id": "t1",
+    "customer_id": "c1",
+    "tool": "order.lookup",
+    "arguments": {"order_id": "order-3"},
+    "result": {"status": "preparing", "ships_on": "2026-07-29"}
   }
 ]

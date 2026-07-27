@@ -1,0 +1,27 @@
+# WHERE THE AI'S KNOWLEDGE COMES FROM.
+#
+# Every entry is one knowledge source. The pipeline searches them together and
+# each answer cites the source it actually came from, so adding knowledge means
+# adding a source here — no Python.
+#
+#   name    - your label; also what shows up in logs
+#   type    - how to read it (see below)
+#   path    - for type: fixture, a JSON file of records
+#   enabled - false parks a source without deleting it
+#
+# Types available today:
+#   fixture - a JSON file in this repo. Each record needs tenant_id, source_id,
+#             version and content; customer_id restricts a record to one
+#             customer, valid_until expires it.
+#
+# To add another kind of source (a live vector DB, an HTTP search service),
+# register it in src/agent_flow/adapters/knowledge.py — `_BUILDERS` maps a type
+# name to the thing that builds it. The pipeline does not change.
+
+sources:
+  policies:
+    type: fixture
+    path: config/demo/rag.json
+  groupbuy:
+    type: fixture
+    path: config/demo/groupbuy.json

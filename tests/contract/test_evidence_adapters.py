@@ -140,6 +140,40 @@ async def test_tool_requires_authorized_context(mock_tool):
         )
 
 
+@pytest.mark.asyncio
+async def test_rag_returns_only_the_named_source_when_the_corpus_has_several(
+    authorized_context,
+):
+    # The classifier picks a source_id out of catalog(); a corpus holding both
+    # the refund and the shipping policy must not answer one with the other.
+    client = MockRagClient.from_fixture("config/demo/rag.json")
+
+    result = await client.search(
+        authorized_context, RagSearchRequest(query="policy:shipping", limit=5)
+    )
+
+    assert [item.source_id for item in result.items] == ["policy:shipping"]
+
+
+@pytest.mark.asyncio
+async def test_demo_orders_cover_more_than_one_status(authorized_context):
+    tools = MockToolClient.from_fixture("config/demo/tools.json")
+
+    statuses = {}
+    for order_id in ("order-1", "order-2", "order-3"):
+        result = await tools.call(
+            authorized_context,
+            ToolCallRequest(tool="order.lookup", arguments={"order_id": order_id}),
+        )
+        statuses[order_id] = json.loads(result.evidence.content)["status"]
+
+    assert statuses == {
+        "order-1": "in_transit",
+        "order-2": "delivered",
+        "order-3": "preparing",
+    }
+
+
 def test_fixtures_are_committed_utf8_json():
     rag = json.loads(Path("tests/fixtures/rag.json").read_text(encoding="utf-8"))
     tools = json.loads(Path("tests/fixtures/tools.json").read_text(encoding="utf-8"))

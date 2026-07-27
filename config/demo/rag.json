@@ -5,5 +5,12 @@
     "version": "v1",
     "content": "Refunds are processed within 7 business days of an approved return.",
     "score": 1.0
+  },
+  {
+    "tenant_id": "t1",
+    "source_id": "policy:shipping",
+    "version": "v1",
+    "content": "Standard shipping takes 3-5 business days. Orders placed after 15:00 ship the next business day. Shipping is free over NT$1,200.",
+    "score": 1.0
   }
 ]

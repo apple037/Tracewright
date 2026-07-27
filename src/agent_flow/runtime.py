@@ -8,6 +8,7 @@ from pathlib import Path
 from fastapi import FastAPI
 
 from agent_flow.adapters.evidence import MockRagClient, MockToolClient
+from agent_flow.adapters.knowledge import KnowledgeSources
 from agent_flow.adapters.models import ModelGateway
 from agent_flow.api.dependencies import AppServices, Authenticator, ReadinessCheck
 from agent_flow.api.config import router as config_router
@@ -66,7 +67,15 @@ async def build_demo_components(
     traces = PostgresTraceRepository(pool)
     telemetry = OperationTelemetry(traces)
     models = ModelGateway(registry, telemetry=telemetry, timeout=90.0)
-    rag = MockRagClient.from_fixture(settings.demo_rag_fixture, telemetry=telemetry)
+    rag = (
+        KnowledgeSources.from_config(
+            settings.knowledge_config_path, telemetry=telemetry
+        )
+        if settings.knowledge_config_path.exists()
+        else MockRagClient.from_fixture(
+            settings.demo_rag_fixture, telemetry=telemetry
+        )
+    )
     tools = MockToolClient.from_fixture(settings.demo_tool_fixture, telemetry=telemetry)
     conversations = PostgresConversationRepository(
         pool, history_turns=settings.history_turns

@@ -4,7 +4,8 @@ import httpx
 import pytest
 
 from agent_flow.auth import AuthenticatedPrincipal, DemoTokenAuthenticator
-from agent_flow.adapters.evidence import MockRagClient, MockToolClient
+from agent_flow.adapters.evidence import MockToolClient
+from agent_flow.adapters.knowledge import KnowledgeSources
 from agent_flow.config import Settings
 from agent_flow.pipeline.turn import TurnPipeline
 from agent_flow.runtime import build_demo_components, create_runtime_app
@@ -110,7 +111,9 @@ async def test_runtime_builds_real_pipeline_and_mock_evidence_adapters(
         settings, opened_pool, inventory_probe=fake_inventory_probe
     )
     assert isinstance(components.pipeline, TurnPipeline)
-    assert isinstance(components.pipeline.rag, MockRagClient)
+    # Knowledge comes from config/knowledge.yaml, which is a set of sources
+    # rather than one fixture file.
+    assert isinstance(components.pipeline.rag, KnowledgeSources)
     assert isinstance(components.pipeline.tools, MockToolClient)
     # The model name is operator config; assert the role resolves through the
     # configured profile rather than pinning whichever model is in the file.
