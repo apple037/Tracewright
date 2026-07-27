@@ -89,6 +89,25 @@ const STRINGS = {
   "tune.off": { "zh-TW": "已停用", "en-US": "Disabled" },
   "tune.noDocuments": { "zh-TW": "尚無內容。", "en-US": "No documents yet." },
   "tune.noKnowledge": { "zh-TW": "這個執行環境沒有可編輯的知識來源。", "en-US": "This runtime has no editable knowledge source." },
+  "tune.memory": {
+    "zh-TW": "對話記憶（助理下一則訊息會看到的內容）",
+    "en-US": "Memory (what the assistant sees on its next message)",
+  },
+  "tune.memoryCounts": {
+    "zh-TW": "這個對話存了 {stored} 組往來，其中 {window} 組在視窗內（HISTORY_TURNS={turns}）。",
+    "en-US": "This chat has {stored} exchanges stored, {window} of them in the window (HISTORY_TURNS={turns}).",
+  },
+  "tune.role.customer": { "zh-TW": "客戶", "en-US": "Customer" },
+  "tune.role.assistant": { "zh-TW": "助理", "en-US": "Assistant" },
+  "tune.memoryEmpty": { "zh-TW": "這個對話還沒有記憶。", "en-US": "Nothing remembered in this chat yet." },
+  "tune.memoryNoChat": { "zh-TW": "還沒有選擇對話。", "en-US": "No chat selected yet." },
+  "tune.memoryUnavailable": { "zh-TW": "無法讀取這個對話的記憶。", "en-US": "Could not read this chat's memory." },
+  "tune.memoryReset": { "zh-TW": "清除這個對話的記憶", "en-US": "Forget this chat" },
+  "tune.memoryResetConfirm": {
+    "zh-TW": "這會清掉這個對話的記憶與紀錄，且無法復原。Trace 會保留。要繼續嗎？",
+    "en-US": "This clears this chat's memory and transcript and cannot be undone. Traces are kept. Continue?",
+  },
+  "tune.memoryResetFailed": { "zh-TW": "清除失敗。", "en-US": "Could not reset the memory." },
   "tune.hint": {
     "zh-TW": "在這裡的修改會立即生效，但不會寫回設定檔；要永久保留請編輯 config/ 底下的 YAML。",
     "en-US": "Changes here take effect immediately but are not written back to the config files. To make one permanent, edit the YAML under config/.",

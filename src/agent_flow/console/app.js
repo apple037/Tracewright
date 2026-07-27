@@ -362,6 +362,10 @@ function init() {
     dialog: dom["tune-dialog"],
     body: dom["tune-body"],
     onError: (message) => showAlert(message),
+    // Memory is per chat, and the panel is opened over whichever one is on
+    // screen. Read it when the panel opens, not when it is built.
+    sessionId: () => chatroom.sessionId(),
+    onMemoryReset: () => chatroom.restore(),
   });
   renderWorkspace(dom["workspace-body"], state, onToggleNode);
   dom["token-form"].addEventListener("submit", onTokenSubmit);

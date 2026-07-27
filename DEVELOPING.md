@@ -193,7 +193,10 @@ functions taking typed inputs; there is no plugin system and deliberately so.
 
 ## Things deliberately not built
 
-Not omissions — decisions. Reopen them with your eyes open.
+Not omissions — decisions. Reopen them with your eyes open. Where the approved
+design in `docs/superpowers/specs/` says something the code no longer does,
+[docs/decisions.md](docs/decisions.md) records which won and why; trust the spec
+everywhere else.
 
 | Not built | Why |
 |---|---|

@@ -57,6 +57,13 @@ class DemoTokenAuthenticator:
         tenant_id: str,
         customer_id: str,
     ) -> None:
+        if hmac.compare_digest(customer_token, admin_token):
+            # __call__ checks the customer token first, so identical values
+            # authenticate an admin as the customer: the Tune panel and the
+            # reasoning in traces disappear, with nothing to say why.
+            raise RuntimeError(
+                "DEMO_CUSTOMER_TOKEN and DEMO_ADMIN_TOKEN must differ"
+            )
         self._customer_token = customer_token
         self._admin_token = admin_token
         self._customer = AuthenticatedPrincipal(

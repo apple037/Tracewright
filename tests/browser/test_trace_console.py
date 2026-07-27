@@ -304,12 +304,33 @@ KNOWLEDGE = {
 }
 
 
-def _open_tune(page, console_url, on_put=None):
+MEMORY = {
+    "session_id": "console-1",
+    "history_turns": 2,
+    "exchanges": {"stored": 5, "in_window": 2},
+    "messages": [
+        {"role": "customer", "text": "where is my order order-1?"},
+        {"role": "assistant", "text": "It is in transit."},
+        {"role": "customer", "text": "is it still on the way?"},
+        {"role": "assistant", "text": "Yes, order-1 is still in transit."},
+    ],
+}
+
+
+def _open_tune(page, console_url, on_put=None, on_memory=None):
     install_api_fixture(page, scenario="empty")
     _get_route(page, "**/api/v1/config", CONFIG)
     _get_route(page, "**/api/v1/config/knowledge", KNOWLEDGE)
+    page.route("**/api/v1/sessions/*/memory", on_memory or (
+        lambda route: _fulfill(route, MEMORY)
+    ))
     if on_put is not None:
         page.route("**/api/v1/config/knowledge/*/*", on_put)
+    # Memory belongs to a chat, and the panel reads whichever one is open. A
+    # fresh browser has none, so seed the id the console persists.
+    page.add_init_script(
+        "window.localStorage.setItem('tracewright.session', 'console-1')"
+    )
     page.goto(console_url)
     authenticate(page)
     page.get_by_role("button", name="Tune").click()
@@ -342,6 +363,42 @@ def test_adding_a_document_sends_its_id_and_content(page, console_url):
     expect(page.get_by_text("groupbuy:coffee-2026-08")).to_be_visible()
     assert sent["url"].endswith("/api/v1/config/knowledge/groupbuy/groupbuy%3Atea")
     assert json.loads(sent["body"])["content"] == "九月茶葉團購：烏龍 NT$500。"
+
+
+def test_tune_shows_the_memory_window_and_what_falls_outside_it(page, console_url):
+    _open_tune(page, console_url)
+
+    # The two counts side by side are the point: five stored, two reachable.
+    expect(
+        page.get_by_text("5 exchanges stored, 2 of them in the window", exact=False)
+    ).to_be_visible()
+    expect(page.get_by_text("is it still on the way?")).to_be_visible()
+
+
+def test_forgetting_a_chat_asks_first_and_then_deletes(page, console_url):
+    calls = []
+
+    def memory(route):
+        calls.append(route.request.method)
+        if route.request.method == "DELETE":
+            _fulfill(route, {"session_id": "console-1", "exchanges_forgotten": 5})
+        else:
+            _fulfill(route, MEMORY if len(calls) == 1 else {
+                "session_id": "console-1", "history_turns": 2,
+                "exchanges": {"stored": 0, "in_window": 0}, "messages": [],
+            })
+
+    _open_tune(page, console_url, on_memory=memory)
+    # Irreversible, so a dismissed confirm must not delete anything.
+    page.once("dialog", lambda dialog: dialog.dismiss())
+    page.get_by_role("button", name="Forget this chat").click()
+    expect(page.get_by_text("is it still on the way?")).to_be_visible()
+    assert "DELETE" not in calls
+
+    page.once("dialog", lambda dialog: dialog.accept())
+    page.get_by_role("button", name="Forget this chat").click()
+    expect(page.get_by_text("Nothing remembered in this chat yet.")).to_be_visible()
+    assert "DELETE" in calls
 
 
 RUNNING_DETAIL = {

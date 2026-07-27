@@ -179,7 +179,10 @@ contract 加到 `pipeline/model_outputs.py`。節點就是接受型別化輸入�
 
 ## 刻意沒做的東西
 
-這些不是遺漏，是決定。要推翻其中任何一項之前，先讀完右欄的理由。
+這些不是遺漏，是決定。要推翻其中任何一項之前，先讀完右欄的理由。當
+`docs/superpowers/specs/` 裡已核准的設計與現在的程式碼不一致時，
+[docs/decisions.md](docs/decisions.md) 記錄了哪一邊勝出與原因；其餘部分仍以
+spec 為準。
 
 | 沒做 | 為什麼 |
 |---|---|

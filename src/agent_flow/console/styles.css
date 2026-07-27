@@ -657,6 +657,11 @@ dialog menu {
   color: var(--text-dim);
 }
 
+/* Deleting a chat's memory is not undoable, so the control does not look like
+   the save and revert buttons next to it. */
+.ghost-button.is-danger { color: var(--fail); border-color: var(--fail-soft); }
+.ghost-button.is-danger:hover { border-color: var(--fail); }
+
 .tune-section { margin-bottom: 1.4rem; }
 
 .tune-section > h3 {

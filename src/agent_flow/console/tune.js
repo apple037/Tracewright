@@ -211,7 +211,53 @@ function settingsList(settings) {
   return list;
 }
 
-export function createTunePanel({ dialog, body, onError }) {
+// What the assistant will actually be given of this chat on the next message —
+// the windowed slice, not the whole transcript. The gap between the two counts
+// is the answer to "why did it forget that".
+function memorySection(memory, onReset) {
+  const children = [];
+  const { stored = 0, in_window: inWindow = 0 } = memory.exchanges || {};
+  children.push(
+    el("p", {
+      class: "tune-hint",
+      text: t("tune.memoryCounts")
+        .replace("{stored}", stored)
+        .replace("{window}", inWindow)
+        .replace("{turns}", memory.history_turns),
+    })
+  );
+
+  const scroll = el("div", { class: "tune-scroll" });
+  if (!(memory.messages || []).length) {
+    scroll.appendChild(el("p", { class: "tune-hint", text: t("tune.memoryEmpty") }));
+  } else {
+    const table = el("table", { class: "tune-table" });
+    for (const message of memory.messages) {
+      const row = el("tr");
+      row.appendChild(el("th", { text: t(`tune.role.${message.role}`) }));
+      row.appendChild(el("td", { text: message.text }));
+      table.appendChild(row);
+    }
+    scroll.appendChild(table);
+  }
+  children.push(scroll);
+
+  const reset = el("button", {
+    class: "ghost-button is-danger",
+    type: "button",
+    text: t("tune.memoryReset"),
+  });
+  // Irreversible, and it takes the visible transcript with it.
+  reset.addEventListener("click", () => {
+    if (window.confirm(t("tune.memoryResetConfirm"))) onReset();
+  });
+  children.push(reset);
+  return children;
+}
+
+export function createTunePanel({
+  dialog, body, onError, sessionId = () => null, onMemoryReset = () => {},
+}) {
   async function open() {
     dialog.showModal();
     body.textContent = "";
@@ -224,7 +270,42 @@ export function createTunePanel({ dialog, body, onError }) {
       return;
     }
     render(config);
-    await refreshKnowledge();
+    await Promise.all([refreshKnowledge(), refreshMemory()]);
+  }
+
+  const memoryBody = el("div");
+
+  async function refreshMemory() {
+    memoryBody.textContent = "";
+    const session = sessionId();
+    if (!session) {
+      memoryBody.appendChild(
+        el("p", { class: "tune-hint", text: t("tune.memoryNoChat") })
+      );
+      return;
+    }
+    const path = `/api/v1/sessions/${encodeURIComponent(session)}/memory`;
+    const { ok, body: memory } = await requestJson(path);
+    if (!ok || !memory) {
+      memoryBody.appendChild(
+        el("p", { class: "tune-hint", text: t("tune.memoryUnavailable") })
+      );
+      return;
+    }
+    for (const child of memorySection(memory, () => resetMemory(path))) {
+      memoryBody.appendChild(child);
+    }
+  }
+
+  async function resetMemory(path) {
+    const { ok } = await requestJson(path, { method: "DELETE" });
+    if (!ok) {
+      onError(t("tune.memoryResetFailed"));
+      return;
+    }
+    await refreshMemory();
+    // The transcript reads the same rows, so the chat on screen is now stale.
+    await onMemoryReset();
   }
 
   // Its own container so adding or deleting a document can re-render just this
@@ -277,6 +358,7 @@ export function createTunePanel({ dialog, body, onError }) {
     )));
 
     body.appendChild(section("tune.knowledge", [knowledgeBody]));
+    body.appendChild(section("tune.memory", [memoryBody]));
     body.appendChild(section("tune.models", [modelsTable(config.models || {})]));
     body.appendChild(section("tune.settings", [settingsList(config.settings || {})]));
   }

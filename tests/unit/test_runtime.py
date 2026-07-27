@@ -91,6 +91,16 @@ async def test_demo_admin_can_submit_and_inspect_as_demo_customer(settings):
     )
 
 
+async def test_two_identical_demo_tokens_are_refused_at_startup(settings):
+    # Otherwise the customer token matches first and the admin silently becomes
+    # a customer: no Tune panel, no reasoning, no error. Fail loudly instead.
+    same = settings.model_copy(
+        update={"demo_admin_token": settings.demo_customer_token}
+    )
+    with pytest.raises(RuntimeError, match="must differ"):
+        DemoTokenAuthenticator.from_settings(same)
+
+
 async def test_production_mode_rejects_demo_tokens(settings):
     production = settings.model_copy(update={"app_runtime_mode": "production"})
     with pytest.raises(RuntimeError, match="demo authentication is disabled"):

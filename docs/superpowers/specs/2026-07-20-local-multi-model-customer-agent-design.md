@@ -240,7 +240,9 @@ Each verdict records language, judge role, resolved model profile and checksum, 
 Use three small, concrete concurrency mechanisms:
 
 1. **In-request async fan-out:** `asyncio.TaskGroup` runs independent RAG and read-only tool calls concurrently. Each child has its own timeout, retry policy, cancellation state, and span.
-2. **Interactive admission and semaphores:** one application in-flight limit and an `asyncio.Semaphore` per model profile bound concurrent calls. Semaphore acquisition has a timeout and exposes a waiting-count metric. Saturation returns HTTP 429 with `Retry-After`; the MVP does not implement a standalone interactive queue service or scheduling framework.
+2. **Interactive admission and semaphores:** one application in-flight limit and an `asyncio.Semaphore` per model profile bound concurrent calls. Semaphore acquisition has a timeout and exposes a waiting-count metric. The MVP does not implement a standalone interactive queue service or scheduling framework.
+
+   **Superseded as built.** This clause originally had saturation return HTTP 429 with `Retry-After`. Turn submission became asynchronous instead: `POST /api/v1/submissions` writes a job row and returns 202 immediately, and the worker is the only consumer of model capacity. There is no synchronous request left to reject, so the API implements neither 429 nor `Retry-After`, and back-pressure lives entirely in `CapacityGuard` (`adapters/models.py`) and the queue depth. Reintroducing a synchronous turn endpoint would bring the requirement back with it.
 3. **PostgreSQL durable jobs:** notification delivery, RAG ingestion/re-embedding, retention, and baseline evaluation run in background workers using `FOR UPDATE SKIP LOCKED`.
 
 Initial safe values are configuration defaults, not performance promises:
@@ -618,7 +620,7 @@ The root `README.md` must document:
 9. pgvector schema, migrations, embedding-dimension probe, ingestion, re-embedding, and backup/restore;
 10. mock data and demo frontend workflows;
 11. REST contracts, authentication, citations, trace lookup, and signed Webhook validation;
-12. async fan-out, admission/semaphore limits, HTTP 429, PostgreSQL jobs, and worker recovery;
+12. async fan-out, admission/semaphore limits, PostgreSQL jobs, and worker recovery (HTTP 429 superseded — see section 5.1);
 13. structured thinking/decision summaries, model/tool logs, precise failure locations, retention, and stdout log collection;
 14. the 60-item human-labeling workflow, dataset split, metrics, and locked-test rule;
 15. improvement candidates, append-only ledger, promotion tests, human approval, activation, and rollback;
@@ -638,7 +640,7 @@ The root `README.md` must document:
 - PostgreSQL integration tests for migrations, vector dimension, exact cosine search, retention, and outbox delivery.
 - Retention/security tests verify 30-day raw-turn deletion, 180-day structured-trace retention, tenant-scoped raw-text access/audit, and absence of full conversation text or secrets from stdout/events.
 - Pipeline E2E tests for success, low confidence, no RAG answer, tool timeout, malformed model JSON, generation failure, automatic retry exhaustion, one repair, fallback, handoff, and full-turn manual retry lineage.
-- Concurrency tests for admission saturation, HTTP 429/`Retry-After`, endpoint/profile semaphore limits, waiting-request cancellation, embedding batching, `SKIP LOCKED` worker claims, and idempotent job recovery.
+- Concurrency tests for admission saturation, endpoint/profile semaphore limits, waiting-request cancellation, embedding batching, `SKIP LOCKED` worker claims, and idempotent job recovery. The HTTP 429/`Retry-After` case is superseded — see section 5.1.
 - Failure injection at every node to verify the trace identifies the correct `failure_stage`, component, operation, and field/endpoint.
 - Opt-in live-model evaluation isolated from the ordinary suite.
 - Conversation-quality evaluation using adapted RULER scenarios plus grounding, citation, route, and handoff measures.
