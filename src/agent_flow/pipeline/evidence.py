@@ -82,7 +82,12 @@ def plan_evidence(
             if order_id:
                 break
             order_id = extract_order_reference(earlier)
-        order_id = order_id or "current"
+        if not order_id:
+            # No order was ever named. Asking the tool for the literal string
+            # "current" matches nothing, fails the source, and hands the turn to
+            # a human — for a message the assistant could simply answer by
+            # asking which order. Retrieve nothing instead.
+            return EvidencePlan()
         return EvidencePlan(
             required_facts=("order.current_status",),
             tool_calls=(

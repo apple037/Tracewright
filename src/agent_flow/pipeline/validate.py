@@ -17,6 +17,14 @@ class JudgeRequest(StrictModel):
     verified_evidence: ValidatedEvidence
 
 
+_PRICE = re.compile(r"(?:[$€£¥]\s*[\d,]+(?:\.\d+)?|\b(?:usd|ntd|twd)\s*[\d,]+(?:\.\d+)?)")
+
+
+def _squash(value: str) -> str:
+    # "NT$ 1,200" and "NT$1200" are the same price written two ways.
+    return re.sub(r"[\s,]", "", value)
+
+
 def _hard_failures(
     draft: ResponseDraft, evidence: ValidatedEvidence
 ) -> tuple[str, ...]:
@@ -45,13 +53,19 @@ def _hard_failures(
         failures.append("CITATION_MISMATCH")
 
     text = draft.text.casefold()
+    evidence_text = "".join(item.content for item in evidence.items).casefold()
     if re.search(
         r"\b(?:deliver(?:ed)?|arriv(?:e|es|ed))\b.{0,20}\b(?:tomorrow|today|on \d)|"
         r"(?:明天|今日|今天|保證|保证).{0,10}(?:送達|送达|到貨|到货)",
         text,
     ):
         failures.append("UNSUPPORTED_DELIVERY_PROMISE")
-    if re.search(r"(?:[$€£¥]\s*\d|\b(?:usd|ntd|twd)\s*\d)", text):
+    # A price the retrieved document actually states is the whole point of a
+    # price list; only a price with no source behind it is a hallucination.
+    if any(
+        _squash(price) not in _squash(evidence_text)
+        for price in _PRICE.findall(text)
+    ):
         failures.append("UNSUPPORTED_PRICE")
     if re.search(
         r"\b(?:we|i) will (?:refund|cancel|replace|credit)\b|"

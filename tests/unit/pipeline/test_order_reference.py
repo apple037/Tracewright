@@ -33,9 +33,13 @@ def test_the_planner_asks_the_tool_for_the_order_the_customer_named(classificati
     assert plan.tool_calls[0].arguments["order_id"] == "order-1"
 
 
-def test_an_unnamed_order_still_produces_a_lookup(classification):
+def test_an_unnamed_order_retrieves_nothing_instead_of_guessing(classification):
+    # Looking up the literal "current" matched no order, failed the evidence
+    # source, and handed a human a turn the assistant could answer by asking
+    # which order the customer means.
     plan = plan_evidence(classification, "where is my stuff")
-    assert plan.tool_calls[0].arguments["order_id"] == "current"
+    assert plan.tool_calls == ()
+    assert plan.required_facts == ()
 
 
 def test_a_persona_is_not_applied_across_languages(classification, companion_persona):

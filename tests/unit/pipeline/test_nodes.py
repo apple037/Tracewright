@@ -121,7 +121,7 @@ def test_risk_local_negation_does_not_flag_denied_self_harm(classification):
 
 
 def test_evidence_planner_declares_required_order_fact_and_freshness(classification):
-    plan = plan_evidence(classification)
+    plan = plan_evidence(classification, "where is my order order-1?")
     assert plan.required_facts == ("order.current_status",)
     assert plan.tool_calls[0].operation == "order.lookup"
     assert plan.tool_calls[0].arguments["order_id"].strip()
@@ -309,6 +309,67 @@ async def test_strategy_rejects_unbounded_reason_code(
             models, classification, RiskDecision.safe(), validated_evidence,
             strategy_prompt, None,
         )
+
+
+def _priced_evidence(content: str) -> ValidatedEvidence:
+    from datetime import datetime, timezone
+
+    from agent_flow.contracts import EvidenceItem
+
+    return ValidatedEvidence(
+        items=(
+            EvidenceItem(
+                evidence_id="rag:groupbuy:v1:abc",
+                source_id="groupbuy:coffee-2026-08",
+                version="v1",
+                content=content,
+                content_checksum=hashlib.sha256(content.encode()).hexdigest(),
+                retrieved_at=datetime(2026, 7, 27, tzinfo=timezone.utc),
+                metadata={},
+            ),
+        ),
+        sufficient=True,
+        reason_codes=("REQUIRED_EVIDENCE_PRESENT",),
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_price_the_evidence_states_is_not_a_hard_failure():
+    # A price list is knowledge like any other; quoting it is grounded, and
+    # rejecting it outright made every group-buy question hand off to a human.
+    evidence = _priced_evidence("耶加雪菲淺焙半磅 NT$420，滿 NT$2,000 免運。")
+    draft = ResponseDraft(
+        text="耶加雪菲淺焙半磅 NT$ 420，全團滿 NT$2000 免運。",
+        citations=("groupbuy:coffee-2026-08",),
+        evidence_ids=("rag:groupbuy:v1:abc",),
+    )
+    models = FakeModelGateway({"response_judge": [{
+        "passed": True, "failed_criteria": [], "confidence": 1,
+        "reason_codes": ["GROUNDED"],
+    }]})
+
+    result = await validate_response(models, draft, evidence, "bootstrap")
+
+    assert result.passed
+    assert "UNSUPPORTED_PRICE" not in result.failed_criteria
+
+
+@pytest.mark.asyncio
+async def test_a_price_no_document_states_is_still_rejected():
+    evidence = _priced_evidence("耶加雪菲淺焙半磅 NT$420。")
+    draft = ResponseDraft(
+        text="今天特價 NT$99！",
+        citations=("groupbuy:coffee-2026-08",),
+        evidence_ids=("rag:groupbuy:v1:abc",),
+    )
+    models = FakeModelGateway({"response_judge": []})
+
+    result = await validate_response(models, draft, evidence, "bootstrap")
+
+    assert not result.passed
+    assert "UNSUPPORTED_PRICE" in result.failed_criteria
+    # Deterministic: no judge call is needed to reject an invented price.
+    assert models.calls == []
 
 
 @pytest.mark.asyncio
