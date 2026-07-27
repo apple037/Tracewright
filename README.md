@@ -127,6 +127,7 @@ edit the instructions live, applied to the very next message.
    | `how long do refunds take?` | Answers from the knowledge base with a citation |
    | `how long does shipping take?` | A different document answers — not the refund policy |
    | `八月團購有哪些咖啡可以選？` | Reads the group-buy list and quotes the items and prices |
+   | `七月零食團購的取貨時間是幾點到幾點？` | The document has no pickup hours, so it **says so** instead of answering with the nearest fact it does have |
    | `where is my refund?` | **Hands off to a human** — there is no verified refund source, so it refuses to guess |
 
 2. Its trace **auto-selects** and **streams live** as each step runs.
