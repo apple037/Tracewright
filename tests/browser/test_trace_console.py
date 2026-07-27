@@ -16,6 +16,11 @@ def _get_route(page, pattern, payload, status=200):
 def authenticate(page):
     page.get_by_label("Demo token").fill("demo-token")
     page.get_by_role("button", name="Enter").click()
+    # Logging in restores the chat, loads the traces and then puts the cursor in
+    # the composer — several awaits after the click returns. A test that starts
+    # driving the page before that lands has its focus stolen mid-test, which is
+    # what made the keyboard tests flaky.
+    expect(page.locator("#chat-input")).to_be_focused()
 
 
 TOOL_TIMEOUT_DETAIL = {
@@ -337,3 +342,69 @@ def test_adding_a_document_sends_its_id_and_content(page, console_url):
     expect(page.get_by_text("groupbuy:coffee-2026-08")).to_be_visible()
     assert sent["url"].endswith("/api/v1/config/knowledge/groupbuy/groupbuy%3Atea")
     assert json.loads(sent["body"])["content"] == "九月茶葉團購：烏龍 NT$500。"
+
+
+RUNNING_DETAIL = {
+    "id": "trace-live",
+    "trace_id": "trace-live",
+    "status": "running",
+    "spans": [
+        {"id": "s1", "node": "context_loader", "name": "context_loader",
+         "status": "completed", "attempt": 1, "error_code": None},
+    ],
+    "events": [],
+    "issue_summary": None,
+}
+
+
+def test_focus_survives_the_rerender_that_runs_while_a_turn_is_live(page, console_url):
+    # The workspace rebuilds whenever new events arrive — once a second while a
+    # turn is still running. Losing the focused element there meant an
+    # operator's Enter landed on nothing.
+    calls = {"n": 0}
+
+    def events(route):
+        calls["n"] += 1
+        # Nothing on the first poll, then an event, which is what triggers the
+        # re-render this test is about.
+        payload = {"trace_id": "trace-live", "events": []} if calls["n"] < 2 else {
+            "trace_id": "trace-live",
+            "events": [{
+                "id": "e1", "trace_id": "trace-live", "span_id": "s1",
+                "sequence": 1, "event_type": "node_completed",
+                "created_at": "2026-07-23T00:00:01Z", "payload": {},
+            }],
+        }
+        _fulfill(route, payload)
+
+    _get_route(page, "**/api/v1/sessions", {"sessions": []})
+    _get_route(page, "**/api/v1/sessions/*/messages", {"session_id": "s", "messages": []})
+    _get_route(page, "**/api/v1/traces", {
+        "items": [{
+            "trace_id": "trace-live", "status": "running", "channel": "console",
+            "external_message_id": "live trace", "terminal_outcome": None,
+            "retry_of_trace_id": None, "delivery_disposition": None,
+            "created_at": "2026-07-23T00:00:00Z",
+        }],
+        "next_cursor": None,
+    })
+    _get_route(page, "**/api/v1/traces/trace-live", RUNNING_DETAIL)
+    # A running trace polls every second, so this test never waits on the five
+    # second terminal cadence — that budget was the flaky part, not the console.
+    page.route("**/api/v1/traces/*/events*", events)
+
+    page.goto(console_url)
+    authenticate(page)
+    completed = page.locator('[data-node="context_loader"][data-status="completed"]')
+    completed.focus()
+
+    for _ in range(40):
+        if calls["n"] >= 2:
+            break
+        page.wait_for_timeout(250)
+    assert calls["n"] >= 2, "the console never polled for events a second time"
+    page.wait_for_timeout(250)
+
+    expect(completed).to_be_focused()
+    page.keyboard.press("Enter")
+    expect(completed).to_have_attribute("aria-expanded", "true")

@@ -389,5 +389,7 @@ channel) plugs in by translating inbound webhooks into the same
 
 ## License / status
 
-Bootstrap demo runtime. Use it to learn, demo, and build on — validate and
-harden before trusting it with anything real.
+**[MIT](LICENSE).** Use it, fork it, build on it.
+
+Bootstrap demo runtime — validate and harden before trusting it with anything
+real.

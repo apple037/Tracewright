@@ -311,6 +311,13 @@ let panelCounter = 0;
 export function renderWorkspace(container, state, onToggle) {
   // Scroll position is restored because this runs on every 1s event poll.
   const scrollTop = container.scrollTop;
+  // So is keyboard focus. Rebuilding the container discards the focused
+  // element, so an operator who tabbed to a step and pressed Enter could have
+  // it replaced mid-keystroke and the key go nowhere — every second, for the
+  // whole time a turn is running.
+  const active = document.activeElement;
+  const focusedNode =
+    active && container.contains(active) ? active.dataset.node : null;
   container.textContent = "";
   const trace = state.selectedTrace;
   if (!trace) {
@@ -363,4 +370,8 @@ export function renderWorkspace(container, state, onToggle) {
   }
   container.appendChild(flow);
   container.scrollTop = scrollTop;
+  if (focusedNode) {
+    const restored = flow.querySelector(`[data-node="${CSS.escape(focusedNode)}"]`);
+    if (restored) restored.focus();
+  }
 }
