@@ -157,9 +157,10 @@ async def reset_session_memory(
 ):
     """Forget this session's exchanges. The next message starts from nothing.
 
-    **Not undoable, and it also clears the transcript** the console replays —
-    the two read the same rows. Traces are untouched: what was said and why it
-    was answered that way stays on the record.
+    A soft delete: the rows are marked, and every read filters them out. Memory
+    is genuinely empty as far as the assistant is concerned, and the transcript
+    the console replays goes with it, but `POST .../memory/rebuild` brings both
+    back. Retention still removes the rows on schedule.
 
     Use it when stale context is poisoning a demo, or to prove a follow-up
     question really is resolving against memory rather than guessing.
@@ -172,3 +173,30 @@ async def reset_session_memory(
         session_id=session_id,
     )
     return {"session_id": session_id, "exchanges_forgotten": forgotten}
+
+
+@router.post("/sessions/{session_id}/memory/rebuild")
+async def rebuild_session_memory(
+    session_id: str,
+    request: Request,
+    authenticated: AuthenticatedPrincipal = Depends(principal),
+):
+    """Reconstruct this session from the traces and job records behind it.
+
+    Two things are recovered and reported separately, because they mean
+    different things. `restored` is what a reset hid and has now been unhidden.
+    `rebuilt` is exchanges that were never stored in the first place — a worker
+    that died mid-turn never records one, so it exists in the job record alone.
+
+    Bounded to the last 30 days, the same window conversation text is kept for,
+    so this can never bring back text retention was supposed to have removed.
+    Safe to call twice: an exchange that is already there is left alone.
+    """
+    conversations = _memory_repository(request, authenticated)
+    context = _customer_context(authenticated)
+    recovered = await conversations.rebuild_session(
+        tenant_id=context.tenant_id,
+        customer_id=context.customer_id,
+        session_id=session_id,
+    )
+    return {"session_id": session_id, **recovered}

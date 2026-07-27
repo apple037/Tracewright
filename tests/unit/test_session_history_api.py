@@ -33,6 +33,7 @@ class FakeConversations:
         self.calls = []
         self.session_calls = []
         self.cleared = []
+        self.rebuilt = []
 
     async def list_turns(self, *, tenant_id, customer_id, session_id, limit):
         self.calls.append((tenant_id, customer_id, session_id, limit))
@@ -45,6 +46,10 @@ class FakeConversations:
     async def clear_session(self, *, tenant_id, customer_id, session_id):
         self.cleared.append((tenant_id, customer_id, session_id))
         return len(self.turns)
+
+    async def rebuild_session(self, *, tenant_id, customer_id, session_id):
+        self.rebuilt.append((tenant_id, customer_id, session_id))
+        return {"restored": len(self.turns), "rebuilt": 1}
 
 
 def _client(conversations):
@@ -156,18 +161,39 @@ def test_resetting_memory_reports_what_it_forgot_and_stays_in_scope():
     assert conversations.cleared == [("t1", "c1", "console-1")]
 
 
-@pytest.mark.parametrize("method", ["get", "delete"])
-def test_memory_is_closed_to_a_customer_token(method):
-    # Reading it replays the customer's own words; deleting it cannot be undone.
+def test_rebuilding_reports_what_was_unhidden_and_what_was_re_derived():
+    # Two different recoveries, so they are counted separately: one undoes a
+    # reset, the other recovers exchanges that were never stored at all.
+    conversations = FakeConversations((_turn("hi", "hello"),))
+    response = _client(conversations).post(
+        "/api/v1/sessions/console-1/memory/rebuild",
+        headers={"Authorization": "Bearer admin-token"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "session_id": "console-1", "restored": 1, "rebuilt": 1,
+    }
+    assert conversations.rebuilt == [("t1", "c1", "console-1")]
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [("get", "memory"), ("delete", "memory"), ("post", "memory/rebuild")],
+)
+def test_memory_is_closed_to_a_customer_token(method, path):
+    # Reading it replays the customer's own words; the other two rewrite what
+    # the assistant will be told next turn.
     conversations = FakeConversations((_turn("hi", "hello"),))
     response = getattr(_client(conversations), method)(
-        "/api/v1/sessions/console-1/memory",
+        f"/api/v1/sessions/console-1/{path}",
         headers={"Authorization": "Bearer good-token"},
     )
 
     assert response.status_code == 403
     assert conversations.calls == []
     assert conversations.cleared == []
+    assert conversations.rebuilt == []
 
 
 @pytest.mark.parametrize(

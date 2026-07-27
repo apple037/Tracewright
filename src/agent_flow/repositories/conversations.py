@@ -153,7 +153,12 @@ class PostgresConversationRepository:
     async def clear_session(
         self, *, tenant_id: str, customer_id: str, session_id: str
     ) -> int:
-        """Forget one session's exchanges. Returns how many were deleted.
+        """Forget one session's exchanges. Returns how many were forgotten.
+
+        A soft delete: the rows stay and every read filters them out, so the
+        assistant's memory is genuinely empty while the conversation can still
+        be brought back. Retention still deletes them on schedule — forgotten is
+        hidden, not exempt.
 
         Scoped like every other read here, so a guessed session id cannot erase
         another customer's chat. Traces and spans are left alone: what was said
@@ -164,12 +169,71 @@ class PostgresConversationRepository:
         async with self._pool.connection() as connection:
             cursor = await connection.execute(
                 """
-                DELETE FROM runtime.turns
+                UPDATE runtime.turns SET forgotten_at = now()
                 WHERE tenant_id = %s AND customer_id = %s AND session_id = %s
+                  AND forgotten_at IS NULL
                 """,
                 (tenant_id, customer_id, session_id),
             )
             return cursor.rowcount
+
+    async def rebuild_session(
+        self, *, tenant_id: str, customer_id: str, session_id: str
+    ) -> dict[str, int]:
+        """Reconstruct a session's turns. Returns what each half recovered.
+
+        Two sources, because a turn can be missing for two different reasons.
+        `restored` un-forgets what a reset hid. `rebuilt` re-derives turns that
+        were never written at all — a pipeline that died mid-turn never reaches
+        `append_turn`, so the exchange exists in the job record and nowhere else.
+
+        The job record outlives the turn: submissions are kept for 180 days and
+        conversation text for 30. Rebuilding is therefore bounded to the same 30
+        days, so this can never resurrect text that retention was supposed to
+        have removed.
+        """
+        async with self._pool.connection() as connection:
+            async with connection.transaction():
+                cursor = await connection.execute(
+                    """
+                    UPDATE runtime.turns SET forgotten_at = NULL
+                    WHERE tenant_id = %s AND customer_id = %s AND session_id = %s
+                      AND forgotten_at IS NOT NULL
+                    """,
+                    (tenant_id, customer_id, session_id),
+                )
+                restored = cursor.rowcount
+                conversation_id = await self._ensure_conversation(
+                    connection, tenant_id, customer_id, session_id
+                )
+                cursor = await connection.execute(
+                    """
+                    INSERT INTO runtime.turns (
+                        conversation_id, tenant_id, customer_id, session_id,
+                        trace_id, customer_text, assistant_text, citations,
+                        created_at, expires_at
+                    )
+                    SELECT %s, trace.tenant_id, trace.customer_id,
+                           trace.session_id, submission.trace_id,
+                           submission.payload -> 'message' ->> 'text',
+                           submission.result ->> 'text',
+                           coalesce(submission.result -> 'citations', '[]'::jsonb),
+                           submission.created_at,
+                           submission.created_at + interval '30 days'
+                    FROM runtime.jobs AS submission
+                    JOIN observability.traces AS trace
+                      ON trace.id = submission.trace_id
+                    WHERE trace.tenant_id = %s AND trace.customer_id = %s
+                      AND trace.session_id = %s
+                      AND submission.job_type = 'turn'
+                      AND submission.created_at > now() - interval '30 days'
+                      AND submission.payload -> 'message' ->> 'text' IS NOT NULL
+                      AND submission.result ->> 'text' IS NOT NULL
+                    ON CONFLICT (trace_id) DO NOTHING
+                    """,
+                    (conversation_id, tenant_id, customer_id, session_id),
+                )
+                return {"restored": restored, "rebuilt": cursor.rowcount}
 
     async def list_turns(
         self, *, tenant_id: str, customer_id: str, session_id: str, limit: int = 100
@@ -185,6 +249,7 @@ class PostgresConversationRepository:
                 SELECT customer_text, assistant_text, citations, created_at
                 FROM runtime.turns
                 WHERE tenant_id = %s AND customer_id = %s AND session_id = %s
+                  AND forgotten_at IS NULL
                 ORDER BY created_at, id
                 LIMIT %s
                 """,
@@ -283,6 +348,7 @@ class PostgresConversationRepository:
                         JOIN observability.traces AS trace ON trace.id = turn.trace_id
                         WHERE turn.tenant_id = %s AND turn.customer_id = %s
                           AND turn.session_id = %s
+                          AND turn.forgotten_at IS NULL
                           AND trace.status IN ('succeeded', 'failed')
                         ORDER BY turn.created_at DESC, turn.id DESC
                         LIMIT %s

@@ -214,7 +214,7 @@ function settingsList(settings) {
 // What the assistant will actually be given of this chat on the next message —
 // the windowed slice, not the whole transcript. The gap between the two counts
 // is the answer to "why did it forget that".
-function memorySection(memory, onReset) {
+function memorySection(memory, onReset, onRebuild) {
   const children = [];
   const { stored = 0, in_window: inWindow = 0 } = memory.exchanges || {};
   children.push(
@@ -242,16 +242,25 @@ function memorySection(memory, onReset) {
   }
   children.push(scroll);
 
+  const actions = el("div", { class: "tune-actions" });
   const reset = el("button", {
     class: "ghost-button is-danger",
     type: "button",
     text: t("tune.memoryReset"),
   });
-  // Irreversible, and it takes the visible transcript with it.
+  // A soft delete, but it still takes the visible transcript with it, so it is
+  // worth one question first.
   reset.addEventListener("click", () => {
     if (window.confirm(t("tune.memoryResetConfirm"))) onReset();
   });
-  children.push(reset);
+  actions.appendChild(reset);
+
+  const rebuild = el("button", {
+    class: "ghost-button", type: "button", text: t("tune.memoryRebuild"),
+  });
+  rebuild.addEventListener("click", onRebuild);
+  actions.appendChild(rebuild);
+  children.push(actions);
   return children;
 }
 
@@ -292,9 +301,10 @@ export function createTunePanel({
       );
       return;
     }
-    for (const child of memorySection(memory, () => resetMemory(path))) {
-      memoryBody.appendChild(child);
-    }
+    const children = memorySection(
+      memory, () => resetMemory(path), () => rebuildMemory(path)
+    );
+    for (const child of children) memoryBody.appendChild(child);
   }
 
   async function resetMemory(path) {
@@ -305,6 +315,16 @@ export function createTunePanel({
     }
     await refreshMemory();
     // The transcript reads the same rows, so the chat on screen is now stale.
+    await onMemoryReset();
+  }
+
+  async function rebuildMemory(path) {
+    const { ok } = await requestJson(`${path}/rebuild`, { method: "POST" });
+    if (!ok) {
+      onError(t("tune.memoryRebuildFailed"));
+      return;
+    }
+    await refreshMemory();
     await onMemoryReset();
   }
 

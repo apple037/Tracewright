@@ -10,10 +10,17 @@ from uuid import uuid4
 import psycopg
 import pytest
 from psycopg import sql
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 from psycopg.rows import dict_row
 
 
 VERSIONS = Path("migrations/versions")
+
+# Derived, not written down: every one of these assertions is about what an
+# upgrade to "head" produces, and hard-coding the revision meant four unrelated
+# tests failed the next time a migration was added.
+HEAD_REVISION = ScriptDirectory.from_config(Config("alembic.ini")).get_current_head()
 
 
 def test_task9_bootstrap_and_forward_compatibility_revision_are_explicit():
@@ -267,7 +274,7 @@ async def test_existing_0001_database_upgrades_to_head(test_database_url):
             "has_claim_token": True,
             "has_settlement_backoff": True,
             "next_attempt_nullable": True,
-            "revision": "0003_turn_submissions",
+            "revision": HEAD_REVISION,
         }
         _assert_submission_schema(await _submission_schema_state(database_url))
 
@@ -281,7 +288,7 @@ async def test_fresh_database_upgrades_directly_to_head(test_database_url):
             "has_claim_token": True,
             "has_settlement_backoff": True,
             "next_attempt_nullable": True,
-            "revision": "0003_turn_submissions",
+            "revision": HEAD_REVISION,
         }
         _assert_submission_schema(await _submission_schema_state(database_url))
 
@@ -302,7 +309,7 @@ async def test_older_0001_missing_turn_inputs_converges_to_head(test_database_ur
             "has_claim_token": True,
             "has_settlement_backoff": True,
             "next_attempt_nullable": True,
-            "revision": "0003_turn_submissions",
+            "revision": HEAD_REVISION,
         }
 
 
@@ -330,7 +337,7 @@ async def test_f117_partial_outbox_0001_converges_to_head(test_database_url):
             "has_claim_token": True,
             "has_settlement_backoff": True,
             "next_attempt_nullable": True,
-            "revision": "0003_turn_submissions",
+            "revision": HEAD_REVISION,
         }
 
 

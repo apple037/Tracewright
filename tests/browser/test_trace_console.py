@@ -334,7 +334,9 @@ def _open_tune(page, console_url, on_put=None, on_memory=None):
     install_api_fixture(page, scenario="empty")
     _get_route(page, "**/api/v1/config", CONFIG)
     _get_route(page, "**/api/v1/config/knowledge", KNOWLEDGE)
-    page.route("**/api/v1/sessions/*/memory", on_memory or (
+    # Both /memory and /memory/rebuild — an unrouted one reaches the real
+    # server, which answers 401 and fails the run on a console error.
+    page.route("**/api/v1/sessions/*/memory**", on_memory or (
         lambda route: _fulfill(route, MEMORY)
     ))
     if on_put is not None:
@@ -412,6 +414,28 @@ def test_forgetting_a_chat_asks_first_and_then_deletes(page, console_url):
     page.get_by_role("button", name="Forget this chat").click()
     expect(page.get_by_text("Nothing remembered in this chat yet.")).to_be_visible()
     assert "DELETE" in calls
+
+
+def test_rebuilding_brings_a_forgotten_chat_back(page, console_url):
+    calls = []
+
+    def memory(route):
+        calls.append(route.request.method)
+        if route.request.method == "POST":
+            _fulfill(route, {"session_id": "console-1", "restored": 5, "rebuilt": 0})
+        else:
+            # Empty until the rebuild lands, then the conversation is back.
+            _fulfill(route, MEMORY if "POST" in calls else {
+                "session_id": "console-1", "history_turns": 2,
+                "exchanges": {"stored": 0, "in_window": 0}, "messages": [],
+            })
+
+    _open_tune(page, console_url, on_memory=memory)
+    expect(page.get_by_text("Nothing remembered in this chat yet.")).to_be_visible()
+
+    page.get_by_role("button", name="Rebuild from traces").click()
+    expect(page.get_by_text("is it still on the way?")).to_be_visible()
+    assert "POST" in calls
 
 
 RUNNING_DETAIL = {

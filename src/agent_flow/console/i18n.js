@@ -104,10 +104,12 @@ const STRINGS = {
   "tune.memoryUnavailable": { "zh-TW": "無法讀取這個對話的記憶。", "en-US": "Could not read this chat's memory." },
   "tune.memoryReset": { "zh-TW": "清除這個對話的記憶", "en-US": "Forget this chat" },
   "tune.memoryResetConfirm": {
-    "zh-TW": "這會清掉這個對話的記憶與紀錄，且無法復原。Trace 會保留。要繼續嗎？",
-    "en-US": "This clears this chat's memory and transcript and cannot be undone. Traces are kept. Continue?",
+    "zh-TW": "這會清掉這個對話的記憶與紀錄。可以用「重建」還原。要繼續嗎？",
+    "en-US": "This clears this chat's memory and transcript. Rebuild brings them back. Continue?",
   },
   "tune.memoryResetFailed": { "zh-TW": "清除失敗。", "en-US": "Could not reset the memory." },
+  "tune.memoryRebuild": { "zh-TW": "從 Trace 重建", "en-US": "Rebuild from traces" },
+  "tune.memoryRebuildFailed": { "zh-TW": "重建失敗。", "en-US": "Could not rebuild the memory." },
   "tune.hint": {
     "zh-TW": "在這裡的修改會立即生效，但不會寫回設定檔；要永久保留請編輯 config/ 底下的 YAML。",
     "en-US": "Changes here take effect immediately but are not written back to the config files. To make one permanent, edit the YAML under config/.",

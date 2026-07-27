@@ -8,6 +8,7 @@ from psycopg.types.json import Jsonb
 
 from agent_flow.auth import AuthorizedCustomerContext
 from agent_flow.contracts import InboundMessage, SubmissionResult
+from agent_flow.repositories.conversations import PostgresConversationRepository
 from agent_flow.repositories.submissions import PostgresSubmissionRepository
 from agent_flow.repositories.traces import PostgresTraceRepository
 
@@ -707,3 +708,43 @@ async def test_activate_trace_is_scoped_lineage_checked_and_idempotent(
         await traces.activate_trace(
             queued.trace_id, tenant_id="t1", expected_retry_of=None
         )
+
+
+@pytest.mark.asyncio
+async def test_a_forgotten_session_rebuilds_from_the_job_records(
+    submissions, postgres_pool, customer_context
+):
+    # The point of the soft delete: memory is genuinely empty afterwards, and
+    # the conversation is still recoverable from the records behind it.
+    conversations = PostgresConversationRepository(postgres_pool)
+    traces = PostgresTraceRepository(postgres_pool)
+    await submissions.enqueue(
+        customer_context, inbound_message(session_id="s-rebuild", text="where is order-1")
+    )
+    claimed = (
+        await submissions.claim(owner="worker-a", limit=1, lease_seconds=30, max_attempts=3)
+    )[0]
+    await traces.finish_trace(claimed.trace_id, "succeeded", tenant_id="t1")
+    await submissions.complete(
+        claimed.id,
+        owner="worker-a",
+        claim_token=claimed.claim_token,
+        result=completed_submission_result(claimed),
+    )
+
+    scope = {"tenant_id": "t1", "customer_id": "c1", "session_id": "s-rebuild"}
+    # Nothing ever appended this turn — a worker that dies mid-turn never gets
+    # that far, and the exchange exists only in the job record.
+    assert await conversations.rebuild_session(**scope) == {"restored": 0, "rebuilt": 1}
+    turns = await conversations.list_turns(**scope)
+    assert [turn["customer_text"] for turn in turns] == ["where is order-1"]
+    assert turns[0]["assistant_text"] == "Your order is in transit."
+    assert turns[0]["citations"] == ("tool-result-1",)
+
+    # Forgetting keeps the rows and hides them from every read.
+    assert await conversations.clear_session(**scope) == 1
+    assert await conversations.list_turns(**scope) == ()
+
+    # And back. Nothing is re-derived this time, because nothing is missing.
+    assert await conversations.rebuild_session(**scope) == {"restored": 1, "rebuilt": 0}
+    assert len(await conversations.list_turns(**scope)) == 1

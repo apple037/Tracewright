@@ -221,7 +221,8 @@ carries a `customer_id`.
 | `GET /api/v1/sessions` | Chats this token may see, newest first. |
 | `GET /api/v1/sessions/{id}/messages` | Replay a transcript — the console's reload path. |
 | `GET /api/v1/sessions/{id}/memory` | The windowed slice the pipeline will load next turn, not the whole transcript (admin). |
-| `DELETE /api/v1/sessions/{id}/memory` | Forget this session. Not undoable, and it clears the transcript too (admin). |
+| `DELETE /api/v1/sessions/{id}/memory` | Forget this session — a soft delete that hides the transcript too (admin). |
+| `POST /api/v1/sessions/{id}/memory/rebuild` | Undo that, and re-derive exchanges that were never stored (admin). |
 | `GET/PUT/DELETE /api/v1/config/...` | Live prompts, personas, knowledge (admin). |
 
 `/docs` is the full interactive reference, with an Authorize button.
