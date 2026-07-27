@@ -6,22 +6,45 @@
 #
 #   name    - your label; also what shows up in logs
 #   type    - how to read it (see below)
-#   path    - for type: fixture, a JSON file of records
 #   enabled - false parks a source without deleting it
 #
 # Types available today:
-#   fixture - a JSON file in this repo. Each record needs tenant_id, source_id,
-#             version and content; customer_id restricts a record to one
-#             customer, valid_until expires it.
 #
-# To add another kind of source (a live vector DB, an HTTP search service),
-# register it in src/agent_flow/adapters/knowledge.py — `_BUILDERS` maps a type
-# name to the thing that builds it. The pipeline does not change.
+#   http    - an external knowledge base, which is where a real corpus belongs.
+#             Two endpoints make one usable:
+#               catalog_url  lists what it holds: source_id + a one-line summary
+#               document_url fetches one, {source_id} is substituted
+#             The catalog is what the classifier is shown, and it may only name
+#             a source it saw there — so the knowledge base decides what exists
+#             and the assistant cannot cite a document it never advertised.
+#             Optional: auth_header_env (the env var holding the key, never the
+#             key), auth_header, auth_prefix, timeout_seconds, cache_seconds,
+#             and map: to rename fields if the service calls them something else.
+#
+#   fixture - a JSON file in this repo. Good for the details that do not belong
+#             in a shared knowledge base: per-customer documents, a few entries
+#             you want to edit from the console. Each record needs tenant_id,
+#             source_id, version and content; customer_id restricts a record to
+#             one customer, valid_until expires it.
+#
+# To add another kind of source, register it in
+# src/agent_flow/adapters/knowledge.py — `_BUILDERS` maps a type name to the
+# thing that builds it. The pipeline does not change.
 
 sources:
-  policies:
+  # The main corpus, served over HTTP exactly as a real knowledge base would be.
+  # `mock-kb` is a stand-in living inside this app so the demo needs no external
+  # service; point these two URLs at your own knowledge base and nothing else
+  # changes. Its expiry rule lives there too — an expired document is not
+  # listed and not served.
+  handbook:
+    type: http
+    catalog_url: ${KNOWLEDGE_BASE_URL:-http://localhost:8080/mock-kb}/documents
+    document_url: ${KNOWLEDGE_BASE_URL:-http://localhost:8080/mock-kb}/documents/{source_id}
+    cache_seconds: 30
+
+  # Details that stay local: documents bound to one customer, and anything you
+  # want to edit from the console's Tune panel.
+  account:
     type: fixture
-    path: config/demo/rag.json
-  groupbuy:
-    type: fixture
-    path: config/demo/groupbuy.json
+    path: config/demo/account.json

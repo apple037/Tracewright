@@ -107,6 +107,22 @@ test that exercises two service instances over one directory.** Every existing
 test that builds one object in one process will pass while the feature is
 broken.
 
+## Where knowledge actually comes from
+
+The main corpus lives in an **external knowledge base**, reached over HTTP:
+`catalog_url` lists what it holds, `document_url` fetches one. That list is what
+the classifier is shown, and it may only name a source it saw there — so the
+knowledge base decides what exists and the invariant above still holds.
+
+`api/mock_kb.py` is a stand-in serving the committed demo corpus over that same
+interface, so the demo needs no external service. It is a fake, not a feature:
+point `KNOWLEDGE_BASE_URL` at a real knowledge base and delete the router.
+
+Anything the knowledge base should not hold — documents bound to one customer,
+entries a tuner edits from the console — stays in a local `fixture` source.
+Expiry and per-customer scoping belong to whoever owns the corpus, so the mock
+implements both; a real knowledge base is expected to do the same.
+
 ## Extending it
 
 Each of these is a registry plus a config file. None of them touches the
@@ -114,8 +130,8 @@ pipeline.
 
 | To add | Register in | Declared in |
 |---|---|---|
-| A knowledge backend (vector DB, HTTP search) | `adapters/knowledge.py::_BUILDERS` | `config/knowledge.yaml` |
-| A tool backend (ERP, CRM) | `adapters/tools.py::_BUILDERS` | `config/tools.yaml` |
+| A knowledge backend (vector DB, another API shape) | `adapters/knowledge.py::_BUILDERS` | `config/knowledge.yaml` — `fixture` and `http` ship |
+| A tool backend (another ERP/CRM shape) | `adapters/tools.py::_BUILDERS` | `config/tools.yaml` — `fixture` and `http` ship |
 | A model provider | `config/models*.yaml` — profiles are data | — |
 | A channel (LINE, web widget) | translate the webhook into `POST /api/v1/submissions` | — |
 

@@ -1,0 +1,10 @@
+[
+  {
+    "tenant_id": "t1",
+    "customer_id": "c1",
+    "source_id": "account:c1:coupon",
+    "version": "v1",
+    "content": "此帳號目前持有折扣碼 WELCOME15，可享單筆訂單 85 折，最高折抵 NT$300，使用期限至 2026-12-31，限本帳號使用，不可與金卡會員折扣併用。",
+    "score": 1.0
+  }
+]

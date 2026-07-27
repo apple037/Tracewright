@@ -16,6 +16,10 @@ x-app-env: &app-env
   LOCAL_VLLM_API_KEY: ${LOCAL_VLLM_API_KEY:-EMPTY}
   REMOTE_MODEL_BASE_URL: ${REMOTE_MODEL_BASE_URL:-http://host.docker.internal:11434/v1}
   REMOTE_MODEL_API_KEY: ${REMOTE_MODEL_API_KEY:-}
+  # Where the knowledge base lives. The demo's stand-in is served by the app
+  # itself, which is `app` on this network rather than localhost. Point this at
+  # a real knowledge base and config/knowledge.yaml needs no edit.
+  KNOWLEDGE_BASE_URL: ${KNOWLEDGE_BASE_URL:-http://app:8080/mock-kb}
   WEBHOOK_URL: ${WEBHOOK_URL:-http://mock-handoff-server:9999/mock-handoff}
   WEBHOOK_SECRET: ${WEBHOOK_SECRET:-replace-for-local-demo-only}
 

@@ -9,14 +9,20 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import time
+from inspect import isawaitable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
+from urllib.parse import quote
 
+import httpx
 import yaml
 from pydantic import Field
 
-from agent_flow.adapters.evidence import MockRagClient, RagClient
+from agent_flow.adapters.evidence import MockRagClient, RagClient, rag_evidence
 from agent_flow.auth import AuthorizedCustomerContext
+from agent_flow.config import expand_env
 from agent_flow.contracts import RagSearchRequest, RagSearchResult, StrictModel
 
 if TYPE_CHECKING:
@@ -25,8 +31,22 @@ if TYPE_CHECKING:
 
 class _Source(StrictModel):
     type: str = Field(min_length=1)
-    path: Path | None = None
     enabled: bool = True
+    # type: fixture
+    path: Path | None = None
+    # type: http — an external knowledge base.
+    catalog_url: str | None = None
+    document_url: str | None = None
+    auth_header: str = "Authorization"
+    auth_header_env: str | None = None
+    auth_prefix: str = "Bearer "
+    timeout_seconds: float = Field(default=5.0, gt=0, le=60)
+    # How long a fetched catalog is reused. Every turn asks for it, and a
+    # knowledge base does not gain documents by the second.
+    cache_seconds: float = Field(default=60.0, ge=0)
+    # Response field -> key in the service's JSON. Defaults suit a service that
+    # already speaks source_id/content/version.
+    map: dict[str, str] = Field(default_factory=dict)
 
 
 class _KnowledgeConfig(StrictModel):
@@ -41,15 +61,149 @@ def _build_fixture(
     return MockRagClient.from_fixture(source.path, telemetry=telemetry)
 
 
+class HttpKnowledgeClient:
+    """A corpus that lives in an external knowledge base.
+
+    Two calls make a knowledge base usable here. `catalog_url` lists what it
+    holds, as `source_id` plus a one-line summary; that list is what the
+    classifier is shown, and it may only name a source it saw there. Naming one
+    then fetches it from `document_url`. So the service decides what exists, and
+    the grounding rule the pipeline depends on is unchanged: the assistant
+    cannot cite a document the knowledge base never advertised.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        source: _Source,
+        telemetry: "OperationTelemetry | None" = None,
+    ) -> None:
+        if not source.catalog_url or not source.document_url:
+            raise ValueError(
+                f"knowledge source {name!r} of type http needs catalog_url and "
+                "document_url"
+            )
+        self._name = name
+        self._source = source
+        self.telemetry = telemetry
+        self._catalog: tuple[str, ...] = ()
+        self._ids: frozenset[str] = frozenset()
+        self._fetched_at = 0.0
+
+    def _headers(self) -> dict[str, str]:
+        env = self._source.auth_header_env
+        secret = os.environ.get(env, "") if env else ""
+        if not secret:
+            return {}
+        return {self._source.auth_header: f"{self._source.auth_prefix}{secret}"}
+
+    def _field(self, row: dict[str, Any], name: str, default: Any = None) -> Any:
+        return row.get(self._source.map.get(name, name), default)
+
+    async def _get(self, url: str, params: dict[str, str] | None = None) -> Any:
+        async with httpx.AsyncClient(
+            timeout=self._source.timeout_seconds
+        ) as client:
+            response = await client.get(
+                url, headers=self._headers(), params=params or None
+            )
+            response.raise_for_status()
+            return response.json()
+
+    async def catalog(self, scope: dict[str, str] | None = None) -> tuple[str, ...]:
+        fresh = time.monotonic() - self._fetched_at < self._source.cache_seconds
+        if self._catalog and fresh:
+            return self._catalog
+        try:
+            payload = await self._get(self._source.catalog_url or "", scope)
+        except Exception:
+            # A knowledge base that is down must not empty the catalog: that
+            # would silently turn every grounded answer into "I don't know".
+            # Keep serving the last list we were given.
+            return self._catalog
+        rows = payload.get("documents", payload) if isinstance(payload, dict) else payload
+        lines: list[str] = []
+        ids: list[str] = []
+        for row in rows if isinstance(rows, list) else []:
+            source_id = self._field(row, "source_id")
+            if not source_id:
+                continue
+            summary = " ".join(str(self._field(row, "summary", "")).split())[:120]
+            ids.append(str(source_id))
+            lines.append(f"{source_id}: {summary}")
+        self._catalog = tuple(lines[:50])
+        self._ids = frozenset(ids)
+        self._fetched_at = time.monotonic()
+        return self._catalog
+
+    @property
+    def source_ids(self) -> frozenset[str]:
+        # Whatever the last catalog advertised. Used only to route a query to
+        # the source that owns it.
+        return self._ids
+
+    async def search(
+        self, context: AuthorizedCustomerContext, request: RagSearchRequest
+    ) -> RagSearchResult:
+        started = time.monotonic()
+        url = (self._source.document_url or "").replace(
+            "{source_id}", quote(request.query, safe="")
+        )
+        # A knowledge base decides for itself what this caller may see, so who
+        # is asking travels with the request. Expiry and per-customer documents
+        # are its business, not ours — the same as any other backing service.
+        scope = {"tenant_id": context.tenant_id, "customer_id": context.customer_id}
+        try:
+            payload = await self._get(url, scope)
+        except Exception:
+            if self.telemetry is not None:
+                await self.telemetry.record_rag(
+                    query=request.query, result_count=0, source_ids=[],
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                    status="failed",
+                )
+            # Retrieving nothing is the safe failure: the generator then says it
+            # does not have the information rather than inventing it.
+            return RagSearchResult(items=())
+
+        rows = payload if isinstance(payload, list) else [payload]
+        items = tuple(
+            rag_evidence(
+                source_id=str(self._field(row, "source_id", request.query)),
+                content=str(self._field(row, "content", "")),
+                version=str(self._field(row, "version", "v1")),
+                tenant_id=context.tenant_id,
+                customer_id=self._field(row, "customer_id"),
+            )
+            for row in rows[: request.limit]
+            if self._field(row, "content")
+        )
+        if self.telemetry is not None:
+            await self.telemetry.record_rag(
+                query=request.query, result_count=len(items),
+                source_ids=[item.source_id for item in items],
+                duration_ms=int((time.monotonic() - started) * 1000),
+                status="completed",
+            )
+        return RagSearchResult(items=items)
+
+
+def _build_http(
+    name: str, source: _Source, telemetry: "OperationTelemetry | None"
+) -> RagClient:
+    return HttpKnowledgeClient(name, source, telemetry=telemetry)
+
+
 # Register a new kind of source here: name -> builder. Nothing else changes.
 _BUILDERS: dict[str, Callable[[str, _Source, Any], RagClient]] = {
     "fixture": _build_fixture,
+    "http": _build_http,
 }
 
 
 def _read_config(path: Path) -> _KnowledgeConfig:
     return _KnowledgeConfig.model_validate(
-        yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        yaml.safe_load(expand_env(path.read_text(encoding="utf-8"))) or {}
     )
 
 
@@ -167,13 +321,17 @@ class KnowledgeSources:
         )
         return RagSearchResult(items=tuple(items[: request.limit]))
 
-    def catalog(self) -> tuple[str, ...]:
+    async def catalog(self) -> tuple[str, ...]:
         # Also refreshed: a document the classifier never sees in the catalog is
         # a document it may not name, so it could never be retrieved.
         self._refresh()
         lines: list[str] = []
         for client in self._clients.values():
-            lines.extend(getattr(client, "catalog", tuple)() or ())
+            # A fixture answers from memory; a knowledge base has to be asked.
+            entries = getattr(client, "catalog", tuple)() or ()
+            if isawaitable(entries):
+                entries = await entries or ()
+            lines.extend(entries)
         return tuple(lines[:50])
 
     # --- admin surface -------------------------------------------------------

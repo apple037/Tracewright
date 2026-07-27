@@ -25,6 +25,7 @@ from pydantic import Field
 
 from agent_flow.adapters.evidence import MockToolClient, ToolClient, tool_evidence
 from agent_flow.auth import AuthorizedCustomerContext
+from agent_flow.config import expand_env
 from agent_flow.contracts import StrictModel, ToolCallRequest, ToolCallResult
 
 if TYPE_CHECKING:
@@ -184,7 +185,7 @@ class ToolSources:
         cls, path: str | Path, *, telemetry: "OperationTelemetry | None" = None
     ) -> "ToolSources":
         config = _ToolConfig.model_validate(
-            yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+            yaml.safe_load(expand_env(Path(path).read_text(encoding="utf-8"))) or {}
         )
         clients: dict[str, ToolClient] = {}
         for name, tool in config.tools.items():

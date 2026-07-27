@@ -68,6 +68,43 @@ class _ToolFixture(StrictModel):
     score: float | None = 1.0
 
 
+def rag_evidence(
+    *,
+    source_id: str,
+    content: str,
+    version: str,
+    tenant_id: str,
+    customer_id: str | None = None,
+    retrieved_at: datetime | None = None,
+    effective_at: datetime | None = FIXTURE_EFFECTIVE_AT,
+    valid_until: datetime | None = None,
+    score: float | None = 1.0,
+    metadata: dict[str, Any] | None = None,
+) -> EvidenceItem:
+    """The evidence shape every knowledge answer takes, fixture or live service.
+
+    Shared so a document fetched from an external knowledge base and one read
+    from a JSON file cite identically and validate identically.
+    """
+    checksum = _checksum(content)
+    return EvidenceItem(
+        evidence_id=f"rag:{source_id}:{version}:{checksum[:16]}",
+        source_id=source_id,
+        version=version,
+        content=content,
+        content_checksum=checksum,
+        retrieved_at=retrieved_at or datetime.now(timezone.utc),
+        effective_at=effective_at,
+        valid_until=valid_until,
+        score=score,
+        metadata={
+            **(metadata or {}),
+            "tenant_id": tenant_id,
+            "customer_id": customer_id,
+        },
+    )
+
+
 def tool_evidence(
     *,
     tool: str,
@@ -235,23 +272,17 @@ class MockRagClient:
         return tuple(list(seen.values())[:50])
 
     def _evidence(self, record: _RagFixture) -> EvidenceItem:
-        checksum = _checksum(record.content)
-        metadata = {
-            **record.metadata,
-            "tenant_id": record.tenant_id,
-            "customer_id": record.customer_id,
-        }
-        return EvidenceItem(
-            evidence_id=f"rag:{record.source_id}:{record.version}:{checksum[:16]}",
+        return rag_evidence(
             source_id=record.source_id,
-            version=record.version,
             content=record.content,
-            content_checksum=checksum,
+            version=record.version,
+            tenant_id=record.tenant_id,
+            customer_id=record.customer_id,
             retrieved_at=self._as_of,
             effective_at=record.effective_at,
             valid_until=record.valid_until,
             score=record.score,
-            metadata=metadata,
+            metadata=record.metadata,
         )
 
 

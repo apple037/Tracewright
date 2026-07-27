@@ -606,7 +606,11 @@ class TurnPipeline:
                 lambda: self._load_context(state, retry_of, frozen_artifacts),
                 trace_metadata=frozen_artifacts,
             )
+            # A corpus held in memory answers this synchronously; one behind an
+            # HTTP knowledge base has to go and ask. Await either.
             knowledge_catalog = getattr(self.rag, "catalog", tuple)() or ()
+            if isawaitable(knowledge_catalog):
+                knowledge_catalog = await knowledge_catalog or ()
             state.classification = await self.run_node(
                 state, "dialogue_classifier",
                 lambda: classify_dialogue(

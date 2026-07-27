@@ -1,3 +1,5 @@
+import os
+import re
 from pathlib import Path
 from typing import Literal
 
@@ -6,6 +8,22 @@ import json
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+_ENV_PLACEHOLDER = re.compile(r"\$\{(?P<name>[A-Z_][A-Z0-9_]*)(?::-(?P<default>[^}]*))?\}")
+
+
+def expand_env(text: str) -> str:
+    """Substitute ${VAR} and ${VAR:-default} in a config file.
+
+    Addresses differ between running on the host and running in a container,
+    and the same committed YAML has to work in both. Values only — never a
+    secret: a key belongs in an env var the adapter reads by name.
+    """
+    return _ENV_PLACEHOLDER.sub(
+        lambda m: os.environ.get(m.group("name")) or (m.group("default") or ""),
+        text,
+    )
 
 
 class Settings(BaseSettings):

@@ -14,6 +14,7 @@ mimetypes.add_type("text/css", ".css")
 from agent_flow.api.dependencies import AppServices, ReadinessCheck
 from agent_flow.api.config import router as config_router
 from agent_flow.api.health import router as health_router
+from agent_flow.api.mock_kb import router as mock_kb_router
 from agent_flow.api.sessions import router as sessions_router
 from agent_flow.api.submissions import router as submissions_router
 from agent_flow.api.traces import router as traces_router
@@ -125,6 +126,9 @@ def create_app(
     app.include_router(traces_router)
     app.include_router(config_router)
     app.include_router(health_router)
+    # A stand-in knowledge base, so the demo runs the same external
+    # path a real one would. Drop this line when you have a real one.
+    app.include_router(mock_kb_router)
     mount_console(app)
     return app
 

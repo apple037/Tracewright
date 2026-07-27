@@ -25,11 +25,20 @@ Restart means `make restart`. It rereads `config/`; it does not rebuild.
 The assistant may only state facts it actually retrieved. Everything it is
 allowed to say comes from a **knowledge document**, and every answer cites the
 document it came from. So "the assistant gave a wrong answer" is usually "the
-document says the wrong thing", and you fix it here.
+document says the wrong thing", and you fix it where that document lives.
 
-**From the console:** Tune → Knowledge. Each source lists its documents. Edit
-one in place, delete it, or add one with the form at the bottom. It applies to
-the next message — no restart.
+**Two kinds of source, and which one you edit matters:**
+
+- **The knowledge base** (`type: http`) holds the main corpus. You edit it in
+  the knowledge base itself, with whatever tool your team already uses. The demo
+  ships a stand-in so it works out of the box. It is read-only from here — the
+  Tune panel marks it *Read-only* and will not let you change it.
+- **Local sources** (`type: fixture`) hold the details: documents bound to one
+  customer, and anything you want to edit right here.
+
+**From the console:** Tune → Knowledge. Each source lists its documents. On an
+editable source you can change one in place, delete it, or add one with the form
+at the bottom. It applies to the next message — no restart.
 
 **Read this before you edit.** A document here is treated as **true**. The
 fact-checking step compares the reply against the documents that were
