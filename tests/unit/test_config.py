@@ -10,7 +10,9 @@ from agent_flow.config import ModelConfig, Settings, load_model_config, model_co
 
 def test_settings_default_to_bootstrap(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "postgresql://agent:agent@localhost/agent")
-    settings = Settings()
+    # _env_file=None: assert the code defaults, not whatever the developer's
+    # own .env happens to say.
+    settings = Settings(_env_file=None)
     assert settings.assurance_mode == "bootstrap"
     assert settings.local_vllm_base_url == "http://localhost:8000/v1"
 

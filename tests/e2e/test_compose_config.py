@@ -57,12 +57,20 @@ def test_compose_uses_host_gateway_and_frozen_non_dev_uv_runtime():
         assert "--no-sync" in command
         assert "env_file" not in services[name]
         assert "API_KEY" not in services[name]["environment"]
-
     assert services["worker"]["command"][-3:] == [
         "-m",
         "agent_flow.worker",
         "--run",
     ]
+
+
+def test_env_example_model_urls_are_reachable_from_a_container():
+    # docker compose reads .env, so a localhost URL there silently overrides the
+    # host.docker.internal default above and points the container at itself.
+    example = (ROOT / ".env.example").read_text(encoding="utf-8")
+    for line in example.splitlines():
+        if line.startswith(("LOCAL_VLLM_BASE_URL=", "REMOTE_MODEL_BASE_URL=")):
+            assert "localhost" not in line and "127.0.0.1" not in line, line
 
 
 def test_default_model_config_is_loadable_and_endpoint_agnostic():
