@@ -52,18 +52,28 @@ Six directories, and they do not all cost the same.
 | `tests/unit` | nothing | ~5s | always |
 | `tests/contract` | nothing | in the above | always |
 | `tests/browser` | Playwright browsers | ~15s | when you touch `console/` |
-| `tests/integration` | a PostgreSQL | ~30s | when you touch `repositories/` or migrations |
-| `tests/e2e` | Docker Compose | minutes | before a release |
+| `tests/e2e` | nothing — it drives the pipeline in-process against fakes | ~2s | always |
+| `tests/integration` | a PostgreSQL named `*test*` | ~20s | when you touch `repositories/` or migrations |
 | `tests/live` | a real model server | minutes, costs tokens | when you change prompts or the gateway |
 
-The everyday command is:
+The everyday command is `make test`, which is the four service-free suites and
+exactly what CI's `fast` job runs:
 
 ```bash
-uv run pytest tests/unit tests/contract -q      # ~300 tests, no services
+uv run pytest tests/unit tests/contract tests/browser tests/e2e -q   # 384 tests
 ```
 
-`uv run pytest` with no arguments tries to run all six and will fail on a
-machine without Postgres and a model server. That is not a broken checkout.
+Run the same set locally as CI does. When those two drift, a local pass stops
+being evidence of anything — two failing tests reached `master` that way.
+
+For `tests/integration`, point `TEST_DATABASE_URL` at a database whose name
+contains `test`; the destructive cleanup in `conftest.py` refuses anything else.
+Without that variable the suite **skips itself**, so set
+`REQUIRE_DB_INTEGRATION=true` when you mean to run it and want a missing
+configuration to fail rather than pass quietly.
+
+`uv run pytest` with no arguments collects all six and will fail on a machine
+without Postgres and a model server. That is not a broken checkout.
 
 **If you add a browser test, use the `authenticate()` helper and do not
 reimplement it.** Logging in restores the chat, loads the traces and then puts
@@ -193,7 +203,7 @@ Not omissions — decisions. Reopen them with your eyes open.
 | Model config over the API | It carries endpoint URLs and selects credentials; an admin token should not be able to repoint a model role at a server it chooses. |
 | Semantic RAG over the customer's words | Retrieval is bounded to catalog source ids on purpose — see the invariant above. Changing this needs a new answer to "how does the classifier not invent a document". |
 | Embeddings / pgvector retrieval | Wired but disabled: the demo answers from fixtures, and the code expects 1024 dimensions. |
-| CI | Nobody set it up. `tests/unit tests/contract` need no services and would be a five-minute workflow. |
+| CI on a real deployment | `.github/workflows/ci.yml` runs the tests and a secret scan. It does not build or publish an image, because there is nowhere to deploy it to yet. |
 
 ## Operational details worth knowing
 

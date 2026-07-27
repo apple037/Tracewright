@@ -259,8 +259,8 @@ HTML/CSS/JS，不需要建置。
   與實際回覆都會失敗。
 - **轉人工只是邊界，不是整合。** Webhook 接收端是 stub；真正的工單系統、告警
   與重試流程都還沒做。
-- **沒有 LINE Adapter，也沒有 CI。** 兩者都是刻意留下的缺口，見
-  [DEVELOPING.md](DEVELOPING.md)。
+- **沒有 LINE Adapter。** Submission API 已經是 channel-neutral、隨時可以接，
+  但還沒有人寫——見 [DEVELOPING.md](DEVELOPING.md)。
 - **Reset 不可逆。** `./run.sh reset` 與 `docker compose down -v` 會永久刪除
   Demo 資料庫。
 - **絕不提交機密。** `.env`、真實 Token 與 API Key 只留在本機。

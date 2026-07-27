@@ -51,15 +51,24 @@ uv run --frozen python -m agent_flow.worker --run         # 第二個終端
 | `tests/unit` | 無 | 約 5 秒 | 一律 |
 | `tests/contract` | 無 | 含在上面 | 一律 |
 | `tests/browser` | Playwright 瀏覽器 | 約 15 秒 | 動到 `console/` 時 |
-| `tests/integration` | PostgreSQL | 約 30 秒 | 動到 `repositories/` 或 migration 時 |
-| `tests/e2e` | Docker Compose | 數分鐘 | 發布前 |
+| `tests/e2e` | 無——它在同一個程序內用 fake 驅動 pipeline | 約 2 秒 | 一律 |
+| `tests/integration` | 名稱含 `test` 的 PostgreSQL | 約 20 秒 | 動到 `repositories/` 或 migration 時 |
 | `tests/live` | 真實模型服務 | 數分鐘，會消耗 token | 改 prompt 或 gateway 時 |
 
-日常指令是：
+日常指令是 `make test`，也就是四個不需要服務的目錄，跟 CI 的 `fast` job 完全
+一致：
 
 ```bash
-uv run pytest tests/unit tests/contract -q      # 約 300 個測試，不需要任何服務
+uv run pytest tests/unit tests/contract tests/browser tests/e2e -q   # 384 個測試
 ```
+
+本機要跑跟 CI 一樣的範圍。兩邊一旦不同步，本機測試通過就不再代表任何事——曾經
+有兩個紅掉的測試就是這樣進到 `master`。
+
+跑 `tests/integration` 時，把 `TEST_DATABASE_URL` 指向名稱含 `test` 的資料庫；
+`conftest.py` 的破壞性清理會拒絕其他名字。沒有設這個變數的話，整套會**自己
+skip 掉**，所以真的要跑時請一併設 `REQUIRE_DB_INTEGRATION=true`，讓設定錯誤變成
+失敗，而不是安靜地通過。
 
 `uv run pytest` 不帶參數會收集全部六個目錄，在沒有 Postgres 和模型服務的機器上
 一定會紅。看到那種紅字，先確認自己跑的範圍，不要以為 checkout 壞了。
@@ -180,7 +189,7 @@ contract 加到 `pipeline/model_outputs.py`。節點就是接受型別化輸入�
 | 用 API 改模型設定 | 它帶有 endpoint URL 並選擇憑證；不該讓一組 admin token 就能把模型角色指向它自己選的伺服器。 |
 | 對客戶原句做語意 RAG | 檢索被刻意限制在 catalog 的 source id——見上面的不變式。要改這個，得先回答「分類器要如何才不會發明文件」。 |
 | Embedding／pgvector 檢索 | 接好但停用：Demo 從 fixture 回答，而且程式碼預期 1024 維。 |
-| CI | 沒人建。`tests/unit tests/contract` 不需要任何服務，五分鐘就能寫完一個 workflow。 |
+| 正式部署用的 CI | `.github/workflows/ci.yml` 會跑測試與機密掃描，但不建置也不發布 image，因為目前還沒有可以部署的目標。 |
 
 ## 值得知道的營運細節
 

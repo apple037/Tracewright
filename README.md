@@ -274,8 +274,8 @@ plain HTML/CSS/JS — nothing to build.
   still be alive but `/health/ready` and real replies fail.
 - **Handoff is a boundary, not an integration.** The webhook receiver is a stub;
   a real ticketing system, alerting and retry operations are still to build.
-- **No LINE adapter, no CI.** Both are deliberate gaps — see
-  [DEVELOPING.md](DEVELOPING.md).
+- **No LINE adapter.** The submission API is channel-neutral and ready for one,
+  but nobody has written it — see [DEVELOPING.md](DEVELOPING.md).
 - **Reset is irreversible.** `./run.sh reset` and `docker compose down -v`
   permanently delete the demo database.
 - **Never commit secrets.** `.env`, real tokens and API keys stay local.
