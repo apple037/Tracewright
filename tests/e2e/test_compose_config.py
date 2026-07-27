@@ -219,15 +219,26 @@ def test_demo_seeder_upserts_database_rows_idempotently():
     assert result.tool_fixtures_loaded > 0
 
 
-def test_readme_remote_ollama_and_outbox_checks_are_endpoint_and_tenant_scoped():
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+# The guides are split by audience — README for the newcomer, TUNING for whoever
+# shapes the assistant, DEVELOPING for whoever inherits the code — and topics move
+# between them as that split is refined. What must not happen is a topic falling
+# out of all three, which is what these two checks are for.
+def _guides() -> str:
+    return "\n".join(
+        (ROOT / name).read_text(encoding="utf-8")
+        for name in ("README.md", "TUNING.md", "DEVELOPING.md")
+    )
 
-    assert 'curl "${REMOTE_MODEL_BASE_URL%/v1}/api/tags"' in readme
-    assert "tenant_id = '<tenant-id>'" in readme
+
+def test_guides_scope_the_ollama_check_to_the_endpoint_and_the_outbox_to_one_tenant():
+    guides = _guides()
+
+    assert 'curl "${REMOTE_MODEL_BASE_URL%/v1}/api/tags"' in guides
+    assert "tenant_id = '<tenant-id>'" in guides
 
 
-def test_readme_documents_live_trace_console_demo():
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+def test_guides_document_live_trace_console_demo():
+    guides = _guides()
 
     required = [
         "uv sync --frozen",
@@ -246,8 +257,8 @@ def test_readme_documents_live_trace_console_demo():
         "safe error code",
         "LINE adapter",
     ]
-    missing = [needle for needle in required if needle not in readme]
-    assert missing == [], f"README is missing: {missing}"
+    missing = [needle for needle in required if needle not in guides]
+    assert missing == [], f"no guide documents: {missing}"
 
 
 def test_worker_module_exposes_explicit_runtime_cli():

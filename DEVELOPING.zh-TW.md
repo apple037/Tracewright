@@ -202,16 +202,38 @@ contract 加到 `pipeline/model_outputs.py`。節點就是接受型別化輸入�
 輪。這個上限是必要的：曾經因為不限制長度，超過分類器 100 則訊息的上限，整個
 回合直接失敗。轉人工的回合也會保留，所以客戶轉人工後換句話再問，不會從零開始。
 
-**失敗以安全代碼呈現**，絕不外露內部細節：租約逾時會以
+**每一種失敗都以安全錯誤代碼呈現**，絕不外露內部細節：租約逾時會以
 `WORKER_LEASE_EXPIRED` 結束 trace 並保留一個重試 trace；工具逾時則是元件
 `order_api` 上的 `TOOL_TIMEOUT`。完整的鏈是
 `readiness check → model role → probe stage → trace node → component →
 operation → error code → retry disposition`。
 
-**每個模型 profile 的 `structured_output`** 決定 JSON 如何被強制。Ollama 的
-`/v1` 接受 OpenAI 的 `json_schema` 欄位然後忽略它，所以 Ollama profile 必須用
+**模型角色。** 每個 pipeline 步驟是一個角色——`dialogue_classifier`、
+`strategy_advisor`、`response_generator`、`response_judge`、`embedding`。
+**角色名稱是穩定的**；每個角色背後的 profile 與模型可以在模型設定檔裡自由替換。
+每個 profile 的 `structured_output` 決定 JSON 如何被強制：Ollama 的 `/v1` 接受
+OpenAI 的 `json_schema` 欄位然後忽略它，所以 Ollama profile 必須用
 `json_object`；vLLM、TGI 與 OpenAI API 支援 `json_schema`。無論哪種，schema 都
 會在 system prompt 裡再寫一次。
+
+不要相信 Ollama CLI 預設的 localhost，直接打 endpoint 確認——`./run.sh` 啟動時
+會幫你跑這一行：
+
+```bash
+curl "${REMOTE_MODEL_BASE_URL%/v1}/api/tags"
+```
+
+**兩組 Demo Token 只給 Demo 用**，絕不能拿來守護正式部署。
+`APP_RUNTIME_MODE=demo` 啟用該驗證器，`production` 會拒絕它。
+
+**檢查卡住的轉人工通知**時，只查授權範圍內的租戶，不要跨租戶查：
+
+```sql
+select tenant_id, id, status, attempts, last_error_code, last_http_status, next_attempt_at
+from notification.outbox
+where tenant_id = '<tenant-id>' and status = 'failed'
+order by created_at desc;
+```
 
 ## 交給別人之前
 

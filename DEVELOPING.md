@@ -216,16 +216,38 @@ carries a `customer_id`.
 and fail the turn outright. Handed-off turns are kept too, so a customer who
 rephrases after a handoff does not start from zero.
 
-**Failures surface as safe codes**, never raw internals: a stalled lease finishes
+**Every failure surfaces as a safe error code**, never raw internals: a stalled lease finishes
 the trace with `WORKER_LEASE_EXPIRED` and reserves a retry trace; a tool timeout
 is `TOOL_TIMEOUT` on component `order_api`. The full chain is
 `readiness check → model role → probe stage → trace node → component → operation
 → error code → retry disposition`.
 
-**`structured_output` per model profile** decides how JSON is enforced. Ollama's
-`/v1` accepts OpenAI's `json_schema` field and then ignores it, so Ollama
-profiles must use `json_object`; vLLM, TGI and the OpenAI API support
-`json_schema`. The schema is repeated in the system prompt either way.
+**Model roles.** Each pipeline step is a role — `dialogue_classifier`,
+`strategy_advisor`, `response_generator`, `response_judge`, `embedding`. The
+**role names are stable**; the profile and model behind each one are yours to
+replace in the models file. `structured_output` per profile decides how JSON is
+enforced: Ollama's `/v1` accepts OpenAI's `json_schema` field and then ignores
+it, so Ollama profiles must use `json_object`; vLLM, TGI and the OpenAI API
+support `json_schema`. The schema is repeated in the system prompt either way.
+
+Check the endpoint itself rather than trusting the Ollama CLI's implicit
+localhost — `./run.sh` runs this for you at startup:
+
+```bash
+curl "${REMOTE_MODEL_BASE_URL%/v1}/api/tags"
+```
+
+**The two demo tokens are demo only** and must never gate a real deployment.
+`APP_RUNTIME_MODE=demo` enables that authenticator; `production` rejects it.
+
+**Inspect a stuck handoff** for one authorized tenant, never across tenants:
+
+```sql
+select tenant_id, id, status, attempts, last_error_code, last_http_status, next_attempt_at
+from notification.outbox
+where tenant_id = '<tenant-id>' and status = 'failed'
+order by created_at desc;
+```
 
 ## Before you hand this to someone else
 
