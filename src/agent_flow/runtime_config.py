@@ -9,6 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from agent_flow.artifacts import (
+    OVERRIDES_FILENAME,
     RuntimeArtifacts,
     load_overrides,
     load_runtime_artifacts,
@@ -25,8 +26,25 @@ class RuntimeConfigService:
         self._model_config = model_config
         self._settings = settings
         self._artifacts = load_runtime_artifacts(config_root)
+        self._overrides_stamp = self._stamp()
+
+    def _stamp(self) -> tuple[int, int] | None:
+        # Size as well as mtime: two edits within the same clock tick are
+        # otherwise indistinguishable.
+        try:
+            stat = (self._root / OVERRIDES_FILENAME).stat()
+        except OSError:
+            return None
+        return (stat.st_mtime_ns, stat.st_size)
 
     def artifacts(self) -> RuntimeArtifacts:
+        # The worker runs the pipeline in its own process and never writes, so
+        # without this it served the prompts it booted with and every console
+        # edit was silently ignored — while the app reported the edit applied.
+        stamp = self._stamp()
+        if stamp != self._overrides_stamp:
+            self._overrides_stamp = stamp
+            self._reload()
         return self._artifacts
 
     def _reload(self) -> RuntimeArtifacts:
@@ -53,6 +71,7 @@ class RuntimeConfigService:
             overrides[section][artifact_id] = values
         save_overrides(self._root, overrides)
         self._reload()
+        self._overrides_stamp = self._stamp()
 
     def set_prompt(self, node: str, system_prompt: str) -> dict[str, object]:
         artifact_id = self._artifact_id_for_node(node)

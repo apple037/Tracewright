@@ -71,6 +71,28 @@ def test_edits_survive_a_fresh_load(service, config_root):
     assert reloaded.overridden["familiar_companion.zh-TW"] == ("style_prompt",)
 
 
+def test_an_edit_by_another_process_is_picked_up(service, config_root):
+    # The app writes the override; the worker — a separate process with its own
+    # service — is the one that runs the pipeline. It has to notice.
+    other = RuntimeConfigService(
+        config_root, service._model_config, service._settings
+    )
+    assert other.artifacts().prompts_by_node["response_generator"].system_prompt != (
+        "Only ever answer in haiku."
+    )
+
+    service.set_prompt("response_generator", "Only ever answer in haiku.")
+
+    assert other.artifacts().prompts_by_node["response_generator"].system_prompt == (
+        "Only ever answer in haiku."
+    )
+
+    service.clear_prompt("response_generator")
+    assert other.artifacts().prompts_by_node["response_generator"].system_prompt != (
+        "Only ever answer in haiku."
+    )
+
+
 def test_unknown_targets_are_rejected(service):
     with pytest.raises(KeyError):
         service.set_prompt("no_such_node", "x")
