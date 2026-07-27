@@ -6,6 +6,7 @@ import pytest
 from psycopg.errors import CheckViolation
 from psycopg.types.json import Jsonb
 
+from agent_flow.contracts import ConversationTurn
 from agent_flow.repositories.conversations import PostgresConversationRepository
 
 
@@ -289,7 +290,12 @@ async def test_turn_append_is_idempotent_by_trace_before_finalization(
     snapshot = await conversations.get_snapshot(
         tenant_id="t1", customer_id="c1", session_id="s1", trace_id=reader_trace
     )
-    assert snapshot.messages == ("question", "answer")
+    # Two identical appends under one trace are one exchange, and each message
+    # carries who said it — the classifier needs the roles, not just the text.
+    assert snapshot.messages == (
+        ConversationTurn(role="customer", text="question"),
+        ConversationTurn(role="assistant", text="answer"),
+    )
 
 
 @pytest.mark.asyncio

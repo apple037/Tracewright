@@ -20,6 +20,7 @@ reset:
 restart:
 	@docker compose restart app worker
 
-## Run the test suites that need no database or model server.
+## Run the test suites that need no database or model server. Same set as CI's
+## fast job — keep the two in step, or a local pass stops meaning anything.
 test:
-	@uv run pytest tests/unit tests/contract tests/browser
+	@uv run pytest tests/unit tests/contract tests/browser tests/e2e
