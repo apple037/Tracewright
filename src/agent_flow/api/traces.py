@@ -95,6 +95,9 @@ def _encode_cursor(trace) -> str:
 def _trace_summary(trace) -> dict[str, Any]:
     return {
         "trace_id": str(trace.id),
+        # Which chat this turn belongs to. A channel like LINE supplies its own
+        # chat id here, so the console can group turns the way the channel does.
+        "session_id": getattr(trace, "session_id", None),
         "status": trace.status,
         "channel": getattr(trace, "channel", None),
         "external_message_id": getattr(trace, "external_message_id", None),

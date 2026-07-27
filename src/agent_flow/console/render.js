@@ -35,6 +35,46 @@ function traceLabel(trace) {
   return trace.external_message_id || trace.trace_id || "trace";
 }
 
+/* -------------------------------------------------------------- chats ---- */
+
+function chatTime(value) {
+  if (!value) return "";
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? "" : parsed.toLocaleString();
+}
+
+// One row per chat id. A LINE webhook groups messages by its own chat id, which
+// arrives as the session id, so an operator moves between conversations here
+// instead of reading one flat stream of turns.
+export function renderChatList(container, state, onSelect) {
+  container.textContent = "";
+  if (!state.sessions || state.sessions.length === 0) {
+    container.appendChild(el("p", { class: "empty-note", text: t("chats.empty") }));
+    return;
+  }
+  for (const session of state.sessions) {
+    const selected = session.session_id === state.selectedSessionId;
+    const button = el("button", {
+      type: "button",
+      class: "chat-item",
+      "aria-pressed": selected ? "true" : "false",
+      dataset: { sessionId: session.session_id },
+    }, [
+      el("span", { class: "chat-item-id", text: session.session_id }),
+      el("span", {
+        class: "chat-item-preview",
+        text: session.last_message || t("chats.noMessage"),
+      }),
+      el("span", {
+        class: "chat-item-meta",
+        text: `${session.turn_count} · ${chatTime(session.last_activity)}`,
+      }),
+    ]);
+    button.addEventListener("click", () => onSelect(session.session_id));
+    container.appendChild(button);
+  }
+}
+
 /* --------------------------------------------------------------- list ---- */
 
 // Rebuilt in place and keyed by trace id: a 5s list refresh must not steal

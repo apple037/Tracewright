@@ -125,6 +125,18 @@ export function createChatroom({ transcript, onTrace, onError, onBusy }) {
     render();
   }
 
+  // Read another chat: the same transcript view, a different chat id. Sending
+  // then continues that conversation, which is what an operator answering a
+  // LINE thread expects.
+  async function switchTo(sessionId) {
+    if (!sessionId || state.sending) return;
+    state.sessionId = sessionId;
+    rememberSessionId(sessionId);
+    state.messages = [];
+    render();
+    await restore();
+  }
+
   async function submit(text) {
     if (!text || state.sending) return;
     if (!state.sessionId) {
@@ -176,6 +188,7 @@ export function createChatroom({ transcript, onTrace, onError, onBusy }) {
     submit,
     restore,
     reset,
+    switchTo,
     sending: () => state.sending,
     sessionId: () => state.sessionId,
   };

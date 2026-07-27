@@ -298,6 +298,49 @@ main.demo-grid {
   font-size: 0.85rem;
 }
 
+/* One row per chat id, above the turns of the chat being read. */
+.chat-items {
+  flex: 0 0 auto;
+  max-height: 34vh;
+  margin-bottom: 0.6rem;
+}
+
+.chat-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  width: 100%;
+  text-align: left;
+  margin-bottom: 0.4rem;
+  background: var(--surface-2);
+  border: 1px solid transparent;
+}
+
+.chat-item-id {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-item-preview {
+  font-size: 0.8rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-item-meta {
+  color: var(--text-dim);
+  font-size: 0.72rem;
+}
+
+.chat-item[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
 /* ---------------------------------------------------------------- status -- */
 
 .status {

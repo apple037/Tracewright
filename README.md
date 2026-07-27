@@ -89,7 +89,8 @@ Four files, no Python. See **[TUNING.md](TUNING.md)** for the detail.
 | What each step **decides** | `config/prompts/*.yaml` |
 | **Which model** does what | `config/models.yaml` |
 | Addresses, passwords, memory length | `.env` |
-| What the AI **knows** | `config/demo/rag.json` |
+| Where its knowledge **comes from** | `config/knowledge.yaml` |
+| What the AI **knows** | the files that config points at, e.g. `config/demo/rag.json` |
 
 Or click **Tune** in the console with an admin token: it shows every step's
 current instructions, the voice, and which model runs each step — and lets you
@@ -101,11 +102,16 @@ edit the instructions live, applied to the very next message.
 
 ```
 ┌───────────────┬──────────────────────┬─────────────────────┐
-│  Turns        │   Conversation       │  What happened      │
-│  (this        │   (type here —       │  this turn          │
-│   conversation│    the main event)   │  (steps fill in     │
-│   auto-       │                      │   live; click one   │
-│   refreshes)  │                      │   for its decisions)│
+│  Chats        │   Conversation       │  What happened      │
+│  (one per     │   (type here —       │  this turn          │
+│   chat id;    │    the main event)   │  (steps fill in     │
+│   click to    │                      │   live; click one   │
+│   switch)     │                      │   for its decisions)│
+│───────────────│                      │                     │
+│  Turns        │                      │                     │
+│  (of the      │                      │                     │
+│   selected    │                      │                     │
+│   chat)       │                      │                     │
 └───────────────┴──────────────────────┴─────────────────────┘
 ```
 
@@ -114,16 +120,23 @@ edit the instructions live, applied to the very next message.
    | Say | What happens |
    |---|---|
    | `good morning` | Answers, retrieves **nothing**, cites nothing |
-   | `where is my order order-1?` | Looks the order up and cites the tool result |
+   | `where is my order order-1?` | Looks the order up and cites the tool result (in transit) |
    | `is it still on the way?` | Reuses the order from the previous turn — **memory** |
+   | `where is my order order-2?` | A different order, a different status (delivered) |
+   | `how about order-3?` | Still preparing — and the order id came from this message alone |
    | `how long do refunds take?` | Answers from the knowledge base with a citation |
+   | `how long does shipping take?` | A different document answers — not the refund policy |
+   | `八月團購有哪些咖啡可以選？` | Reads the group-buy list and quotes the items and prices |
    | `where is my refund?` | **Hands off to a human** — there is no verified refund source, so it refuses to guess |
 
 2. Its trace **auto-selects** and **streams live** as each step runs.
 3. Click any step to expand what it decided.
-4. **Refresh the page**: the conversation is still there. **New conversation**
+4. **Chats** (top left) is one row per chat id — the same id a LINE webhook
+   supplies for a conversation. Click one to read its history and keep talking
+   in it; the turn list below narrows to that chat.
+5. **Refresh the page**: the conversation is still there. **New conversation**
    starts a clean one.
-5. **EN / 中文** switches language, **◐** switches light/dark, **Retry trace**
+6. **EN / 中文** switches language, **◐** switches light/dark, **Retry trace**
    re-runs a finished turn.
 
 **Admin vs customer token:**
@@ -203,9 +216,13 @@ src/agent_flow/
 
 config/                # editable settings, prompts, demo knowledge base
 ├── models.yaml        # which model powers each step
+├── knowledge.yaml     # every knowledge source the AI may retrieve from
 ├── prompts/           # the instructions given to each AI step
 ├── personas/          # how the assistant sounds
-└── demo/rag.json      # the demo knowledge base (facts the AI may cite)
+└── demo/              # the demo corpus those sources point at
+    ├── rag.json       #   policies (refund, shipping)
+    ├── groupbuy.json  #   group-buy lists
+    └── tools.json     #   what order.lookup answers
 ```
 
 See **[TUNING.md](TUNING.md)** — you rarely need to touch Python.
@@ -283,6 +300,22 @@ a demo; this section is the operational contract.
 - `GET /api/v1/sessions/{session_id}/messages` replays the visible transcript,
   scoped to the authenticated tenant and customer. The console uses it to
   restore the chat after a reload.
+- `GET /api/v1/sessions` lists the chats that token may see — session id, turn
+  count, last activity, and the last customer message — newest first. One
+  session id is one chat, which is what a channel adapter supplies (a LINE
+  webhook passes its own chat id straight through), so the console groups turns
+  the way the channel does rather than showing one flat stream.
+
+### Knowledge sources
+
+- `config/knowledge.yaml` lists every source the pipeline may retrieve from.
+  Sources are searched together and each answer cites the source it came from,
+  so adding knowledge is a config edit. `enabled: false` parks a source.
+- Only `type: fixture` (a JSON file) ships today. A new kind — a live vector
+  DB, an HTTP search service — is one entry in `_BUILDERS` in
+  `src/agent_flow/adapters/knowledge.py`; the pipeline does not change.
+- The classifier is shown a catalog of `source_id: snippet` lines and may only
+  name a source_id it saw there, so retrieval cannot invent a document.
 
 ### Editing prompts at runtime
 

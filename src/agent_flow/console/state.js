@@ -3,6 +3,12 @@
 export function createState() {
   return {
     authenticated: false,
+    // Chats (one per session id) and the one being read; the turn list below
+    // only shows the selected chat's turns.
+    sessions: [],
+    selectedSessionId: null,
+    // Everything the server returned, before the chat filter.
+    allTraces: [],
     traces: [],
     selectedTraceId: null,
     selectedTrace: null,

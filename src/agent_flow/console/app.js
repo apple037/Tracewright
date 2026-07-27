@@ -1,6 +1,6 @@
 import { requestJson, setToken, clearToken } from "./api.js";
 import { createState, mergeEvents, toggleNode, selectTrace, isTerminal } from "./state.js";
-import { renderTraceList, renderWorkspace, showAlert } from "./render.js";
+import { renderChatList, renderTraceList, renderWorkspace, showAlert } from "./render.js";
 import { t, applyStatic, toggleLang } from "./i18n.js";
 import { createChatroom } from "./chatroom.js";
 import { createTunePanel } from "./tune.js";
@@ -21,7 +21,7 @@ function cacheDom() {
     "token-dialog", "token-form", "token-input", "retry-button", "retry-dialog",
     "retry-form", "retry-reason", "logout-button", "lang-toggle", "theme-toggle",
     "tune-button", "tune-dialog", "tune-body", "tune-close",
-    "trace-list", "trace-items", "trace-workspace", "workspace-body",
+    "trace-list", "trace-items", "chat-items", "trace-workspace", "workspace-body",
     "chat-transcript", "chat-form", "chat-input", "chat-send", "chat-reset",
   ]) {
     dom[id] = document.getElementById(id);
@@ -61,7 +61,9 @@ function onToggleTheme() {
 // Sending a chat message from the demo panel selects its trace so the operator
 // watches the pipeline run live in the same view — no page switch.
 async function onChatTrace(traceId) {
+  if (chatroom) state.selectedSessionId = chatroom.sessionId();
   await refreshTraces();
+  await refreshChats();
   await selectAndLoad(traceId);
 }
 
@@ -84,6 +86,11 @@ async function onChatSubmit(event) {
 function onChatReset() {
   if (!chatroom || chatroom.sending()) return;
   chatroom.reset();
+  // A brand new chat has no id yet, so show every chat until it gets one.
+  state.selectedSessionId = null;
+  state.selectedTraceId = null;
+  applyChatFilter();
+  renderChatList(dom["chat-items"], state, onSelectChat);
   dom["chat-input"].focus();
 }
 
@@ -108,7 +115,9 @@ async function onTokenSubmit(event) {
   dom["logout-button"].hidden = false;
   dom["tune-button"].hidden = false;
   await chatroom.restore();
+  state.selectedSessionId = chatroom.sessionId();
   await refreshTraces();
+  await refreshChats();
   startListRefresh();
   dom["chat-input"].focus();
 }
@@ -119,9 +128,13 @@ function logout() {
   stopEventPolling();
   stopListRefresh();
   state.traces = [];
+  state.allTraces = [];
+  state.sessions = [];
+  state.selectedSessionId = null;
   state.selectedTrace = null;
   state.selectedTraceId = null;
   renderTraceList(dom["trace-items"], state, selectAndLoad);
+  renderChatList(dom["chat-items"], state, onSelectChat);
   renderWorkspace(dom["workspace-body"], state, onToggleNode);
   dom["tune-button"].hidden = true;
   dom["retry-button"].hidden = true;
@@ -133,7 +146,9 @@ function logout() {
 function startListRefresh() {
   stopListRefresh();
   listTimer = setInterval(() => {
-    if (state.authenticated) refreshTraces();
+    if (!state.authenticated) return;
+    refreshTraces();
+    refreshChats();
   }, LIST_REFRESH_MS);
 }
 
@@ -150,11 +165,45 @@ async function refreshTraces() {
     showAlert(t("alert.tracesFailed"));
     return;
   }
-  state.traces = body.items || [];
-  renderTraceList(dom["trace-items"], state, selectAndLoad);
+  state.allTraces = body.items || [];
+  applyChatFilter();
   if (state.selectedTraceId === null && state.traces.length > 0) {
     await selectAndLoad(state.traces[0].trace_id);
   }
+}
+
+// Turns belong to a chat. Showing every customer's turns in one list made the
+// order of a conversation impossible to follow once there was more than one.
+function applyChatFilter() {
+  const all = state.allTraces || [];
+  // A trace with no session_id predates the grouping; hiding it would make
+  // older turns silently disappear, so it stays visible in every chat.
+  state.traces = state.selectedSessionId
+    ? all.filter(
+        (trace) => !trace.session_id || trace.session_id === state.selectedSessionId
+      )
+    : all;
+  renderTraceList(dom["trace-items"], state, selectAndLoad);
+}
+
+async function refreshChats() {
+  const { ok, body } = await requestJson("/api/v1/sessions");
+  if (!ok || !body) return;
+  state.sessions = body.sessions || [];
+  if (!state.selectedSessionId && chatroom) {
+    state.selectedSessionId = chatroom.sessionId();
+  }
+  renderChatList(dom["chat-items"], state, onSelectChat);
+}
+
+async function onSelectChat(sessionId) {
+  if (!chatroom || chatroom.sending()) return;
+  state.selectedSessionId = sessionId;
+  state.selectedTraceId = null;
+  renderChatList(dom["chat-items"], state, onSelectChat);
+  await chatroom.switchTo(sessionId);
+  applyChatFilter();
+  if (state.traces.length > 0) await selectAndLoad(state.traces[0].trace_id);
 }
 
 async function selectAndLoad(traceId) {
@@ -290,6 +339,7 @@ async function onRetrySubmit(event) {
 function onToggleLang() {
   toggleLang();
   applyStatic();
+  renderChatList(dom["chat-items"], state, onSelectChat);
   renderTraceList(dom["trace-items"], state, selectAndLoad);
   renderWorkspace(dom["workspace-body"], state, onToggleNode);
   if (chatroom) chatroom.render();

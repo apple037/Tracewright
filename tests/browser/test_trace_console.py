@@ -36,7 +36,21 @@ TOOL_TIMEOUT_DETAIL = {
 }
 
 
-def install_api_fixture(page, *, scenario):
+SESSIONS = {
+    "sessions": [
+        {"session_id": "line-U123", "turn_count": 2,
+         "last_activity": "2026-07-23T00:00:00Z", "last_message": "where is my order"},
+        {"session_id": "line-U999", "turn_count": 1,
+         "last_activity": "2026-07-22T00:00:00Z", "last_message": "hello"},
+    ]
+}
+
+
+def install_api_fixture(page, *, scenario, sessions=None):
+    # The console lists chats on every refresh; without a route the real server
+    # answers 401 and the page logs an error the teardown treats as a failure.
+    _get_route(page, "**/api/v1/sessions", sessions or {"sessions": []})
+    _get_route(page, "**/api/v1/sessions/*/messages", {"session_id": "s", "messages": []})
     if scenario == "tool-timeout":
         _get_route(page, "**/api/v1/traces", {
             "items": [{
@@ -135,6 +149,7 @@ def test_chat_shows_customer_bubble_and_safe_terminal_reply(page, chat_url):
 
 
 def test_demo_page_chat_selects_trace_and_shows_reply(page, console_url):
+    install_api_fixture(page, scenario="none")
     _get_route(page, "**/api/v1/traces", {
         "items": [{
             "trace_id": "trace-001", "status": "succeeded", "channel": "console",
@@ -183,6 +198,7 @@ def _retry_detail(trace_id, status="succeeded"):
 
 
 def install_retry_fixture(page, *, source_trace, retry_trace):
+    install_api_fixture(page, scenario="none")
     retried = {"done": False}
 
     def list_handler(route):
@@ -226,6 +242,33 @@ def test_manual_retry_preserves_source_and_selects_new_attempt(page, console_url
     expect(page.locator('[data-trace-id="trace-001"]')).to_be_visible()
     expect(page.locator('[data-trace-id="trace-002"]')).to_be_visible()
     expect(page.locator("[data-selected-trace]")).to_have_text("trace-002")
+
+
+def test_chats_are_listed_and_selecting_one_loads_its_transcript(page, console_url):
+    # Messages are grouped by chat id — the id a channel like LINE supplies.
+    install_api_fixture(page, scenario="empty", sessions=SESSIONS)
+    page.route(
+        "**/api/v1/sessions/line-U999/messages",
+        lambda route: _fulfill(route, {
+            "session_id": "line-U999",
+            "messages": [
+                {"role": "customer", "text": "hello", "created_at": "2026-07-22T00:00:00Z"},
+                {"role": "agent", "text": "hi there", "citations": [],
+                 "created_at": "2026-07-22T00:00:01Z"},
+            ],
+        }),
+    )
+    page.goto(console_url)
+    authenticate(page)
+
+    expect(page.locator('[data-session-id="line-U123"]')).to_be_visible()
+    page.locator('[data-session-id="line-U999"]').click()
+
+    expect(page.locator(".chat-customer .chat-bubble")).to_have_text("hello")
+    expect(page.locator(".chat-agent .chat-bubble")).to_have_text("hi there")
+    expect(page.locator('[data-session-id="line-U999"]')).to_have_attribute(
+        "aria-pressed", "true"
+    )
 
 
 def test_refresh_clears_token_and_returns_to_token_dialog(page, console_url):

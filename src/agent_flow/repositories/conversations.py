@@ -176,6 +176,51 @@ class PostgresConversationRepository:
             for row in rows
         )
 
+    async def list_sessions(
+        self, *, tenant_id: str, customer_id: str, limit: int = 50
+    ) -> tuple[dict[str, object], ...]:
+        """Every chat this customer has, most recently active first.
+
+        A channel like LINE groups messages by its own chat id, which arrives
+        as session_id; the console shows the same grouping so an operator can
+        move between conversations instead of seeing one flat stream.
+        Traces are the source, not turns, so a session whose only turn was
+        handed off to a human still appears.
+        """
+        async with self._pool.connection() as connection:
+            cursor = await connection.execute(
+                """
+                SELECT trace.session_id,
+                       count(*) AS turn_count,
+                       max(trace.created_at) AS last_activity,
+                       (
+                           SELECT input.message
+                           FROM runtime.turn_inputs AS input
+                           WHERE input.tenant_id = trace.tenant_id
+                             AND input.customer_id = trace.customer_id
+                             AND input.session_id = trace.session_id
+                           ORDER BY input.captured_at DESC
+                           LIMIT 1
+                       ) AS last_message
+                FROM observability.traces AS trace
+                WHERE trace.tenant_id = %s AND trace.customer_id = %s
+                GROUP BY trace.tenant_id, trace.customer_id, trace.session_id
+                ORDER BY last_activity DESC
+                LIMIT %s
+                """,
+                (tenant_id, customer_id, limit),
+            )
+            rows = await cursor.fetchall()
+        return tuple(
+            {
+                "session_id": row["session_id"],
+                "turn_count": row["turn_count"],
+                "last_activity": row["last_activity"],
+                "last_message": row["last_message"],
+            }
+            for row in rows
+        )
+
     async def get_snapshot(
         self,
         *,

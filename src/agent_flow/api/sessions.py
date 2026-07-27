@@ -17,6 +17,45 @@ def _customer_context(authenticated: AuthenticatedPrincipal):
         raise HTTPException(status_code=403, detail=error.public_message) from error
 
 
+@router.get("/sessions")
+async def list_sessions(
+    request: Request,
+    authenticated: AuthenticatedPrincipal = Depends(principal),
+    limit: int = Query(default=50, ge=1, le=200),
+):
+    """The chats this token may see, most recently active first.
+
+    One session id is one chat — the same grouping a LINE webhook gives with
+    its own chat id. Only the last customer message is previewed; assistant
+    drafts and reasoning never appear here.
+    """
+    require_scope(authenticated, "turn:write", "trace:read", "trace:internal")
+    context = _customer_context(authenticated)
+    conversations = services(request).conversations
+    if conversations is None:
+        raise HTTPException(status_code=503, detail="conversations unavailable")
+    sessions = await conversations.list_sessions(
+        tenant_id=context.tenant_id,
+        customer_id=context.customer_id,
+        limit=limit,
+    )
+    return {
+        "sessions": [
+            {
+                "session_id": session["session_id"],
+                "turn_count": session["turn_count"],
+                "last_activity": (
+                    session["last_activity"].isoformat()
+                    if session["last_activity"] is not None
+                    else None
+                ),
+                "last_message": session["last_message"],
+            }
+            for session in sessions
+        ]
+    }
+
+
 @router.get("/sessions/{session_id}/messages")
 async def get_session_messages(
     session_id: str,

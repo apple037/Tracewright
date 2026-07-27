@@ -22,13 +22,19 @@ CUSTOMER = AuthenticatedPrincipal(
 
 
 class FakeConversations:
-    def __init__(self, turns=()):
+    def __init__(self, turns=(), sessions=()):
         self.turns = turns
+        self.sessions = sessions
         self.calls = []
+        self.session_calls = []
 
     async def list_turns(self, *, tenant_id, customer_id, session_id, limit):
         self.calls.append((tenant_id, customer_id, session_id, limit))
         return self.turns
+
+    async def list_sessions(self, *, tenant_id, customer_id, limit):
+        self.session_calls.append((tenant_id, customer_id, limit))
+        return self.sessions
 
 
 def _client(conversations):
@@ -73,6 +79,31 @@ def test_the_query_is_scoped_to_the_authenticated_customer():
     # The session id is caller-supplied, so tenant and customer must come from
     # the token, never from the request.
     assert conversations.calls == [("t1", "c1", "someone-elses-session", 100)]
+
+
+def test_sessions_are_listed_newest_first_with_a_preview():
+    conversations = FakeConversations(
+        sessions=(
+            {
+                "session_id": "line-U123",
+                "turn_count": 3,
+                "last_activity": datetime(2026, 7, 26, 9, 30, tzinfo=timezone.utc),
+                "last_message": "where is my refund",
+            },
+        )
+    )
+    response = _client(conversations).get(
+        "/api/v1/sessions", headers={"Authorization": "Bearer good-token"}
+    )
+
+    assert response.status_code == 200
+    session = response.json()["sessions"][0]
+    assert session["session_id"] == "line-U123"
+    assert session["turn_count"] == 3
+    assert session["last_message"] == "where is my refund"
+    assert session["last_activity"].startswith("2026-07-26T09:30")
+    # Scope comes from the token, never the request.
+    assert conversations.session_calls == [("t1", "c1", 50)]
 
 
 def test_an_unauthenticated_caller_gets_nothing():
