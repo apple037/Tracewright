@@ -277,3 +277,63 @@ def test_refresh_clears_token_and_returns_to_token_dialog(page, console_url):
     authenticate(page)
     page.reload()
     expect(page.get_by_role("dialog", name="Demo authentication")).to_be_visible()
+
+
+CONFIG = {
+    "prompts": [], "personas": [],
+    "models": {"roles": {}, "profiles": [], "disabled_roles": [],
+               "config_path": "config/models.local.yaml"},
+    "choices": {"response_modes": [], "conversation_modes": []},
+    "settings": {"history_turns": 8},
+}
+
+KNOWLEDGE = {
+    "sources": [{
+        "source": "groupbuy", "type": "fixture", "enabled": True, "editable": True,
+        "path": "config/demo/groupbuy.json",
+        "documents": [
+            {"source_id": "groupbuy:coffee-2026-08", "version": "v1",
+             "content": "八月咖啡團購清單"},
+        ],
+    }],
+}
+
+
+def _open_tune(page, console_url, on_put=None):
+    install_api_fixture(page, scenario="empty")
+    _get_route(page, "**/api/v1/config", CONFIG)
+    _get_route(page, "**/api/v1/config/knowledge", KNOWLEDGE)
+    if on_put is not None:
+        page.route("**/api/v1/config/knowledge/*/*", on_put)
+    page.goto(console_url)
+    authenticate(page)
+    page.get_by_role("button", name="Tune").click()
+
+
+def test_tune_lists_the_documents_the_assistant_may_cite(page, console_url):
+    _open_tune(page, console_url)
+
+    expect(page.get_by_text("groupbuy:coffee-2026-08")).to_be_visible()
+    expect(page.get_by_label("groupbuy:coffee-2026-08")).to_have_value("八月咖啡團購清單")
+    # The panel must say what editing this actually means before anyone edits it.
+    expect(page.get_by_text("stated to customers as fact", exact=False)).to_be_visible()
+
+
+def test_adding_a_document_sends_its_id_and_content(page, console_url):
+    sent = {}
+
+    def capture(route):
+        sent["url"] = route.request.url
+        sent["body"] = route.request.post_data
+        _fulfill(route, {"source": "groupbuy", "source_id": "groupbuy:tea",
+                         "replaced": False})
+
+    _open_tune(page, console_url, on_put=capture)
+
+    page.get_by_label("Document id, e.g. groupbuy:tea-2026-09").fill("groupbuy:tea")
+    page.get_by_label("Add a document").fill("九月茶葉團購：烏龍 NT$500。")
+    page.get_by_role("button", name="Add", exact=True).click()
+
+    expect(page.get_by_text("groupbuy:coffee-2026-08")).to_be_visible()
+    assert sent["url"].endswith("/api/v1/config/knowledge/groupbuy/groupbuy%3Atea")
+    assert json.loads(sent["body"])["content"] == "九月茶葉團購：烏龍 NT$500。"

@@ -26,12 +26,15 @@ function section(titleKey, children) {
 
 // One editable card. `save` and `revert` take the textarea value and return the
 // server's fresh view of the artifact, which is what we re-render from.
-function editableCard({ name, meta, edited, value, save, revert, onError }) {
+function editableCard({
+  name, meta, edited, value, save, revert, onError,
+  revertLabel = "tune.revert", showBadge = true, afterRevert = null,
+}) {
   const card = el("div", { class: "tune-card" });
   const head = el("div", { class: "tune-card-head" });
   head.appendChild(el("span", { class: "tune-name", text: name }));
   head.appendChild(el("span", { class: "tune-meta", text: meta }));
-  const marker = badge(edited);
+  const marker = showBadge ? badge(edited) : el("span");
   head.appendChild(marker);
   card.appendChild(head);
 
@@ -42,7 +45,7 @@ function editableCard({ name, meta, edited, value, save, revert, onError }) {
   const actions = el("div", { class: "tune-actions" });
   const saveButton = el("button", { type: "button", text: t("tune.save") });
   const revertButton = el("button", {
-    type: "button", class: "ghost-button", text: t("tune.revert"),
+    type: "button", class: "ghost-button", text: t(revertLabel),
   });
   const note = el("span", { class: "tune-saved" });
   actions.appendChild(saveButton);
@@ -70,7 +73,11 @@ function editableCard({ name, meta, edited, value, save, revert, onError }) {
   }
 
   saveButton.addEventListener("click", () => run(save, area.value));
-  revertButton.addEventListener("click", () => run(revert, null));
+  revertButton.addEventListener("click", async () => {
+    await run(revert, null);
+    // Deleting a document removes the card entirely; reverting a prompt does not.
+    if (afterRevert) afterRevert();
+  });
   return card;
 }
 
@@ -110,6 +117,87 @@ function modelsTable(models) {
   return wrap;
 }
 
+function documentPath(source, sourceId) {
+  return `/api/v1/config/knowledge/${encodeURIComponent(source)}/${
+    encodeURIComponent(sourceId)}`;
+}
+
+// A form to add a document that does not exist yet. Editing an existing one is
+// the same PUT, so only the id field is extra.
+function addDocumentForm(source, onError, reload) {
+  const card = el("div", { class: "tune-card" });
+  card.appendChild(el("div", { class: "tune-card-head" }, [
+    el("span", { class: "tune-name", text: t("tune.addDocument") }),
+  ]));
+  const id = el("input", { type: "text", "aria-label": t("tune.documentId") });
+  id.placeholder = t("tune.documentId");
+  const area = el("textarea", { "aria-label": t("tune.addDocument") });
+  card.appendChild(id);
+  card.appendChild(area);
+
+  const actions = el("div", { class: "tune-actions" });
+  const button = el("button", { type: "button", text: t("tune.add") });
+  actions.appendChild(button);
+  card.appendChild(actions);
+
+  button.addEventListener("click", async () => {
+    if (!id.value.trim() || !area.value.trim()) return;
+    button.disabled = true;
+    try {
+      const saved = await put(documentPath(source, id.value.trim()),
+        { content: area.value });
+      if (!saved) {
+        onError(t("alert.saveFailed"));
+        return;
+      }
+      await reload();
+    } finally {
+      button.disabled = false;
+    }
+  });
+  return card;
+}
+
+function knowledgeSection(sources, onError, reload) {
+  const children = [el("p", { class: "tune-hint", text: t("tune.knowledgeHint") })];
+  if (!sources.length) {
+    children.push(el("p", { class: "tune-meta", text: t("tune.noKnowledge") }));
+    return children;
+  }
+  for (const source of sources) {
+    const labels = [source.type];
+    if (!source.editable) labels.push(t("tune.readOnly"));
+    if (!source.enabled) labels.push(t("tune.off"));
+    children.push(el("div", { class: "tune-card-head" }, [
+      el("span", { class: "tune-name", text: source.source }),
+      el("span", { class: "tune-meta", text: labels.join(" · ") }),
+    ]));
+
+    const documents = source.documents || [];
+    if (!documents.length) {
+      children.push(el("p", { class: "tune-meta", text: t("tune.noDocuments") }));
+    }
+    for (const doc of documents) {
+      children.push(editableCard({
+        name: doc.source_id,
+        meta: doc.version,
+        value: doc.content,
+        showBadge: false,
+        revertLabel: "tune.delete",
+        save: (text) => put(documentPath(source.source, doc.source_id),
+          { content: text, version: doc.version }),
+        revert: () => del(documentPath(source.source, doc.source_id)),
+        afterRevert: reload,
+        onError,
+      }));
+    }
+    if (source.editable && source.enabled) {
+      children.push(addDocumentForm(source.source, onError, reload));
+    }
+  }
+  return children;
+}
+
 function settingsList(settings) {
   const list = el("div", { class: "tune-scroll" });
   const table = el("table", { class: "tune-table" });
@@ -136,6 +224,22 @@ export function createTunePanel({ dialog, body, onError }) {
       return;
     }
     render(config);
+    await refreshKnowledge();
+  }
+
+  // Its own container so adding or deleting a document can re-render just this
+  // section, without reopening the dialog and losing unsaved prompt edits.
+  const knowledgeBody = el("div");
+
+  async function refreshKnowledge() {
+    const { ok, body: payload } = await requestJson("/api/v1/config/knowledge");
+    knowledgeBody.textContent = "";
+    // A runtime without an editable corpus answers 503; say so rather than
+    // showing an empty box.
+    const sources = ok && payload ? payload.sources || [] : [];
+    for (const child of knowledgeSection(sources, onError, refreshKnowledge)) {
+      knowledgeBody.appendChild(child);
+    }
   }
 
   function render(config) {
@@ -172,6 +276,7 @@ export function createTunePanel({ dialog, body, onError }) {
       })
     )));
 
+    body.appendChild(section("tune.knowledge", [knowledgeBody]));
     body.appendChild(section("tune.models", [modelsTable(config.models || {})]));
     body.appendChild(section("tune.settings", [settingsList(config.settings || {})]));
   }

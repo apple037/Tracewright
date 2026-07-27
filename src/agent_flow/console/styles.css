@@ -711,6 +711,15 @@ dialog menu {
   font-size: 0.78rem;
 }
 
+/* A knowledge document is shorter than a system prompt; nine rems of empty
+   box for a one-line group-buy entry reads as a mistake. */
+.tune-card input[type="text"] {
+  width: 100%;
+  margin-bottom: 0.4rem;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+}
+
 .tune-actions {
   display: flex;
   gap: 0.5rem;
