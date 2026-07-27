@@ -203,6 +203,8 @@ contract 加到 `pipeline/model_outputs.py`。節點就是接受型別化輸入�
 | `GET /api/v1/traces/{id}` | 整份 trace，逐節點。 |
 | `GET /api/v1/sessions` | 該 token 看得到的對話，最新在前。 |
 | `GET /api/v1/sessions/{id}/messages` | 重播對話紀錄——Console 重新載入時走這條。 |
+| `GET /api/v1/sessions/{id}/memory` | 下一回合 pipeline 會載入的那個視窗，不是完整對話紀錄（Admin）。 |
+| `DELETE /api/v1/sessions/{id}/memory` | 忘掉這個 session。不可復原，而且會一併清掉對話紀錄（Admin）。 |
 | `GET/PUT/DELETE /api/v1/config/...` | 即時的 prompt、persona、knowledge（Admin）。 |
 
 `/docs` 是完整的互動式文件，有 Authorize 按鈕。

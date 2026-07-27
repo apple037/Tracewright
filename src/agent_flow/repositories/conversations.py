@@ -146,6 +146,31 @@ class PostgresConversationRepository:
         )
         return (await cursor.fetchone())["id"]
 
+    @property
+    def history_turns(self) -> int:
+        return self._history_turns
+
+    async def clear_session(
+        self, *, tenant_id: str, customer_id: str, session_id: str
+    ) -> int:
+        """Forget one session's exchanges. Returns how many were deleted.
+
+        Scoped like every other read here, so a guessed session id cannot erase
+        another customer's chat. Traces and spans are left alone: what was said
+        and why is the audit record, and this is a memory reset, not a redaction.
+        Snapshots are left alone too — each one belongs to a trace that already
+        ran, and retrying that trace has to replay the context it actually saw.
+        """
+        async with self._pool.connection() as connection:
+            cursor = await connection.execute(
+                """
+                DELETE FROM runtime.turns
+                WHERE tenant_id = %s AND customer_id = %s AND session_id = %s
+                """,
+                (tenant_id, customer_id, session_id),
+            )
+            return cursor.rowcount
+
     async def list_turns(
         self, *, tenant_id: str, customer_id: str, session_id: str, limit: int = 100
     ) -> tuple[dict[str, object], ...]:

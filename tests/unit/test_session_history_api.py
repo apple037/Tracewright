@@ -19,14 +19,20 @@ CUSTOMER = AuthenticatedPrincipal(
     subject_id="demo", tenant_id="t1", customer_id="c1",
     scopes=frozenset({"turn:write", "trace:read"}),
 )
+ADMIN = AuthenticatedPrincipal(
+    subject_id="demo-admin", tenant_id="t1", customer_id="c1",
+    scopes=frozenset({"turn:write", "trace:read", "trace:admin"}),
+)
 
 
 class FakeConversations:
-    def __init__(self, turns=(), sessions=()):
+    def __init__(self, turns=(), sessions=(), history_turns=8):
         self.turns = turns
         self.sessions = sessions
+        self.history_turns = history_turns
         self.calls = []
         self.session_calls = []
+        self.cleared = []
 
     async def list_turns(self, *, tenant_id, customer_id, session_id, limit):
         self.calls.append((tenant_id, customer_id, session_id, limit))
@@ -36,10 +42,14 @@ class FakeConversations:
         self.session_calls.append((tenant_id, customer_id, limit))
         return self.sessions
 
+    async def clear_session(self, *, tenant_id, customer_id, session_id):
+        self.cleared.append((tenant_id, customer_id, session_id))
+        return len(self.turns)
+
 
 def _client(conversations):
     async def authenticate(token):
-        return CUSTOMER if token == "good-token" else None
+        return {"good-token": CUSTOMER, "admin-token": ADMIN}.get(token)
 
     return TestClient(
         create_app(conversations=conversations, authenticate=authenticate)
@@ -111,6 +121,53 @@ def test_an_unauthenticated_caller_gets_nothing():
     response = _client(conversations).get("/api/v1/sessions/console-1/messages")
     assert response.status_code == 401
     assert conversations.calls == []
+
+
+def test_memory_reports_the_window_the_pipeline_will_load_not_the_transcript():
+    conversations = FakeConversations(
+        tuple(_turn(f"ask {i}", f"answer {i}") for i in range(5)), history_turns=2
+    )
+    response = _client(conversations).get(
+        "/api/v1/sessions/console-1/memory",
+        headers={"Authorization": "Bearer admin-token"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    # Five exchanges are stored, two are reachable. That gap is the whole point
+    # of the endpoint: it is the answer to "why did it forget that".
+    assert body["exchanges"] == {"stored": 5, "in_window": 2}
+    assert body["history_turns"] == 2
+    assert [(m["role"], m["text"]) for m in body["messages"]] == [
+        ("customer", "ask 3"), ("assistant", "answer 3"),
+        ("customer", "ask 4"), ("assistant", "answer 4"),
+    ]
+
+
+def test_resetting_memory_reports_what_it_forgot_and_stays_in_scope():
+    conversations = FakeConversations((_turn("hi", "hello"),))
+    response = _client(conversations).delete(
+        "/api/v1/sessions/console-1/memory",
+        headers={"Authorization": "Bearer admin-token"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"session_id": "console-1", "exchanges_forgotten": 1}
+    assert conversations.cleared == [("t1", "c1", "console-1")]
+
+
+@pytest.mark.parametrize("method", ["get", "delete"])
+def test_memory_is_closed_to_a_customer_token(method):
+    # Reading it replays the customer's own words; deleting it cannot be undone.
+    conversations = FakeConversations((_turn("hi", "hello"),))
+    response = getattr(_client(conversations), method)(
+        "/api/v1/sessions/console-1/memory",
+        headers={"Authorization": "Bearer good-token"},
+    )
+
+    assert response.status_code == 403
+    assert conversations.calls == []
+    assert conversations.cleared == []
 
 
 @pytest.mark.parametrize(

@@ -299,6 +299,98 @@ async def test_turn_append_is_idempotent_by_trace_before_finalization(
 
 
 @pytest.mark.asyncio
+async def test_snapshot_is_windowed_oldest_first_and_keeps_handed_off_exchanges(
+    postgres_pool, trace_repository
+):
+    # What the classifier is actually handed. Three things have to hold at once
+    # and only the database can say whether they do: the window is the newest
+    # HISTORY_TURNS exchanges, they arrive oldest-first so "it" resolves to the
+    # right antecedent, and a handed-off turn is still in there — the customer
+    # said it, and dropping it makes a rephrase start from zero.
+    conversations = PostgresConversationRepository(postgres_pool, history_turns=2)
+    for index in range(3):
+        trace_id = await trace_repository.start_trace(
+            tenant_id="t1", customer_id="c1", session_id="s1"
+        )
+        await conversations.append_turn(
+            tenant_id="t1",
+            customer_id="c1",
+            session_id="s1",
+            trace_id=trace_id,
+            customer_text=f"ask {index}",
+            assistant_text=f"answer {index}",
+        )
+        # The last turn is handed off. The reply is written while the trace is
+        # still running; the trace only becomes 'failed' afterwards.
+        await trace_repository.finish_trace(
+            trace_id, "failed" if index == 2 else "succeeded", tenant_id="t1"
+        )
+
+    reader_trace = await trace_repository.start_trace(
+        tenant_id="t1", customer_id="c1", session_id="s1"
+    )
+    snapshot = await conversations.get_snapshot(
+        tenant_id="t1", customer_id="c1", session_id="s1", trace_id=reader_trace
+    )
+    assert snapshot.messages == (
+        ConversationTurn(role="customer", text="ask 1"),
+        ConversationTurn(role="assistant", text="answer 1"),
+        ConversationTurn(role="customer", text="ask 2"),
+        ConversationTurn(role="assistant", text="answer 2"),
+    )
+
+    # Memory is per session, not per customer: a second chat starts empty.
+    other_trace = await trace_repository.start_trace(
+        tenant_id="t1", customer_id="c1", session_id="s2"
+    )
+    other = await conversations.get_snapshot(
+        tenant_id="t1", customer_id="c1", session_id="s2", trace_id=other_trace
+    )
+    assert other.messages == ()
+
+
+@pytest.mark.asyncio
+async def test_clearing_a_session_forgets_only_that_session(
+    postgres_pool, trace_repository
+):
+    conversations = PostgresConversationRepository(postgres_pool)
+    for session_id in ("s1", "s2"):
+        trace_id = await trace_repository.start_trace(
+            tenant_id="t1", customer_id="c1", session_id=session_id
+        )
+        await conversations.append_turn(
+            tenant_id="t1",
+            customer_id="c1",
+            session_id=session_id,
+            trace_id=trace_id,
+            customer_text=f"{session_id} question",
+            assistant_text=f"{session_id} answer",
+        )
+        await trace_repository.finish_trace(trace_id, "succeeded", tenant_id="t1")
+
+    assert await conversations.clear_session(
+        tenant_id="t1", customer_id="c1", session_id="s1"
+    ) == 1
+
+    reader = await trace_repository.start_trace(
+        tenant_id="t1", customer_id="c1", session_id="s1"
+    )
+    cleared = await conversations.get_snapshot(
+        tenant_id="t1", customer_id="c1", session_id="s1", trace_id=reader
+    )
+    assert cleared.messages == ()
+    # The other chat is untouched, and so is the trace record of what was said.
+    assert len(
+        await conversations.list_turns(
+            tenant_id="t1", customer_id="c1", session_id="s2"
+        )
+    ) == 1
+    assert await trace_repository.get_trace(
+        reader, tenant_id="t1", customer_id="c1"
+    ) is not None
+
+
+@pytest.mark.asyncio
 async def test_trace_finalization_is_terminal_and_cannot_be_clobbered(
     trace_repository,
 ):
