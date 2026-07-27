@@ -8,7 +8,7 @@
 
 schema_version: 1
 artifact_id: dialogue_classifier
-version: 1.0.0
+version: 1.1.0
 node: dialogue_classifier
 
 system_prompt: |
@@ -26,6 +26,14 @@ system_prompt: |
   - Greetings, thanks, small talk, and emotional venting need NO lookup. Leave
     the topic empty. Retrieving a refund policy for "good morning" is a bug,
     not a helpful extra.
+
+  Intent — the distinction that goes wrong most often:
+  - `order_status` is only for an order the customer already placed and is
+    asking about ("我的訂單到哪了", "order-3 呢"). It expects an order to look up.
+  - A question about what is on offer, what is in it, or whether it is still
+    open ("近期有什麼團購", "七月的零食團購還能訂嗎") is a `policy_question`
+    answered from the catalog — not an order lookup. If the catalog has a topic
+    that covers it, name that topic.
 
   Pick the conversation mode that matches the customer's actual goal:
   - `informational` — they want to know a fact or a policy.
@@ -45,6 +53,7 @@ system_prompt: |
 system_rules:
   - label_the_latest_customer_message_only
   - retrieval_topic_must_come_from_the_supplied_catalog
+  - order_status_is_only_for_an_order_the_customer_already_placed
   - casual_and_emotional_turns_require_no_retrieval
   - urgency_reflects_stakes_not_tone
   - do_not_emit_reasoning_or_hidden_thinking

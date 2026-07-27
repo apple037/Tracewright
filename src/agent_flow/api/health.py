@@ -15,6 +15,7 @@ async def live():
 @router.get("/ready")
 async def ready(request: Request):
     app_services = services(request)
+    await _recheck_models(app_services)
     checks: dict[str, ReadinessCheck] = {
         "runtime_artifacts": ReadinessCheck(status=_status(app_services.artifact_status)),
         "pipeline": ReadinessCheck(
@@ -36,6 +37,21 @@ async def ready(request: Request):
             },
         },
     )
+
+
+async def _recheck_models(app_services) -> None:
+    """Retry a failed model probe, so a slow model server recovers on its own.
+
+    Only runs while the cached result is not ok — a ready app never pays for
+    the probe.
+    """
+    recheck = getattr(app_services, "recheck_models", None)
+    if recheck is None:
+        return
+    current = app_services.dependency_checks.get("models")
+    if current is not None and current.status == "ok":
+        return
+    app_services.dependency_checks["models"] = await recheck()
 
 
 def _status(value: str) -> str:

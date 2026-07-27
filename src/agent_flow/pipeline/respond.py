@@ -54,12 +54,20 @@ class RepairRequest(StrictModel):
 
 
 def _reconcile_citations(draft: ResponseDraft) -> ResponseDraft:
+    # A model answering "we do not have that information" still fills the field,
+    # with "" — a citation that cites nothing, which then reaches the console.
+    citations = tuple(value for value in draft.citations if value.strip())
+    evidence_ids = tuple(value for value in draft.evidence_ids if value.strip())
     # Models reliably fill evidence_ids but often omit citations. Each
     # evidence_id is itself a valid citation, so mirror them when the model
     # claimed evidence yet cited nothing — a format fix, not invented grounding.
-    if draft.evidence_ids and not draft.citations:
-        return draft.model_copy(update={"citations": draft.evidence_ids})
-    return draft
+    if evidence_ids and not citations:
+        citations = evidence_ids
+    if citations == draft.citations and evidence_ids == draft.evidence_ids:
+        return draft
+    return draft.model_copy(
+        update={"citations": citations, "evidence_ids": evidence_ids}
+    )
 
 
 def _system_prompt(

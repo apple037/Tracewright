@@ -34,6 +34,10 @@ class AppServices:
     inbound: object | None = None
     legacy_turn_timeout_seconds: float = 60.0
     runtime_config: object | None = None
+    # Re-runs the model capability probe. The startup probe is a snapshot: boot
+    # while the model server is still loading and a cached failure kept the app
+    # not_ready forever, needing a restart it did not deserve.
+    recheck_models: object | None = None
 
 
 def services(request: Request) -> AppServices:

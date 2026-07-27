@@ -134,3 +134,15 @@ async def test_required_probe_failure_marks_models_not_ready_without_content(
     body = response.json()
     assert body["checks"]["models"]["error_code"] == "MODEL_CAPABILITY_FAILED"
     assert "private model output" not in json.dumps(body)
+
+
+async def test_a_model_server_that_starts_late_recovers_without_a_restart(
+    runtime_app, fake_inventory_probe
+):
+    # Booting while the model server still loads used to cache the failure for
+    # the life of the process, so a healthy app reported not_ready forever.
+    fake_inventory_probe.failure = RuntimeError("still loading")
+    async with runtime_app.router.lifespan_context(runtime_app):
+        assert (await call_ready(runtime_app)).status_code == 503
+        fake_inventory_probe.failure = None
+        assert (await call_ready(runtime_app)).status_code == 200

@@ -139,6 +139,7 @@ def _install_services(
         inbound=components.inbound,
         legacy_turn_timeout_seconds=settings.legacy_turn_timeout_seconds,
         runtime_config=components.runtime_config,
+        recheck_models=lambda: _probe_models_check(components),
     )
 
 

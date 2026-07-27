@@ -706,6 +706,24 @@ async def test_repair_uses_generator_with_only_failed_criteria(
     assert not hasattr(request, "validation_reason_codes")
 
 
+def test_a_blank_citation_never_reaches_the_customer():
+    # Answering "we do not have that information", the model still fills the
+    # field — with "". The console then showed a citation citing nothing.
+    from agent_flow.pipeline.respond import _reconcile_citations
+
+    draft = ResponseDraft(text="目前沒有這項資訊。", citations=("", "  "), evidence_ids=())
+
+    assert _reconcile_citations(draft).citations == ()
+
+
+def test_evidence_ids_still_become_citations_when_the_model_omits_them():
+    from agent_flow.pipeline.respond import _reconcile_citations
+
+    draft = ResponseDraft(text="在運送中。", citations=(), evidence_ids=("tool-result-1",))
+
+    assert _reconcile_citations(draft).citations == ("tool-result-1",)
+
+
 def _snapshot():
     from datetime import datetime, timezone
     from agent_flow.contracts import ConversationSnapshot
