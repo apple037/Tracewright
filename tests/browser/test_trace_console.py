@@ -149,8 +149,21 @@ def test_chat_shows_customer_bubble_and_safe_terminal_reply(page, chat_url):
     authenticate(page)
     submit_chat(page, "我的訂單在哪裡？")
     expect(page.locator(".chat-customer .chat-bubble")).to_have_text("我的訂單在哪裡？")
-    expect(page.get_by_text("Running")).to_be_visible()
     expect(page.locator(".chat-agent .chat-bubble")).to_have_text("訂單正在配送中")
+    # "Running" is a placeholder for the reply, so the reply has to replace it.
+    # It used to be popped only by another status line, which left one sitting
+    # above every answer for the rest of the conversation.
+    expect(page.locator(".chat-status")).to_have_count(0)
+
+
+def test_the_chat_says_it_is_working_while_the_turn_is_still_running(page, chat_url):
+    # The status sequence never reaches a terminal state, so the placeholder is
+    # all there is — it must be shown, or a slow turn looks like a dead page.
+    install_submission_sequence(page, statuses=["queued", "running"])
+    page.goto(chat_url)
+    authenticate(page)
+    submit_chat(page, "我的訂單在哪裡？")
+    expect(page.locator(".chat-status .chat-bubble")).to_have_text("Running")
 
 
 def test_demo_page_chat_selects_trace_and_shows_reply(page, console_url):

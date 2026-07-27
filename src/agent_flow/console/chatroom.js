@@ -69,7 +69,10 @@ export function createChatroom({ transcript, onTrace, onError, onBusy }) {
   function pushMessage(role, text, extra = {}) {
     const last = state.messages[state.messages.length - 1];
     if (last && last.role === role && last.text === text) return;
-    if (role === "status" && last && last.role === "status") state.messages.pop();
+    // A status line is a placeholder for a reply that has not arrived. Drop it
+    // when anything replaces it — another status, or the reply itself. Popping
+    // it only for another status left "Running" sitting above every answer.
+    if (last && last.role === "status") state.messages.pop();
     state.messages.push({ role, text, ...extra });
     render();
   }
