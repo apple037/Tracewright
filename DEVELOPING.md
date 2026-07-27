@@ -44,9 +44,13 @@ uv run pytest tests/unit tests/contract -q      # ~300 tests, no services
 `uv run pytest` with no arguments tries to run all six and will fail on a
 machine without Postgres and a model server. That is not a broken checkout.
 
-**A known flake:** `tests/browser::test_completed_node_toggles_with_keyboard`
-asserts on a node while the console's 5-second list refresh can re-render it.
-Roughly one run in eight. It is a race in the test, not in the console.
+**If you add a browser test, use the `authenticate()` helper and do not
+reimplement it.** Logging in restores the chat, loads the traces and then puts
+the cursor in the composer, several awaits after the click returns. A test that
+starts driving the page before that lands gets its focus stolen mid-test. The
+helper waits for the composer to be focused, which is the app's own signal that
+login has settled; skipping that wait is what made two tests flaky at about one
+run in four.
 
 ## How a message becomes a reply
 
