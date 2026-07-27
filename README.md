@@ -81,20 +81,26 @@ make restart      # pick up edits to config/*.yaml
 
 ## Changing how it behaves
 
-Four files, no Python. See **[TUNING.md](TUNING.md)** for the detail.
+No Python. See **[TUNING.md](TUNING.md)** for the detail — that guide is written
+for whoever shapes the assistant, not for a programmer.
 
 | I want to change… | Edit |
 |---|---|
-| How it **sounds** | `config/personas/*.yaml` |
-| What each step **decides** | `config/prompts/*.yaml` |
-| **Which model** does what | `config/models.yaml` |
+| What the AI **knows** | Console → **Tune** → Knowledge, or `config/demo/*.json` |
+| How it **sounds** | Console → **Tune** → Voice, or `config/personas/*.yaml` |
+| What each step **decides** | Console → **Tune** → Instructions, or `config/prompts/*.yaml` |
+| Where knowledge **comes from** | `config/knowledge.yaml` |
+| Where lookups **go** (ERP, CRM) | `config/tools.yaml` |
+| **Which model** does what | the file `MODEL_CONFIG_PATH` points at |
 | Addresses, passwords, memory length | `.env` |
-| Where its knowledge **comes from** | `config/knowledge.yaml` |
-| What the AI **knows** | the files that config points at, e.g. `config/demo/rag.json` |
 
-Or click **Tune** in the console with an admin token: it shows every step's
-current instructions, the voice, and which model runs each step — and lets you
-edit the instructions live, applied to the very next message.
+Click **Tune** in the console with an admin token: it shows every step's current
+instructions, the voice, the documents the assistant may cite, and which model
+runs each step — and lets you edit them live, applied to the very next message.
+
+Taking this project over? **[DEVELOPING.md](DEVELOPING.md)** — how to run the
+tests, the one invariant the design exists to protect, and what was deliberately
+left unbuilt.
 
 ---
 
@@ -127,8 +133,15 @@ edit the instructions live, applied to the very next message.
    | `how long do refunds take?` | Answers from the knowledge base with a citation |
    | `how long does shipping take?` | A different document answers — not the refund policy |
    | `八月團購有哪些咖啡可以選？` | Reads the group-buy list and quotes the items and prices |
+   | `這些品項的特色有啥？` | A **different document** answers — flavour notes, not the prices again |
    | `七月零食團購的取貨時間是幾點到幾點？` | The document has no pickup hours, so it **says so** instead of answering with the nearest fact it does have |
+   | `會員等級有哪些？點數怎麼算？` | Tiers, thresholds and the points rule, from one document |
+   | `我有什麼折扣碼可以用嗎？` | A document bound to **this customer only** — another customer gets nothing |
+   | `夏季特賣還有嗎？` | The promotion **expired in 2025**, so it is invisible: no stale quote, just "I don't have that" |
    | `where is my refund?` | **Hands off to a human** — there is no verified refund source, so it refuses to guess |
+
+   Try `/docs` too: **http://localhost:8080/docs** is the API, with an
+   Authorize button — paste the same admin token and call any endpoint.
 
 2. Its trace **auto-selects** and **streams live** as each step runs.
 3. Click any step to expand what it decided.
@@ -156,7 +169,7 @@ edit the instructions live, applied to the very next message.
 | Data models | **Pydantic 2** | Strict, typed data at every step (no loose dicts). |
 | Database | **PostgreSQL 16 + pgvector** | Stores traces, jobs, and the searchable knowledge base. |
 | DB access | **psycopg 3** + **Alembic** | Queries + versioned schema migrations. |
-| AI models | Any **OpenAI-compatible** server (Ollama, vLLM, …) | The actual language models; swappable in `config/models.yaml`. |
+| AI models | Any **OpenAI-compatible** server (Ollama, vLLM, …) | The actual language models; swappable in the models file. |
 | Frontend | **Plain HTML/CSS/JavaScript** (no framework) | The console — nothing to build, just static files. |
 | Packaging | **uv** + **hatchling** | Fast installs, reproducible builds. |
 | Containers | **Docker Compose** | One command runs DB + API + worker. |
@@ -216,7 +229,8 @@ src/agent_flow/
 └── console/           # the web UI (HTML/CSS/JS, i18n EN + 中文)
 
 config/                # editable settings, prompts, demo knowledge base
-├── models.yaml        # which model powers each step
+├── models.local.yaml  # which model powers each step (MODEL_CONFIG_PATH picks)
+├── tools.yaml         # where lookups go: demo fixture, or a real ERP/CRM
 ├── knowledge.yaml     # every knowledge source the AI may retrieve from
 ├── prompts/           # the instructions given to each AI step
 ├── personas/          # how the assistant sounds
@@ -277,7 +291,9 @@ a demo; this section is the operational contract.
 - Each pipeline step is a **model role** (`dialogue_classifier`,
   `strategy_advisor`, `response_generator`, `response_judge`, `embedding`, …).
   the **role names are stable**; the *profile* and *model* names behind them are
-  replaceable in `config/models.yaml`. Swap models there, not in code.
+  replaceable in the models file `MODEL_CONFIG_PATH` names — there are
+  several in `config/`, and editing the one that is not live changes nothing.
+  Tune → Models shows the live path.
 - The default config points every chat role at one model on one
   OpenAI-compatible endpoint (`REMOTE_MODEL_BASE_URL`). Split roles across
   profiles when you want a bigger model for the final reply only.
