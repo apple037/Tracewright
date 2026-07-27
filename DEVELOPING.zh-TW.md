@@ -42,6 +42,20 @@ uv run --frozen python -m agent_flow.worker --run         # 第二個終端
 `APP_RUNTIME_MODE=demo` 由 `compose.yaml` 掌握。在 `.env` 設這兩個值只會影響
 本機直跑。
 
+## 相依套件
+
+沒有 `requirements.txt`，加一份只會多一個要跟 lock 檔同步的東西。三個地方，其中
+一個是即時產生的：
+
+| 在哪 | 是什麼 |
+|---|---|
+| `pyproject.toml` | 8 個執行相依與 4 個開發相依，含版本範圍。要改就改這裡。 |
+| `uv.lock` | 所有傳遞相依的釘選版本與雜湊值——已納入版控，`--frozen` 安裝的就是它。不要手改。 |
+| `uv export --frozen --no-dev` | 需要時產生 pip 相容清單（含雜湊），給沒有 uv 的機器用。 |
+
+`uv sync --frozen` 在 lock 與 `pyproject.toml` 不一致時會直接失敗而不是重新解析，
+所以改相依就要跑 `uv lock` 並把結果一起提交。
+
 ## 測試
 
 六個目錄，成本並不相同。

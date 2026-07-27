@@ -43,6 +43,20 @@ A config change still needs that restart: artifacts are loaded once, at startup.
 `postgres`) and pins `APP_RUNTIME_MODE=demo`. Setting those in `.env` affects
 host startup only.
 
+## Dependencies
+
+There is no `requirements.txt`, and adding one would create a second thing to
+keep in step with the lock file. Three places, one of them generated:
+
+| Where | What |
+|---|---|
+| `pyproject.toml` | The 8 runtime dependencies and 4 dev ones, with version ranges. Edit here. |
+| `uv.lock` | Every transitive package pinned with hashes — committed, and what `--frozen` installs. Never edit by hand. |
+| `uv export --frozen --no-dev` | A pip-compatible list with hashes, on demand, for a machine without uv. |
+
+`uv sync --frozen` fails rather than resolving if the lock and `pyproject.toml`
+disagree, so a dependency change means `uv lock` and committing the result.
+
 ## The tests
 
 Six directories, and they do not all cost the same.
