@@ -172,12 +172,10 @@ class MockRagClient:
         _require_context(context)
         started = time.monotonic()
         eligible = [
-            record
-            for record in self._records
-            if record.tenant_id == context.tenant_id
-            and record.customer_id in (None, context.customer_id)
-            and (record.effective_at is None or record.effective_at <= self._as_of)
-            and (record.valid_until is None or record.valid_until > self._as_of)
+            record for record in self._records if self._live(record) and (
+                record.tenant_id == context.tenant_id
+                and record.customer_id in (None, context.customer_id)
+            )
         ]
         # The pipeline queries by a source_id taken from catalog(), so an exact
         # hit is the whole answer. Without this a second document would ride
@@ -205,19 +203,32 @@ class MockRagClient:
             )
         return RagSearchResult(items=items)
 
+    def _live(self, record: _RagFixture) -> bool:
+        return (
+            (record.effective_at is None or record.effective_at <= self._as_of)
+            and (record.valid_until is None or record.valid_until > self._as_of)
+        )
+
     @property
     def source_ids(self) -> frozenset[str]:
-        return frozenset(record.source_id for record in self._records)
+        return frozenset(
+            record.source_id for record in self._records if self._live(record)
+        )
 
     def catalog(self) -> tuple[str, ...]:
         """Brief 'source_id: snippet' lines describing what the corpus owns.
 
         Fed to the classifier so it can judge whether a turn needs retrieval.
         Deduped by source_id and bounded so a large corpus stays a short prompt.
+
+        Expired documents are left out. The classifier may only name a source it
+        saw here, so advertising one that retrieval then refuses produced the
+        worst outcome available: an empty exact match, a fall back to the whole
+        corpus, and an answer drawn from an unrelated document.
         """
         seen: dict[str, str] = {}
         for record in self._records:
-            if record.source_id in seen:
+            if record.source_id in seen or not self._live(record):
                 continue
             snippet = " ".join(record.content.split())[:120]
             seen[record.source_id] = f"{record.source_id}: {snippet}"

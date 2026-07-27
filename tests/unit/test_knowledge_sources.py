@@ -166,3 +166,38 @@ def test_a_malformed_edit_leaves_the_previous_corpus_serving(writable, tmp_path)
 
     # A half-written file must not take retrieval down.
     assert writable.catalog() == before
+
+
+@pytest.mark.asyncio
+async def test_an_expired_document_is_neither_offered_nor_retrieved(context):
+    sources = KnowledgeSources.from_config("config/knowledge.yaml")
+
+    # The demo corpus carries a promotion that ended in 2025. The classifier may
+    # only name a source it saw in the catalog, so an expired document that is
+    # still advertised gets named, matches nothing, and retrieval falls back to
+    # the whole corpus — the assistant then answers from an unrelated document.
+    assert "promo:summer-2025" not in " ".join(sources.catalog())
+
+    result = await sources.search(
+        context, RagSearchRequest(query="promo:summer-2025", limit=5)
+    )
+
+    assert "promo:summer-2025" not in {item.source_id for item in result.items}
+
+
+@pytest.mark.asyncio
+async def test_a_document_bound_to_one_customer_stays_with_them(context):
+    sources = KnowledgeSources.from_config("config/knowledge.yaml")
+    other = AuthorizedCustomerContext(
+        subject_id="u2", tenant_id="t1", customer_id="c2"
+    )
+
+    mine = await sources.search(
+        context, RagSearchRequest(query="account:c1:coupon", limit=5)
+    )
+    theirs = await sources.search(
+        other, RagSearchRequest(query="account:c1:coupon", limit=5)
+    )
+
+    assert "account:c1:coupon" in {item.source_id for item in mine.items}
+    assert "account:c1:coupon" not in {item.source_id for item in theirs.items}
