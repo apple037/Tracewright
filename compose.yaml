@@ -5,6 +5,9 @@ x-app-env: &app-env
   MODEL_CONFIG_PATH: ${MODEL_CONFIG_PATH:-config/models.yaml}
   ASSURANCE_MODE: ${ASSURANCE_MODE:-bootstrap}
   HISTORY_TURNS: ${HISTORY_TURNS:-8}
+  # Raise on a slow machine: one model call, not one turn. A local 9B at
+  # a few tokens a second needs minutes for a reply.
+  MODEL_TIMEOUT_SECONDS: ${MODEL_TIMEOUT_SECONDS:-90}
   APP_RUNTIME_MODE: demo
   DEMO_CUSTOMER_TOKEN: ${DEMO_CUSTOMER_TOKEN}
   DEMO_ADMIN_TOKEN: ${DEMO_ADMIN_TOKEN}

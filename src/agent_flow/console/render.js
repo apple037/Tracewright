@@ -123,6 +123,20 @@ export function renderTraceList(container, state, onSelect) {
   }
 }
 
+// Milliseconds a span took, or null while it is still running — an unfinished
+// node must not read as an instant one.
+function spanDuration(span) {
+  if (!span || !span.created_at || !span.finished_at) return null;
+  const started = Date.parse(span.created_at);
+  const finished = Date.parse(span.finished_at);
+  if (Number.isNaN(started) || Number.isNaN(finished)) return null;
+  return Math.max(0, finished - started);
+}
+
+function durationLabel(ms) {
+  return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} s`;
+}
+
 function statusBadge(status) {
   const icon = { succeeded: "✓", completed: "✓", running: "…", queued: "…", failed: "✗" };
   return el("span", {
@@ -327,10 +341,13 @@ export function renderWorkspace(container, state, onToggle) {
   if (state.loadFailed) {
     container.appendChild(el("p", { class: "empty-note", text: t("alert.traceFailed") }));
   }
+  const total = spanDuration(trace);
   container.appendChild(el("p", {
     class: "workspace-heading",
     dataset: { selectedTrace: "" },
-    text: traceLabel(trace),
+    text: total === null
+      ? traceLabel(trace)
+      : `${traceLabel(trace)} · ${durationLabel(total)}`,
   }));
   const conversation = renderConversation(trace, state);
   if (conversation) container.appendChild(conversation);
@@ -354,6 +371,13 @@ export function renderWorkspace(container, state, onToggle) {
     });
     item.appendChild(el("strong", { text: node }));
     item.appendChild(statusBadge(span.status));
+    // Where the turn actually went. The per-model-call timing is in the
+    // reasoning trail, but that does not say which step cost the wall clock —
+    // a node can be slow from one long call or from three short ones.
+    const elapsed = spanDuration(span);
+    if (elapsed !== null) {
+      item.appendChild(el("span", { class: "node-elapsed", text: durationLabel(elapsed) }));
+    }
     const panel = detailPanel(nodeSummaryFields(trace, node), trace.issue_summary, node);
     panel.id = panelId;
     panel.hidden = !expanded;

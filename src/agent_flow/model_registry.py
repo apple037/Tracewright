@@ -262,7 +262,7 @@ class ModelInventoryProbe:
         match = next((entry for entry in entries if entry.get("id") == resolved.model), None)
         if match is None:
             raise RuntimeError(f"exact model not found: {resolved.model}")
-        return match.get("digest"), _positive_int_or_none(match.get("max_model_len"))
+        return match.get("digest"), _openai_context_length(match)
 
     async def _require_ollama_model(
         self, resolved: ResolvedModel
@@ -311,6 +311,26 @@ def _positive_int_or_none(value: object) -> int | None:
     if isinstance(value, int) and value > 0:
         return value
     return None
+
+
+def _openai_context_length(entry: dict[str, object]) -> int | None:
+    """Context window from a /v1/models entry, whichever way it is spelled.
+
+    vLLM reports `max_model_len` at the top level. llama.cpp reports the context
+    it was actually started with as `meta.n_ctx`, and nothing else — so reading
+    only vLLM's spelling left `min_context_length` unverifiable there, which is
+    worse than it sounds: the check silently passes instead of failing.
+    """
+    meta = entry.get("meta")
+    candidates = [entry.get("max_model_len"), entry.get("context_length")]
+    if isinstance(meta, dict):
+        # n_ctx is what the server will serve; n_ctx_train is what the weights
+        # were trained for and is not a promise about this process.
+        candidates.append(meta.get("n_ctx"))
+    return next(
+        (length for length in map(_positive_int_or_none, candidates) if length),
+        None,
+    )
 
 
 class _RoleProbeSchemas(Mapping[str, type[BaseModel]]):

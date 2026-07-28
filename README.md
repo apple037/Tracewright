@@ -145,6 +145,7 @@ it fails if a model role cannot be reached.
 | `DATABASE_URL` | You run without Docker. Compose supplies its own and ignores this. |
 | `KNOWLEDGE_BASE_URL` | You point at a real knowledge base, or run without Docker (then it is port 8000, not 8080). |
 | `LOCAL_VLLM_BASE_URL`, `LOCAL_VLLM_API_KEY` | A profile in your models file points at a local vLLM server. |
+| `MODEL_TIMEOUT_SECONDS` | Your model is slow. Default 90 suits a hosted model; a local one generating at a few tokens a second needs far more, and the failure reads as `UNEXPECTED_ERROR`, not as a timeout. |
 
 ### Leave these alone unless you have a reason
 

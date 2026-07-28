@@ -442,6 +442,13 @@ main.demo-grid {
   gap: 0.4rem;
 }
 
+.node-elapsed {
+  margin-left: 0.4rem;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  color: var(--text-dim);
+}
+
 .node {
   border: 1px solid var(--border);
   border-left: 3px solid var(--border);

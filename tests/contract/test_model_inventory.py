@@ -435,3 +435,35 @@ async def test_inventory_transport_or_parse_failure_includes_role_and_stage(
         await ModelInventoryProbe(bootstrap_registry).probe_role("response_generator")
 
     assert "local-secret" not in str(failure.value)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_llama_cpp_reports_its_context_window_under_a_different_name(
+    bootstrap_registry,
+):
+    # vLLM says max_model_len; llama.cpp says meta.n_ctx and nothing else.
+    # Reading only the first spelling made min_context_length unverifiable
+    # against llama.cpp — and an unread context length passes, it does not fail.
+    respx.get("http://localhost:8000/v1/models").mock(
+        return_value=httpx.Response(200, json={
+            "data": [{"id": "Qwen/Qwen3-8B-AWQ",
+                      "meta": {"n_ctx": 131072, "n_ctx_train": 262144}}]
+        })
+    )
+    respx.post("http://localhost:8000/v1/chat/completions").mock(
+        return_value=httpx.Response(200, json={
+            "choices": [{"message": {
+                "content": '{"text":"ok","citations":[],"evidence_ids":[]}'
+            }}]
+        })
+    )
+
+    result = await ModelInventoryProbe(bootstrap_registry).probe_role(
+        "response_generator"
+    )
+
+    # n_ctx, not n_ctx_train: what this process will serve, not what the weights
+    # could serve if it had been started differently.
+    assert result.max_model_len == 131072
+    assert result.available is True

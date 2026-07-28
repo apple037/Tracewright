@@ -51,6 +51,11 @@ class Settings(BaseSettings):
     # without it.
     tool_config_path: Path = Path("config/tools.yaml")
     legacy_turn_timeout_seconds: float = Field(default=60.0, gt=0, le=300)
+    # How long one model call may take. Generation speed is a property of the
+    # machine, not of this code: a 9B at 5 tokens/second needs minutes for a
+    # reply that a hosted model returns in seconds, and the failure looks
+    # identical to a broken model — UNEXPECTED_ERROR at exactly the limit.
+    model_timeout_seconds: float = Field(default=90.0, gt=0, le=1800)
     # How many earlier exchanges the assistant is shown. Higher remembers more
     # and costs more tokens; too high and small models lose the plot.
     history_turns: int = Field(default=8, ge=0, le=40)

@@ -1,6 +1,15 @@
-# Hybrid flow-check config: the remote MoE writes and judges the reply, the
-# local vLLM 8B does the cheap labelling steps, embeddings stay remote.
-# Select it with MODEL_CONFIG_PATH=config/models.remote.yaml. Not committed.
+# The remote gateway, every step. Select it with
+# MODEL_CONFIG_PATH=config/models.remote.yaml.
+#
+# This was a hybrid: the remote MoE wrote and judged the reply while a local
+# vLLM 8B did the cheap labelling steps. That 8B is no longer served, so the
+# labelling roles moved to the remote model too.
+#
+# A 9B was tried in the labelling seat twice and failed the same way both
+# times — served by Ollama, and again as a GGUF on llama.cpp
+# (config/models.qwen9b.yaml): it keeps generating until the token budget runs
+# out, so every structured call ends with finish_reason "length" and truncated
+# JSON. Raising max_tokens only makes it slower.
 mode: bootstrap
 promotion_semantic_mode: human_only
 disabled_roles:
@@ -12,37 +21,23 @@ endpoints:
     base_url_env: REMOTE_MODEL_BASE_URL
     api_key_env: REMOTE_MODEL_API_KEY
     max_concurrency: 6
-  local_vllm:
-    adapter: openai_compatible
-    base_url_env: LOCAL_VLLM_BASE_URL
-    api_key_env: LOCAL_VLLM_API_KEY
-    max_concurrency: 1
 profiles:
-  # Steps 7/8 — writes the reply and fact-checks it.
   remote_large:
     endpoint: remote_models
     model: qwen3.6:35b-a3b
     family: qwen
     capabilities: [chat, structured_json]
-    # Gateway fronts Ollama, which accepts json_schema and then ignores it.
-    structured_output: json_object
+    # This gateway does constrain sampling with the schema — checked, not
+    # assumed. With json_object it only sees "return JSON" and invents enum
+    # members: the very first classification came back with
+    # conversation_mode "greeting", which is not one of the seven allowed
+    # values, and every demo case then failed at dialogue_classifier in four
+    # seconds. Same prompt with json_schema validates first try.
+    structured_output: json_schema
     request_options: {reasoning_effort: none}
     temperature: 0.6
     max_tokens: 2560
     max_concurrency: 4
-  # Steps 1/6 — labelling and strategy. qwen3.5:9b was meant to sit here, but
-  # served by Ollama it keeps thinking: 100-280s per structured call and the
-  # answer still truncates. The local 8B on vLLM does the same job in ~9s.
-  local_generator:
-    endpoint: local_vllm
-    model: Qwen/Qwen3-8B-AWQ
-    family: qwen
-    capabilities: [chat, structured_json]
-    request_options: {reasoning_effort: low}
-    temperature: 0.2
-    max_tokens: 2560
-    min_context_length: 6144
-    max_concurrency: 1
   remote_embedding:
     endpoint: remote_models
     model: qwen3-embedding-0.6b
@@ -50,8 +45,8 @@ profiles:
     capabilities: [embedding]
     max_concurrency: 4
 roles:
-  dialogue_classifier: local_generator
-  strategy_advisor: local_generator
+  dialogue_classifier: remote_large
+  strategy_advisor: remote_large
   response_generator: remote_large
   response_judge: remote_large
   promotion_judge_primary: remote_large

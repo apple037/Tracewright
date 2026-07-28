@@ -1,0 +1,75 @@
+# Qwen3.5-9B on a llama.cpp server, every step.
+#
+# Select it with MODEL_CONFIG_PATH=config/models.qwen9b.yaml, and point
+# LOCAL_VLLM_BASE_URL at the server (:8001/v1 here; from a container that host
+# is host.docker.internal, not localhost).
+#
+# Probed from the running server before this file was written:
+#   id      unsloth/Qwen3.5-9B-GGUF:UD-Q4_K_XL   (the exact string /v1/models
+#                                                 returns — the inventory gate
+#                                                 does not fuzzy-match)
+#   n_ctx   131072                                (what the process serves;
+#                                                 n_ctx_train is 262144, which
+#                                                 is a property of the weights,
+#                                                 not a promise about this run)
+#   slots   1
+mode: bootstrap
+promotion_semantic_mode: human_only
+
+disabled_roles:
+  - response_judge_zh_verifier
+  - promotion_judge_secondary
+  # No embedding server here, and the demo retrieves from the knowledge base
+  # rather than from vectors, so nothing calls it.
+  - embedding
+
+endpoints:
+  local_llamacpp:
+    adapter: openai_compatible
+    base_url_env: LOCAL_VLLM_BASE_URL
+    api_key_env: LOCAL_VLLM_API_KEY
+    # One slot on the server. More concurrency here only makes requests queue
+    # somewhere less visible.
+    max_concurrency: 1
+
+profiles:
+  qwen9b:
+    endpoint: local_llamacpp
+    model: unsloth/Qwen3.5-9B-GGUF:UD-Q4_K_XL
+    family: qwen
+    capabilities: [chat, structured_json]
+    # llama.cpp enforces json_schema properly — it constrains sampling with the
+    # schema rather than accepting the field and ignoring it the way Ollama's
+    # /v1 does.
+    structured_output: json_schema
+    # Not optional on this model. Left on, one classification spent 900 tokens
+    # and 130 seconds thinking and never produced any content; with it off the
+    # same call answers in 3 seconds. The generator's own reasoning is not what
+    # the trace is for — the pipeline's decisions are.
+    request_options: {reasoning_effort: none}
+    temperature: 0
+    # Measured on this machine: 5.5 tokens/second, so max_tokens is a time
+    # budget as much as a length one — every 100 tokens is about 18 seconds.
+    #
+    # THIS MODEL DOES NOT PASS THE DEMO. Keep the file for reference, but expect
+    # to swap it out. Every Chinese case fails at response_generator: the model
+    # generates until the budget is gone instead of closing the object, so the
+    # call ends with finish_reason "length" and the truncated JSON surfaces as
+    # UNEXPECTED_ERROR, which says nothing about length. Raising 768 to 1536
+    # only doubled the time to fail (107s, then 213s) — the English replies that
+    # do succeed take 20-74 tokens, so this is not a budget that is slightly too
+    # small. config/models.remote.yaml documents the same failure on a 9B served
+    # by Ollama.
+    max_tokens: 1536
+    # Verified at startup against the server's reported n_ctx, and comfortably
+    # below it: readiness should fail if this model is ever restarted with a
+    # small context, because history and evidence both grow into it.
+    min_context_length: 32768
+    max_concurrency: 1
+
+roles:
+  dialogue_classifier: qwen9b
+  strategy_advisor: qwen9b
+  response_generator: qwen9b
+  response_judge: qwen9b
+  promotion_judge_primary: qwen9b

@@ -29,10 +29,14 @@ TOOL_TIMEOUT_DETAIL = {
     "status": "failed",
     "spans": [
         {"id": "s1", "node": "context_loader", "name": "context_loader",
-         "status": "completed", "attempt": 1, "error_code": None},
+         "status": "completed", "attempt": 1, "error_code": None,
+         "created_at": "2026-07-23T00:00:00Z", "finished_at": "2026-07-23T00:00:00.120Z"},
         {"id": "s2", "node": "evidence_collector", "name": "evidence_collector",
-         "status": "failed", "attempt": 1, "error_code": "TOOL_TIMEOUT"},
+         "status": "failed", "attempt": 1, "error_code": "TOOL_TIMEOUT",
+         "created_at": "2026-07-23T00:00:01Z", "finished_at": "2026-07-23T00:00:31Z"},
     ],
+    "created_at": "2026-07-23T00:00:00Z",
+    "finished_at": "2026-07-23T00:00:31Z",
     "events": [],
     "issue_summary": {
         "error_code": "TOOL_TIMEOUT", "failed_node": "evidence_collector",
@@ -502,3 +506,22 @@ def test_focus_survives_the_rerender_that_runs_while_a_turn_is_live(page, consol
     expect(completed).to_be_focused()
     page.keyboard.press("Enter")
     expect(completed).to_have_attribute("aria-expanded", "true")
+
+
+def test_each_step_shows_how_long_it_took(page, console_url):
+    # Which step spent the wall clock. The per-model-call timings are in the
+    # reasoning trail, but a slow node can be one long call or several short
+    # ones, and only the span says which node it was.
+    install_api_fixture(page, scenario="tool-timeout")
+    page.goto(console_url)
+    authenticate(page)
+    page.get_by_role("button", name="tool timeout trace").click()
+
+    expect(
+        page.locator('[data-node="context_loader"] .node-elapsed')
+    ).to_have_text("120 ms")
+    expect(
+        page.locator('[data-node="evidence_collector"] .node-elapsed')
+    ).to_have_text("30.0 s")
+    # And the turn total, next to the trace id.
+    expect(page.locator(".workspace-heading")).to_contain_text("31.0 s")

@@ -137,6 +137,7 @@ docker compose --profile demo run --rm demo-seed
 | `DATABASE_URL` | 不用 Docker 直接跑時。Compose 會自己提供，並忽略這個值。 |
 | `KNOWLEDGE_BASE_URL` | 要接真的知識庫，或不用 Docker 直接跑時（那時是 8000 port，不是 8080）。 |
 | `LOCAL_VLLM_BASE_URL`、`LOCAL_VLLM_API_KEY` | 模型設定檔裡有 profile 指向本機 vLLM 時。 |
+| `MODEL_TIMEOUT_SECONDS` | 模型很慢時。預設 90 秒適合託管模型；本機模型每秒只產生幾個 token 的話遠遠不夠，而且失敗會顯示成 `UNEXPECTED_ERROR`，不會說是逾時。 |
 
 ### 沒有特別理由就別動
 
